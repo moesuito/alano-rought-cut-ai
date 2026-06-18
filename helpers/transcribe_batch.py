@@ -100,7 +100,7 @@ def main() -> None:
             v = futures[fut]
             try:
                 out = fut.result()
-                print(f"  + {v.stem}  →  {out.name}")
+                print(f"  + {v.stem}  ->  {out.name}")
             except Exception as e:
                 errors.append((v, str(e)))
                 print(f"  x {v.stem}  FAILED: {e}")

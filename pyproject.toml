@@ -6,14 +6,9 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "requests",
-    "librosa",
-    "matplotlib",
     "pillow",
     "numpy",
 ]
-
-[project.optional-dependencies]
-animations = ["manim"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

@@ -124,7 +124,7 @@ def group_into_phrases(
 
 def pack_one_file(json_path: Path, silence_threshold: float) -> tuple[str, float, list[dict]]:
     """Return (header_name, duration, phrases) for one transcript file."""
-    data = json.loads(json_path.read_text())
+    data = json.loads(json_path.read_text(encoding="utf-8"))
     words = data.get("words", [])
     phrases = group_into_phrases(words, silence_threshold)
     if phrases:
@@ -197,7 +197,7 @@ def main() -> None:
     total_phrases = sum(len(e[2]) for e in entries)
     total_duration = sum(e[1] for e in entries)
     kb = out_path.stat().st_size / 1024
-    print(f"packed {len(entries)} transcripts → {out_path}")
+    print(f"packed {len(entries)} transcripts -> {out_path}")
     print(f"  {total_phrases} phrases, {format_duration(total_duration)} total runtime")
     print(f"  {kb:.1f} KB")
 
