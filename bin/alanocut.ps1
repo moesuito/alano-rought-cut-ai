@@ -153,7 +153,7 @@ if ($SubCommand -eq "init") {
     }
 
     # 2. Copy skill and configuration files
-    $FilesToCopy = @("SKILL.md", "install.md", "pyproject.toml", ".gitignore", ".env.example", "config.json")
+    $FilesToCopy = @("SKILL.md", "install.md", "pyproject.toml", ".gitignore", "config.json")
     foreach ($File in $FilesToCopy) {
         $Src = Join-Path $InstallRoot $File
         if (Test-Path $Src) {
@@ -172,13 +172,17 @@ if ($SubCommand -eq "init") {
     # 4. Copy .env if not exists (preferring the global configured one)
     $EnvFile = Join-Path $CurrentDir ".env"
     $GlobalEnv = Join-Path $InstallRoot ".env"
+    $EnvConfigured = $false
     if (!(Test-Path $EnvFile)) {
         if (Test-Path $GlobalEnv) {
             Copy-Item -Path $GlobalEnv -Destination $EnvFile -Force
             Write-Host "  -> Copied configured .env file from global install" -ForegroundColor Gray
-        } elseif (Test-Path (Join-Path $InstallRoot ".env.example")) {
-            Copy-Item -Path (Join-Path $InstallRoot ".env.example") -Destination $EnvFile -Force
-            Write-Host "  -> Created template .env file" -ForegroundColor Gray
+            $EnvConfigured = $true
+        }
+    } else {
+        $LocalEnvContent = Get-Content $EnvFile
+        if ($LocalEnvContent -match "ELEVENLABS_API_KEY=.+") {
+            $EnvConfigured = $true
         }
     }
 
@@ -198,8 +202,12 @@ if ($SubCommand -eq "init") {
     Write-Host " Workspace: $CurrentDir" -ForegroundColor Cyan
     Write-Host " Next Steps:" -ForegroundColor White
     Write-Host "   1. Put your raw files inside 'raw_video/'" -ForegroundColor White
-    Write-Host "   2. Configure your ELEVENLABS_API_KEY in the '.env' file" -ForegroundColor White
-    Write-Host "   3. Open your AI agent (claude, etc.) and type: 'edit these clips'" -ForegroundColor White
+    if ($EnvConfigured) {
+        Write-Host "   2. Open your AI agent (claude, etc.) and type: 'edit these clips'" -ForegroundColor White
+    } else {
+        Write-Host "   2. Configure your ELEVENLABS_API_KEY in the '.env' file" -ForegroundColor White
+        Write-Host "   3. Open your AI agent (claude, etc.) and type: 'edit these clips'" -ForegroundColor White
+    }
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
 }
