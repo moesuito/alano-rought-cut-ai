@@ -31,19 +31,37 @@ SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
 def load_api_key() -> str:
-    for candidate in [Path(__file__).resolve().parent.parent / ".env", Path(".env")]:
+    # 1. Check OS environment variable first
+    v = os.environ.get("ELEVENLABS_API_KEY", "")
+    if v:
+        return v
+        
+    # 2. Check upwards from the current working directory for a .env file
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        candidate = parent / ".env"
         if candidate.exists():
-            for line in candidate.read_text().splitlines():
+            for line in candidate.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
                 if k.strip() == "ELEVENLABS_API_KEY":
                     return v.strip().strip('"').strip("'")
-    v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not v:
-        sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
-    return v
+                    
+    # 3. Check the global installation directory .env (where transcribe.py lives)
+    global_env = Path(__file__).resolve().parent.parent / ".env"
+    if global_env.exists():
+        for line in global_env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == "ELEVENLABS_API_KEY":
+                return v.strip().strip('"').strip("'")
+                
+    sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
+
 
 
 def extract_audio(video_path: Path, dest: Path) -> None:
