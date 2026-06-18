@@ -89,7 +89,7 @@ function Update-System {
     New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
     
     try {
-        gh release download $LatestTag -R moesuito/alano-rought-cut-ai --archive=zip --output-dir $TempDir
+        gh release download $LatestTag -R moesuito/alano-rought-cut-ai --archive=zip --dir $TempDir
         $ZipFile = Get-ChildItem -Path $TempDir -Filter "*.zip" | Select-Object -First 1
         if (!$ZipFile) { throw "Failed to download release zip" }
         

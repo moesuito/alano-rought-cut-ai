@@ -55,7 +55,7 @@ if ($LatestTag) {
     
     try {
         Write-Host "Downloading release archive..." -ForegroundColor Cyan
-        gh release download $LatestTag -R moesuito/alano-rought-cut-ai --archive=zip --output-dir $TempDir
+        gh release download $LatestTag -R moesuito/alano-rought-cut-ai --archive=zip --dir $TempDir
         
         $ZipFile = Get-ChildItem -Path $TempDir -Filter "*.zip" | Select-Object -First 1
         if (!$ZipFile) {
