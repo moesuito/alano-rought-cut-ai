@@ -64,13 +64,19 @@ if ($SubCommand -eq "init") {
     New-Item -ItemType Directory -Path $EditDir -Force -ErrorAction SilentlyContinue | Out-Null
     Write-Host "  -> Created raw_video/ and raw_video/edit/ folders" -ForegroundColor Gray
 
-    # 4. Copy .env if not exists
+    # 4. Copy .env if not exists (preferring the global configured one)
     $EnvFile = Join-Path $CurrentDir ".env"
-    $EnvExample = Join-Path $CurrentDir ".env.example"
-    if (!(Test-Path $EnvFile) -and (Test-Path $EnvExample)) {
-        Copy-Item -Path $EnvExample -Destination $EnvFile -Force
-        Write-Host "  -> Created template .env file" -ForegroundColor Gray
+    $GlobalEnv = Join-Path $InstallRoot ".env"
+    if (!(Test-Path $EnvFile)) {
+        if (Test-Path $GlobalEnv) {
+            Copy-Item -Path $GlobalEnv -Destination $EnvFile -Force
+            Write-Host "  -> Copied configured .env file from global install" -ForegroundColor Gray
+        } elseif (Test-Path (Join-Path $InstallRoot ".env.example")) {
+            Copy-Item -Path (Join-Path $InstallRoot ".env.example") -Destination $EnvFile -Force
+            Write-Host "  -> Created template .env file" -ForegroundColor Gray
+        }
     }
+
 
     # 5. Register junctions
     $ClaudeLink = Join-Path $Home ".claude\skills\video-use"

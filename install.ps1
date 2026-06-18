@@ -63,7 +63,38 @@ $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
 Write-Host "Installing dependencies..." -ForegroundColor Cyan
 & $PipPath install -e $InstallDir
 
-# 4. Expose CLI to PATH
+# 4. Prompt for ElevenLabs API Key
+$EnvPath = Join-Path $InstallDir ".env"
+$HasKey = $false
+if (Test-Path $EnvPath) {
+    $EnvContent = Get-Content $EnvPath
+    if ($EnvContent -match "ELEVENLABS_API_KEY=.+") {
+        $HasKey = $true
+    }
+}
+
+if (!$HasKey) {
+    Write-Host ""
+    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+    Write-Host "   Configurando a API Key do ElevenLabs (Transcricao)    " -ForegroundColor Yellow
+    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+    Write-Host "Você pode encontrar ou gerar suas chaves em:" -ForegroundColor Gray
+    Write-Host "  https://elevenlabs.io/app/settings/api-keys" -ForegroundColor Gray
+    Write-Host ""
+    $ApiKey = Read-Host "Cole a sua ElevenLabs API Key aqui"
+    if (![string]::IsNullOrEmpty($ApiKey)) {
+        "ELEVENLABS_API_KEY=$ApiKey" | Out-File -FilePath $EnvPath -Encoding utf8 -Force
+        Write-Host "  -> Chave salva com sucesso em $EnvPath!" -ForegroundColor Green
+    } else {
+        Write-Host "Nenhuma chave inserida. Voce podera configurar o arquivo .env manualmente depois." -ForegroundColor Red
+    }
+    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Host "Chave API do ElevenLabs já configurada em $EnvPath." -ForegroundColor Green
+}
+
+# 5. Expose CLI to PATH
 $BinDir = Join-Path $InstallDir "bin"
 Write-Host "Adding $BinDir to PATH..." -ForegroundColor Cyan
 
@@ -79,7 +110,7 @@ if ($PathList -notcontains $BinDir) {
     Write-Host "Path is already configured." -ForegroundColor Gray
 }
 
-# 5. Done
+# 6. Done
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "          Installation Completed Successfully!            " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
