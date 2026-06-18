@@ -1,8 +1,5 @@
-<p align="center">
-  <img src="static/video-use-banner.png" alt="alano-rought-cut-ai" width="100%">
-</p>
-
 # alano-rought-cut-ai
+
 
 Introducing **alano-rought-cut-ai** — a specialized AI assistant skill for rough video cutting and Adobe Premiere Pro timeline XML export.
 
