@@ -18,45 +18,34 @@ This repository is a customized fork of the open-source [video-use](https://gith
 - **Renders quick, lightweight preview videos** for visual/audio boundary checks.
 - **Persists session memory** in `project.md` so editing sessions can resume seamlessly.
 
-## Setup prompt
+## Installation (Windows PowerShell)
 
-Paste into Gemini, Claude Code, or any agent with shell access:
+Install the assistant and the global CLI utility `alanocut` by running the following command in PowerShell:
 
-```text
-Set up https://github.com/Alano/alano-rought-cut-ai for me.
-
-Read install.md first to install this repo, wire up ffmpeg, register the skill with whichever agent you're running under, and set up the ElevenLabs API key — ask me to paste it when you need it. Then read SKILL.md for daily usage, and always read helpers/ because that's where the editing scripts live. After install, don't transcribe anything on your own — just tell me it's ready and wait for me to drop footage into a folder.
+```powershell
+irm https://raw.githubusercontent.com/moesuito/alano-rought-cut-ai/main/install.ps1 | iex
 ```
 
-The agent handles dependencies, skill registration, and prompts you once for your ElevenLabs API key (obtainable at [elevenlabs.io/app/settings/api-keys](https://elevenlabs.io/app/settings/api-keys)).
+*Note: Restart your terminal/IDE after installation to load the updated `PATH` environment variables.*
 
-Then point your agent at a folder of raw footage:
+## How to use (`alanocut init`)
 
-```bash
-cd /path/to/your/videos
-claude    # or codex, hermes, gemini, etc.
+Instead of cloning and registering the skill manually for each project, navigate to the folder containing your raw videos and run:
+
+```powershell
+alanocut init
 ```
 
-And command:
+This will:
+1. Initialize the directory structure (`raw_video/` and `raw_video/edit/`).
+2. Copy the helper scripts and editing skill rules into your directory.
+3. Automatically register the editing skill for Claude Code (`~/.claude/skills/video-use`) and Gemini (`~/.gemini/config/skills/video-use`) pointing to your current folder.
 
-> edit these into a rough cut
+After running `init`:
+1. Drop your raw video files inside `raw_video/`.
+2. Configure your `ELEVENLABS_API_KEY` in the generated `.env` file.
+3. Open your AI agent (like Claude Code or Gemini) in the directory and say: *"edit these clips"* or *"make a rough cut"*.
 
-It inventories the sources, proposes a strategy, waits for your approval, and outputs the `edit/timeline.xml` timeline to import into Premiere Pro.
-
-## Manual install
-
-If you'd rather do it by hand:
-
-```bash
-# 1. Clone and symlink into your agent's skills directory
-git clone https://github.com/Alano/alano-rought-cut-ai ~/Developer/alano-rought-cut-ai
-ln -sfn ~/Developer/alano-rought-cut-ai ~/.claude/skills/video-use        # Claude Code
-
-# 2. Install deps
-cd ~/Developer/alano-rought-cut-ai
-uv sync                         # or: pip install -e .
-winget install FFmpeg           # Windows
-```
 
 ## How it works
 

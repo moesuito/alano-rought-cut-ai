@@ -1,90 +1,73 @@
-# alano-rought-cut-ai install (Rough Cut Specialist)
+# Instalando o Alano Rough Cut AI
 
-Use this file only for first-time install or reconnect. For daily editing, read `SKILL.md`. Always read `helpers/` — that's where the scripts live.
+Esta documentação explica como instalar o assistente de corte bruto e exportação XML e configurar o comando global `alanocut` no Windows.
 
-## What you're doing
+---
 
-You're setting up a conversation-driven rough cut video editor for the user. After install, the user drops raw footage into any folder, runs their agent (`claude`, `codex`, etc.) there, and says "edit these clips into a rough cut." The agent does the rest by reading `SKILL.md` and exporting a Final Cut Pro 7 XML timeline for Adobe Premiere Pro.
+## Pré-requisitos
 
-Three things must exist on this machine:
+1. **Git** instalado e configurado no PATH do sistema.
+2. **Python 3.10 ou superior** instalado e configurado no PATH do sistema.
+3. Um terminal com privilégios de usuário normais (não requer administrador).
 
-1. The `alano-rought-cut-ai` repo cloned somewhere stable.
-2. `ffmpeg` and `ffprobe` on `$PATH` (plus optional `yt-dlp` for online sources).
-3. An ElevenLabs API key in `.env` at the repo root (for Scribe transcription).
+---
 
-And one thing must be true about the current agent:
+## Como Instalar (PowerShell)
 
-4. It can discover `SKILL.md` — either via a global skills directory or via system-prompt imports.
+Para instalar o assistente automaticamente no diretório `%APPDATA%\alano-rought-cut-ai` e configurar as variáveis de ambiente, abra o PowerShell e execute o comando abaixo (garantindo que você tenha acesso ao repositório privado):
 
-## Steps
+### Opção 1: Via Download Direto do Repositório (Mais simples se já autenticado)
 
-### 1. Clone to a stable path
-
-```bash
-test -d ~/Developer/alano-rought-cut-ai || git clone https://github.com/Alano/alano-rought-cut-ai ~/Developer/alano-rought-cut-ai
-cd ~/Developer/alano-rought-cut-ai
+```powershell
+irm https://raw.githubusercontent.com/moesuito/alano-rought-cut-ai/main/install.ps1 | iex
 ```
 
-If the repo is already there, `git pull --ff-only` and continue.
+*Nota: Se o terminal reclamar de política de execução, você pode habilitar temporariamente rodando `Set-ExecutionPolicy Bypass -Scope Process` antes de rodar o instalador.*
 
-### 2. Install Python deps
+### Opção 2: Execução Local (Caso tenha clonado manualmente)
 
-```bash
-# Prefer uv if available; fall back to pip.
-command -v uv >/dev/null && uv sync || pip install -e .
+Se você já clonou este repositório para a sua máquina, navegue até a pasta e execute o script localmente:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-`pyproject.toml` lists `requests`, `pillow`, `numpy`.
+O instalador fará o seguinte:
+1. Copiará ou clonará a versão mais recente do projeto para `%APPDATA%\alano-rought-cut-ai`.
+2. Criará o ambiente virtual Python (`.venv`) e instalará as dependências do `pyproject.toml`.
+3. Criará os executáveis no diretório `bin/`.
+4. Adicionará o diretório `bin/` nas variáveis de ambiente `PATH` do usuário.
 
-### 3. Install ffmpeg
+**Importante:** Após a instalação terminar, reinicie o terminal ou a sua IDE (VS Code, Cursor, etc.) para que as alterações no `PATH` sejam aplicadas.
 
-`ffmpeg` and `ffprobe` are hard requirements.
+---
 
-```bash
-# macOS
-command -v ffmpeg >/dev/null || brew install ffmpeg
+## Como Utilizar (`alanocut init`)
 
-# Windows (Powershell)
-# winget install FFmpeg
+Uma vez instalado e configurado no `PATH`, você não precisa copiar manualmente nenhum script ou skill de IA quando for começar a trabalhar em um novo vídeo.
+
+Basta abrir o terminal na pasta onde estão seus arquivos brutos de vídeo e rodar:
+
+```powershell
+alanocut init
 ```
 
-### 4. Register the skill with the current agent
+Esse comando inicializará a workspace configurando a seguinte estrutura:
 
-Symlink the whole repo directory to your agent's skills directory under the name `video-use`.
-
-- **Claude Code** (`~/.claude/` present):
-    ```bash
-    mkdir -p ~/.claude/skills
-    ln -sfn ~/Developer/alano-rought-cut-ai ~/.claude/skills/video-use
-    ```
-
-- **Antigravity / Gemini / other agent with a skills directory**: Symlink the path to the skills folder.
-
-### 5. ElevenLabs API key
-
-1. Check existing state:
-    ```bash
-    [ -n "$ELEVENLABS_API_KEY" ] && echo "env"
-    grep -q '^ELEVENLABS_API_KEY=..' ~/Developer/alano-rought-cut-ai/.env 2>/dev/null && echo "dotenv"
-    ```
-
-2. If neither is set, write it to `.env` at the repo root:
-    ```bash
-    printf 'ELEVENLABS_API_KEY=%s\n' "$KEY" > ~/Developer/alano-rought-cut-ai/.env
-    chmod 600 ~/Developer/alano-rought-cut-ai/.env
-    ```
-
-### 6. Verify end-to-end
-
-Run one real command to verify:
-```bash
-python ~/Developer/alano-rought-cut-ai/helpers/timeline_view.py --help >/dev/null && echo "helpers OK"
-ffprobe -version | head -1
+```
+<pasta_do_seu_projeto>/
+├── raw_video/             <-- Jogue seus arquivos brutos aqui
+│   └── edit/
+├── helpers/               <-- Scripts auxiliares para corte
+├── .env                   <-- Configure sua ElevenLabs API Key aqui
+├── .gitignore
+├── install.md
+└── SKILL.md
 ```
 
-### 7. Hand off
+Além de criar a estrutura de arquivos e pastas, o comando `alanocut init` registrará e apontará a Skill de IA do Claude Code (`~/.claude/skills/video-use`) e Gemini (`~/.gemini/config/skills/video-use`) automaticamente para esta pasta atual.
 
-Tell the user:
-- Where the skill is installed.
-- To `cd` into their footage folder and start editing.
-- All outputs land in `<videos_dir>/edit/` — the repo stays clean.
+### Próximos Passos:
+1. Adicione a sua chave no arquivo `.env` gerado: `ELEVENLABS_API_KEY=...`.
+2. Jogue seus arquivos de vídeo na pasta `raw_video/`.
+3. Abra seu agente de IA (como `claude` ou `gemini`) no diretório do projeto e dê o comando de edição: *"Corte este vídeo bruto"* ou *"Inicializar edição"*.
