@@ -9,8 +9,17 @@ Write-Host "==========================================================" -Foregro
 # 1. Prerequisites Check
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 
-if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Error "Git is not installed or not in PATH. Please install Git and try again."
+if (!(Get-Command gh -ErrorAction SilentlyContinue)) {
+    Write-Error "GitHub CLI (gh) is not installed or not in PATH. Please install gh and try again."
+    exit 1
+}
+
+# Verify gh is authenticated
+$AuthStatus = gh auth status 2>&1
+if ($AuthStatus -match "Logged in to github.com") {
+    Write-Host "  -> GitHub CLI authenticated." -ForegroundColor Green
+} else {
+    Write-Error "GitHub CLI (gh) is not logged in. Please run 'gh auth login' and try again."
     exit 1
 }
 
@@ -19,36 +28,89 @@ if (!(Get-Command python -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# 2. Setup directory
 $InstallDir = Join-Path $env:APPDATA "alano-rought-cut-ai"
 Write-Host "Target installation path: $InstallDir" -ForegroundColor White
 
-if (Test-Path $InstallDir) {
-    Write-Host "Destination folder already exists. Updating..." -ForegroundColor Cyan
-    if (Test-Path (Join-Path $InstallDir ".git")) {
-        Push-Location $InstallDir
-        try {
-            git pull --ff-only
+# 2. Get latest release or fallback
+Write-Host "Checking for the latest release on GitHub..." -ForegroundColor Cyan
+
+$LatestTag = $null
+try {
+    $TagName = (gh release view -R moesuito/alano-rought-cut-ai --json tagName --jq .tagName 2>$null)
+    if ($TagName -match "v\d+\.\d+\.\d+") {
+        $LatestTag = $TagName.Trim()
+    }
+} catch {
+    # No release or error
+}
+
+if ($LatestTag) {
+    Write-Host "Latest release found: $LatestTag" -ForegroundColor Green
+    
+    # Create temp directory
+    $TempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())
+    $TempExtractDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
+    
+    try {
+        Write-Host "Downloading release archive..." -ForegroundColor Cyan
+        gh release download $LatestTag -R moesuito/alano-rought-cut-ai --archive=zip --output-dir $TempDir
+        
+        $ZipFile = Get-ChildItem -Path $TempDir -Filter "*.zip" | Select-Object -First 1
+        if (!$ZipFile) {
+            throw "Failed to download release zip"
         }
-        catch {
-            Write-Host "Git pull failed. Re-cloning repository..." -ForegroundColor Yellow
-            Pop-Location
+        
+        Write-Host "Extracting files..." -ForegroundColor Cyan
+        Expand-Archive -Path $ZipFile.FullName -DestinationPath $TempExtractDir -Force
+        
+        $SubDir = Get-ChildItem -Path $TempExtractDir -Directory | Select-Object -First 1
+        if (!$SubDir) {
+            throw "No directory found in extracted archive"
+        }
+        
+        # Clean target directory preserving .env and .venv
+        if (!(Test-Path $InstallDir)) {
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        } else {
+            Get-ChildItem -Path $InstallDir | Where-Object { $_.Name -ne ".venv" -and $_.Name -ne ".env" } | Remove-Item -Recurse -Force
+        }
+        
+        # Copy to installation folder
+        Get-ChildItem -Path $SubDir.FullName | Copy-Item -Destination $InstallDir -Recurse -Force
+    }
+    finally {
+        # Cleanup temp
+        Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $TempExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+else {
+    Write-Host "No release found on GitHub. Falling back to git clone of main branch..." -ForegroundColor Yellow
+    if (Test-Path $InstallDir) {
+        if (Test-Path (Join-Path $InstallDir ".git")) {
+            Push-Location $InstallDir
+            try {
+                git pull --ff-only
+            }
+            catch {
+                Pop-Location
+                Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+                git clone https://github.com/moesuito/alano-rought-cut-ai.git $InstallDir
+            }
+            finally {
+                if ((Get-Location).Path -eq $InstallDir) {
+                    Pop-Location
+                }
+            }
+        } else {
             Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
             git clone https://github.com/moesuito/alano-rought-cut-ai.git $InstallDir
         }
-        finally {
-            if ((Get-Location).Path -eq $InstallDir) {
-                Pop-Location
-            }
-        }
     } else {
-        Write-Host "Existing folder is not a git repository. Re-cloning..." -ForegroundColor Yellow
-        Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
         git clone https://github.com/moesuito/alano-rought-cut-ai.git $InstallDir
     }
-} else {
-    Write-Host "Cloning repository..." -ForegroundColor Cyan
-    git clone https://github.com/moesuito/alano-rought-cut-ai.git $InstallDir
 }
 
 # 3. Setup Virtual Environment
