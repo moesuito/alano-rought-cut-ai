@@ -41,7 +41,7 @@ def load_api_key() -> str:
     for parent in [current] + list(current.parents):
         candidate = parent / ".env"
         if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8").splitlines():
+            for line in candidate.read_text(encoding="utf-8-sig").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -52,7 +52,7 @@ def load_api_key() -> str:
     # 3. Check the global installation directory .env (where transcribe.py lives)
     global_env = Path(__file__).resolve().parent.parent / ".env"
     if global_env.exists():
-        for line in global_env.read_text(encoding="utf-8").splitlines():
+        for line in global_env.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue

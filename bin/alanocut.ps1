@@ -153,7 +153,7 @@ if ($SubCommand -eq "init") {
     }
 
     # 2. Copy skill and configuration files
-    $FilesToCopy = @("SKILL.md", "install.md", "pyproject.toml", ".gitignore", "config.json")
+    $FilesToCopy = @("SKILL.md", "pyproject.toml", ".gitignore", "config.json")
     foreach ($File in $FilesToCopy) {
         $Src = Join-Path $InstallRoot $File
         if (Test-Path $Src) {
@@ -194,6 +194,33 @@ if ($SubCommand -eq "init") {
     $GeminiLink = Join-Path $Home ".gemini\config\skills\video-use"
     Create-Junction -LinkPath $GeminiLink -TargetDir $CurrentDir
     Write-Host "  -> Linked skill with Antigravity / Gemini" -ForegroundColor Gray
+
+    # 6. Setup local virtual environment inside the workspace
+    $VenvDir = Join-Path $CurrentDir ".venv"
+    Write-Host "Setting up Python virtual environment in $VenvDir..." -ForegroundColor Cyan
+    if (!(Test-Path $VenvDir)) {
+        try {
+            python -m venv $VenvDir
+            Write-Host "  -> Created virtual environment (.venv)" -ForegroundColor Gray
+        } catch {
+            Write-Error "Failed to create virtual environment: $_"
+        }
+    } else {
+        Write-Host "  -> Virtual environment (.venv) already exists" -ForegroundColor Gray
+    }
+
+    $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
+    if (Test-Path $PipPath) {
+        Write-Host "Installing dependencies in workspace..." -ForegroundColor Cyan
+        try {
+            & $PipPath install -e $CurrentDir | Out-Null
+            Write-Host "  -> Dependencies installed successfully!" -ForegroundColor Gray
+        } catch {
+            Write-Error "Failed to install dependencies: $_"
+        }
+    } else {
+        Write-Error "Could not find pip in virtual environment at $PipPath"
+    }
 
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
