@@ -9,8 +9,8 @@ description: Specialist in video rough cut. Analyze raw footage, transcribe spee
 
 1. **LLM reasons from raw transcript + on-demand visuals.** The primary reading view is the packed phrase-level transcript (`takes_packed.md`). Everything else — filler tagging, retake detection, best take selection — you derive at decision time.
 2. **Audio is primary, visuals follow.** Cut candidates come from speech boundaries and silence gaps. Drill into visuals only at decision points.
-3. **Ask -> confirm -> execute -> iterate -> persist.** Never touch the cut until the user has confirmed the strategy in plain English (or Portuguese, as the user prefers).
-4. **Generalize.** Look at the footage, identify the takes, align with the user, then construct the timeline.
+3. **Autonomy.** You are completely autonomous in your creative and technical decisions. Analyze the transcript, determine what takes to keep, identify mistakes, false starts, and filler words to remove, and formulate a cohesive cut strategy.
+4. **Generalize.** Look at the footage, identify the takes, select the best ones, and build the timeline without stopping to ask for user input.
 5. **Verify your own output.** Generating the timeline XML is the goal, but you must render a quick preview video to run `timeline_view.py` and inspect cut boundaries (ensuring fades work and no audio pops exist).
 
 ## Hard Rules (production correctness — non-negotiable)
@@ -24,7 +24,7 @@ These rules prevent pops, sync issues, and import failures in Adobe Premiere Pro
 5. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms — padding absorbs the drift. Tight for fast-paced, loose for natural pacing.
 6. **Word-level verbatim ASR only.** Do not use phrase-level mode or normalized fillers; sub-second gap data is critical for editing.
 7. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
-8. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plan.
+8. **Autonomous Execution.** Do not block execution, halt, or prompt the user for confirmation on your edit decisions, take selections, or narrative strategy. Go straight from transcription to EDL generation and XML output.
 9. **Export XML with a single stereo audio track.** In the FCP 7 XML, define only a single audio track (`A1`) mapping to the source stereo track. This prevents Adobe Premiere Pro from duplicating the track into separate L/R mono tracks.
 10. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `alano-rought-cut-ai/` project directory.
 
@@ -67,8 +67,8 @@ All helpers reside in the `helpers/` folder:
 
 1. **Inventory.** Probed files using `ffprobe`. Run `transcribe_batch.py` and compile `takes_packed.md` using `pack_transcripts.py`.
 2. **Pre-scan.** Read `takes_packed.md`, list false starts, mistakes, and filler words to omit.
-3. **Converse.** Speak in the user's preferred language (Portuguese/English). Propose taking choices, must-cut parts, and narrative direction.
-4. **Propose strategy.** Describe the cut sequence in 4-8 sentences. **Wait for approval.**
+3. **Formulate Strategy.** Choose the best takes, decide which parts are mistakes/slips that must be cut, and establish the sequencing logic.
+4. **Log Decisions.** Document your narrative flow and take selection strategy in the project memory (`edit/project.md`) before generating the final cuts. Do not wait for user approval.
 5. **Execute.** Create `edl.json`.
 6. **Preview.** Render a quick preview to check cut points:
    ```bash
@@ -88,6 +88,9 @@ All helpers reside in the `helpers/` folder:
 - **Speaker handoffs.** Add padding between speaker turns (400-600ms is a common range).
 - **Silence gaps.** Silences >= 400ms are the cleanest targets. Gaps < 150ms are unsafe to cut within.
 - **Padding.** Always apply 30-200ms padding around cut boundaries (e.g., 50ms before the first word, 80ms after the last) to cushion ASR timestamp drift.
+- **Multi-Take & Retake Handling.** Speakers often repeat sentences or record a better version (like the hook or intro) at the end of the file. Identify repetitions, false starts, and duplicates. Compare their context (even if durations or exact phrasing differ). The latest take is usually the best one. Replace early attempts with the best take and arrange them in the proper sequence.
+- **Narrative Condensation.** When editing testimonials or interview-style footage, respect the brief and target duration (e.g., cutting a 5-minute raw down to a 1.5-minute limit). Aggressively prune filler words, tangents, and explanations, keeping only the core message.
+- **Rough Cut Goal (Pacing and Cadence).** Maintain a natural cadence (neither too fast nor too slow). The goal is to provide a solid, structured rough cut that saves time for the human editor. The editor should spend 10 minutes refining the cut rather than 1 hour editing from scratch.
 
 ## The Packed Transcript (Primary Reading View)
 
@@ -113,7 +116,10 @@ RULES:
   - Start/end times must fall on word boundaries.
   - Pad cut boundaries (working window 30–200ms).
   - Prefer silences >= 400ms.
-  - Unavoidable slips are kept if no better take exists.
+  - Identify and resolve retakes: look for repeated phrasing or sentences, and especially hook/intro re-recordings that might appear at the end of the file. Select the best take (usually the last one) and position it chronologically.
+  - Condense narrative to target runtime: prioritize high-impact parts, cutting tangents and fillers.
+  - Maintain a good natural cadence and pacing.
+  - Output a rough cut that acts as a timesaver for a human editor (enabling a 10-minute final polish).
 
 OUTPUT (JSON array, no prose):
   [{"source": "C0103", "start": 2.42, "end": 6.85, "beat": "HOOK", "quote": "...", "reason": "..."}]
@@ -158,5 +164,5 @@ Append one section per session at `<edit>/project.md`:
 - **Adding overlays, color grading, or subtitles.** This repository is exclusively for rough cutting and timeline XML export.
 - **Whisper phrase-level or normalized transcription. Always use verbatim word-level.**
 - **Hard audio cuts.** Always apply 30ms fades.
-- **Editing before confirming strategy.** Never.
+- **Halting or asking the user for confirmation/input during the editing process.** Operate autonomously and deliver the final `timeline.xml` in one execution pass.
 - **Re-transcribing cached sources.**
