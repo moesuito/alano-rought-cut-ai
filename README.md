@@ -8,6 +8,8 @@ This repository is a customized fork of the open-source [video-use](https://gith
 ## What it does
 
 - **Identifies and cuts out filler words** (`umm`, `uh`, false starts) and dead space between takes.
+- **Infers the video type and rough-cut structure** from the transcript before editing, instead of assuming a fixed format.
+- **Compares repeated takes by meaning and delivery**, choosing the best version of each narrative beat.
 - **Snaps cuts to word boundaries** and silence gaps using sub-second ASR timestamps.
 - **Bakes in 30ms audio fades** at every segment boundary to prevent clicks and pops in the timeline.
 - **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro 2026**.
@@ -41,7 +43,8 @@ This will:
 After running `init`:
 1. Drop your raw video files inside `raw_video/`.
 2. Configure your `ELEVENLABS_API_KEY` in the generated `.env` file.
-3. Open your AI agent (like Claude Code or Gemini) in the directory and say: *"edit these clips"* or *"make a rough cut"*.
+3. Optionally add editing context in `raw_video/edit/USER_BRIEF.md` (target duration, audience, must keep/cut, pacing).
+4. Open your AI agent (like Claude Code or Gemini) in the directory and say: *"edit these clips"* or *"make a rough cut"*.
 
 
 ## How it works
