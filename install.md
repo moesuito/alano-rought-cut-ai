@@ -59,10 +59,11 @@ Esse comando inicializará a workspace configurando a seguinte estrutura:
 ├── raw_video/             <-- Jogue seus arquivos brutos aqui
 │   └── edit/
 ├── helpers/               <-- Scripts auxiliares para corte
+├── .agents/               <-- Instruções modulares por etapa
 ├── .env                   <-- Configure sua ElevenLabs API Key aqui
 ├── .gitignore
-├── install.md
-└── SKILL.md
+├── AGENTS.md              <-- Leia este arquivo primeiro
+└── SKILL.md               <-- Stub de compatibilidade
 ```
 
 Além de criar a estrutura de arquivos e pastas, o comando `alanocut init` registrará e apontará a Skill de IA do Claude Code (`~/.claude/skills/video-use`) e Gemini (`~/.gemini/config/skills/video-use`) automaticamente para esta pasta atual.
@@ -70,4 +71,4 @@ Além de criar a estrutura de arquivos e pastas, o comando `alanocut init` regis
 ### Próximos Passos:
 1. Adicione a sua chave no arquivo `.env` gerado: `ELEVENLABS_API_KEY=...`.
 2. Jogue seus arquivos de vídeo na pasta `raw_video/`.
-3. Abra seu agente de IA (como `claude` ou `gemini`) no diretório do projeto e dê o comando de edição: *"Corte este vídeo bruto"* ou *"Inicializar edição"*.
+3. Abra seu agente de IA (como `claude` ou `gemini`) no diretório do projeto, leia `AGENTS.md`, e dê o comando de edição: *"Corte este vídeo bruto"* ou *"Inicializar edição"*.
