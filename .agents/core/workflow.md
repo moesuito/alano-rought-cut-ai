@@ -62,6 +62,7 @@ Inputs:
 
 Outputs:
 - updated `edit/run_state.md` with inferred type, objective, target runtime, and uncertainty level
+- XML timeline naming fields in `edit/run_state.md`
 
 Next:
 - Step 05 editorial strategy
@@ -97,6 +98,7 @@ Inputs:
 Outputs:
 - `edit/edl.json`
 - updated `edit/run_state.md`
+- `metadata.timeline_name` inside `edit/edl.json`
 
 Next:
 - Step 07 runtime revision
@@ -148,7 +150,7 @@ Inputs:
 Outputs:
 - `edit/timeline.xml`
 - optional imported EDL from `helpers/fcpxml_to_edl.py` when validating a human/editor correction XML
-- updated `edit/run_state.md`
+- updated `edit/run_state.md` with XML path and timeline name
 
 Next:
 - Step 10 persist memory

@@ -167,6 +167,7 @@ def convert_xml_to_edl(xml_path: Path, output_path: Path, media_root: Path | Non
         "total_duration_s": total,
         "metadata": {
             "source_xml": str(xml_path),
+            "timeline_name": sequence.findtext("name"),
             "sequence_fps": round(seq_fps, 6),
             "range_count": len(ranges),
         },

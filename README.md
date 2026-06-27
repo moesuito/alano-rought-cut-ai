@@ -17,6 +17,7 @@ The agent instructions are modular: start with `AGENTS.md`, then load only the c
 - **Uses lightweight preview renders for QA**, including render-level cut checks before exporting XML.
 - **Transcribes preview audio for content QC**, catching repeated lines, clipped phrases, leftover direction words, and semantic mismatches.
 - **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro 2026**.
+- **Names the Premiere XML sequence from context**, using names like `reels 35_cadastro_alano-cut` instead of a generic fixed timeline name.
 - **Round-trips corrected Premiere XML back to EDL JSON** for comparison against the agent cut.
 - **Maps audio to a single linked stereo track (A1)**, preventing Premiere Pro from importing duplicate mono tracks.
 - **Renders quick, lightweight preview videos** for visual/audio boundary checks.
@@ -81,6 +82,7 @@ The self-eval loop runs boundary QC on every cut, uses `timeline_view` only on s
 .venv\Scripts\python.exe helpers\validate_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts -o raw_video\edit\edl_boundary_qc.json
 .venv\Scripts\python.exe helpers\transcribe.py raw_video\edit\preview.mp4 --edit-dir raw_video\edit --force
 .venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\transcripts\preview.json -o raw_video\edit\preview_transcript_qc.json
+.venv\Scripts\python.exe helpers\edl_to_fcpxml.py raw_video\edit\edl.json -o raw_video\edit\timeline.xml --timeline-name "reels 35_cadastro_alano-cut"
 .venv\Scripts\python.exe helpers\fcpxml_to_edl.py raw_video\edit\timeline_fix.xml -o raw_video\edit\timeline_fix_from_xml.edl.json --media-root raw_video
 ```
 

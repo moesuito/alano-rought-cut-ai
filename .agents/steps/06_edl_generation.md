@@ -47,6 +47,12 @@ Write `edit/edl.json` using the current Alano format:
 ```json
 {
   "version": 1,
+  "metadata": {
+    "timeline_name": "reels 35_cadastro_alano-cut",
+    "video_type": "reels",
+    "content_number": "35",
+    "content_slug": "cadastro"
+  },
   "sources": {
     "C0103": "/abs/path/C0103.MP4"
   },
@@ -64,6 +70,15 @@ Write `edit/edl.json` using the current Alano format:
 }
 ```
 
+## Timeline Naming
+
+- Always include `metadata.timeline_name` in `edit/edl.json`.
+- Use the final format `<video_type> <number>_<content>_alano-cut` when a content number is explicit or clearly implied.
+- If there is no number, use `<video_type>_<content>_alano-cut`.
+- Use concise lowercase slugs for the content part: `cadastro`, `envio_documentos`, `primeiros_passos`.
+- Do not invent a number if the brief/source context does not indicate one.
+- Examples: `reels 35_cadastro_alano-cut`, `aula 35_cadastro_alano-cut`, `tutorial_envio_documentos_alano-cut`.
+
 ## Tasks
 
 1. Read `edit/takes_packed.md`.
@@ -74,8 +89,8 @@ Write `edit/edl.json` using the current Alano format:
 6. Add appropriate 30-200ms edge padding without cutting into neighboring words or unwanted filler.
 7. Use raw JSON word timestamps for exact inside-phrase cuts.
 8. Calculate `total_duration_s`.
-9. Write `edit/edl.json`.
-10. Update `edit/run_state.md` with selected range summary, stitched repairs, and known compromises.
+9. Write `edit/edl.json` with `metadata.timeline_name`.
+10. Update `edit/run_state.md` with selected range summary, timeline name, stitched repairs, and known compromises.
 
 ## Output
 

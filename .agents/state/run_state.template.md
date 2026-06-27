@@ -20,6 +20,12 @@ Pacing:
 Must keep:
 Must cut:
 
+## Timeline Naming
+Video type label:
+Content number:
+Content slug:
+XML timeline name:
+
 ## Inference
 Inferred type:
 Selected archetype:

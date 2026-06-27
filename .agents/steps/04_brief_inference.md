@@ -22,7 +22,7 @@ Goal: infer what the rough cut should become before planning the edit.
 2. Read only relevant recent parts of `edit/project.md` if present.
 3. Read `edit/takes_packed.md`.
 4. Infer content type after reading the material. Do not assume upfront.
-5. Infer objective, audience/use, pacing, and rough target duration if missing.
+5. Infer objective, audience/use, pacing, rough target duration, and XML timeline naming fields if missing.
 6. Identify uncertainty level:
    - low: proceed;
    - medium: proceed and document assumptions;
@@ -33,6 +33,11 @@ Goal: infer what the rough cut should become before planning the edit.
    - objective;
    - target runtime;
    - selected or likely archetype;
+   - XML timeline naming fields:
+     - video type label, e.g. `reels`, `aula`, `tutorial`, `demo`, `vsl`;
+     - content number only if explicit or clearly implied by the brief/source context;
+     - concise content slug, e.g. `cadastro`, `envio_documentos`, `onboarding`;
+     - final timeline name in the format `<video_type> <number>_<content>_alano-cut` when a number exists, or `<video_type>_<content>_alano-cut` when it does not;
    - uncertainty and reason.
 
 ## Content Type Options
