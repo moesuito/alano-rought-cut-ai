@@ -31,6 +31,38 @@ function Create-Junction {
     cmd /c mklink /j "$LinkPath" "$TargetDir" | Out-Null
 }
 
+function Convert-VersionTag {
+    param(
+        [string]$Tag
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Tag)) {
+        return [version]"0.0.0"
+    }
+
+    $Clean = $Tag.Trim()
+    if ($Clean.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $Clean = $Clean.Substring(1)
+    }
+
+    try {
+        return [version]$Clean
+    } catch {
+        return [version]"0.0.0"
+    }
+}
+
+function Test-RemoteVersionIsNewer {
+    param(
+        [string]$LatestTag,
+        [string]$LocalVersion
+    )
+
+    $Latest = Convert-VersionTag $LatestTag
+    $Local = Convert-VersionTag $LocalVersion
+    return ($Latest.CompareTo($Local) -gt 0)
+}
+
 function Update-System {
     param(
         [bool]$Silent = $false
@@ -74,6 +106,13 @@ function Update-System {
     if ($LatestTag -eq $LocalVersion) {
         if (!$Silent) {
             Write-Host "Alano Rough Cut AI is already up-to-date ($LocalVersion)." -ForegroundColor Green
+        }
+        return $false
+    }
+
+    if (!(Test-RemoteVersionIsNewer -LatestTag $LatestTag -LocalVersion $LocalVersion)) {
+        if (!$Silent) {
+            Write-Host "Local version $LocalVersion is newer than the latest release $LatestTag. Skipping update." -ForegroundColor Yellow
         }
         return $false
     }
@@ -146,20 +185,27 @@ if ($SubCommand -eq "init") {
     if (Test-Path $HelpersDir) {
         $DestHelpers = Join-Path $CurrentDir "helpers"
         Copy-Item -Path $HelpersDir -Destination $CurrentDir -Recurse -Force
+        Get-ChildItem -Path $DestHelpers -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
         Write-Host "  -> Copied helper scripts to $DestHelpers" -ForegroundColor Gray
     } else {
         Write-Error "Could not find helpers directory at $HelpersDir"
         exit 1
     }
 
-    # 2. Copy skill and configuration files
-    $FilesToCopy = @("SKILL.md", "pyproject.toml", ".gitignore", "config.json")
+    # 2. Copy agent instructions and configuration files
+    $FilesToCopy = @("AGENTS.md", "SKILL.md", "pyproject.toml", ".gitignore", "config.json")
     foreach ($File in $FilesToCopy) {
         $Src = Join-Path $InstallRoot $File
         if (Test-Path $Src) {
             Copy-Item -Path $Src -Destination $CurrentDir -Force
             Write-Host "  -> Copied $File" -ForegroundColor Gray
         }
+    }
+
+    $AgentsDir = Join-Path $InstallRoot ".agents"
+    if (Test-Path $AgentsDir) {
+        Copy-Item -Path $AgentsDir -Destination $CurrentDir -Recurse -Force
+        Write-Host "  -> Copied modular agent instructions (.agents/)" -ForegroundColor Gray
     }
 
     # 3. Create raw_video and edit folders
@@ -230,10 +276,10 @@ if ($SubCommand -eq "init") {
     Write-Host " Next Steps:" -ForegroundColor White
     Write-Host "   1. Put your raw files inside 'raw_video/'" -ForegroundColor White
     if ($EnvConfigured) {
-        Write-Host "   2. Open your AI agent (claude, etc.) and type: 'edit these clips'" -ForegroundColor White
+        Write-Host "   2. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     } else {
         Write-Host "   2. Configure your ELEVENLABS_API_KEY in the '.env' file" -ForegroundColor White
-        Write-Host "   3. Open your AI agent (claude, etc.) and type: 'edit these clips'" -ForegroundColor White
+        Write-Host "   3. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     }
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""

@@ -6,16 +6,23 @@ with the original raw clips placed on the video and audio tracks.
 Usage:
     python helpers/edl_to_fcpxml.py <edl_path>
     python helpers/edl_to_fcpxml.py raw_video/edit/edl.json -o raw_video/edit/timeline.xml
+    python helpers/edl_to_fcpxml.py raw_video/edit/edl.json --timeline-name "reels 35_cadastro_alano-cut"
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
+
+
+FALLBACK_SUFFIX = "alano-cut"
 
 
 def get_video_metadata(file_path: Path) -> dict:
@@ -82,7 +89,122 @@ def get_timebase_and_ntsc(fps: float) -> tuple[int, str]:
         return int(round(fps)), "FALSE"
 
 
-def convert_edl_to_xml(edl_path: Path, output_path: Path) -> None:
+def strip_accents(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def slug_part(value: object, allow_spaces: bool = False) -> str:
+    text = strip_accents(str(value)).lower().strip()
+    replacement = " " if allow_spaces else "_"
+    text = re.sub(r"[^a-z0-9]+", replacement, text)
+    if allow_spaces:
+        text = re.sub(r"\s+", " ", text).strip()
+    else:
+        text = re.sub(r"_+", "_", text).strip("_")
+    return text
+
+
+def sanitize_timeline_name(value: object) -> str:
+    """Keep a Premiere-friendly display name while removing path-like chars."""
+    text = str(value).strip()
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"_+", "_", text)
+    return text.strip(" _")
+
+
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None and str(value).strip():
+            return value
+    return None
+
+
+def infer_content_label(edl_path: Path) -> str:
+    """Infer a content label from the workspace when the EDL has no metadata."""
+    edit_dir = edl_path.parent
+    videos_dir = edit_dir.parent if edit_dir.name.lower() == "edit" else edit_dir
+    generic_video_dirs = {"raw_video", "raw-videos", "raw videos", "videos", "video"}
+    project_dir = videos_dir.parent if videos_dir.name.lower() in generic_video_dirs else videos_dir
+    return project_dir.name or "rough_cut"
+
+
+def format_timeline_name(
+    video_type: object | None,
+    content_number: object | None,
+    content_label: object | None,
+) -> str:
+    """Build names like 'reels 35_cadastro_alano-cut'."""
+    type_part = slug_part(video_type, allow_spaces=True) if video_type else ""
+    number_part = slug_part(content_number) if content_number else ""
+    content_part = slug_part(content_label) if content_label else "rough_cut"
+
+    if type_part and number_part:
+        prefix = f"{type_part} {number_part}"
+    elif type_part:
+        prefix = type_part
+    elif number_part:
+        prefix = number_part
+    else:
+        prefix = ""
+
+    if prefix:
+        return f"{prefix}_{content_part}_{FALLBACK_SUFFIX}"
+    return f"{content_part}_{FALLBACK_SUFFIX}"
+
+
+def resolve_timeline_name(edl: dict, edl_path: Path, override: str | None = None) -> str:
+    """Resolve the Premiere project/sequence name from CLI, EDL metadata, or folder context."""
+    if override:
+        cleaned = sanitize_timeline_name(override)
+        if cleaned:
+            return cleaned
+
+    metadata = edl.get("metadata") if isinstance(edl.get("metadata"), dict) else {}
+    explicit = first_value(
+        edl.get("timeline_name"),
+        metadata.get("timeline_name"),
+        metadata.get("sequence_name"),
+        metadata.get("xml_timeline_name"),
+    )
+    if explicit:
+        cleaned = sanitize_timeline_name(explicit)
+        if cleaned:
+            return cleaned
+
+    video_type = first_value(
+        metadata.get("timeline_video_type"),
+        metadata.get("video_type"),
+        metadata.get("inferred_type"),
+        metadata.get("content_type"),
+        edl.get("video_type"),
+    )
+    content_number = first_value(
+        metadata.get("content_number"),
+        metadata.get("video_number"),
+        metadata.get("episode_number"),
+        metadata.get("lesson_number"),
+        edl.get("content_number"),
+    )
+    content_label = first_value(
+        metadata.get("content_slug"),
+        metadata.get("content"),
+        metadata.get("topic"),
+        metadata.get("title"),
+        edl.get("content_slug"),
+        infer_content_label(edl_path),
+    )
+    return sanitize_timeline_name(format_timeline_name(video_type, content_number, content_label))
+
+
+def convert_edl_to_xml(
+    edl_path: Path,
+    output_path: Path,
+    timeline_name: str | None = None,
+    project_name: str | None = None,
+) -> None:
     # Load EDL JSON
     if not edl_path.exists():
         sys.exit(f"Error: EDL file not found at {edl_path}")
@@ -90,6 +212,8 @@ def convert_edl_to_xml(edl_path: Path, output_path: Path) -> None:
     edl = json.loads(edl_path.read_text(encoding="utf-8"))
     sources = edl.get("sources", {})
     ranges = edl.get("ranges", [])
+    resolved_timeline_name = resolve_timeline_name(edl, edl_path, timeline_name)
+    resolved_project_name = sanitize_timeline_name(project_name) if project_name else resolved_timeline_name
     
     if not ranges:
         sys.exit("Error: No cut ranges found in the EDL")
@@ -112,12 +236,12 @@ def convert_edl_to_xml(edl_path: Path, output_path: Path) -> None:
 
     # Project structure
     project = ET.SubElement(root, "project")
-    ET.SubElement(project, "name").text = "Ticto Edited Project"
+    ET.SubElement(project, "name").text = resolved_project_name
     children = ET.SubElement(project, "children")
 
     # Sequence structure
     sequence = ET.SubElement(children, "sequence")
-    ET.SubElement(sequence, "name").text = "Ticto Edited Timeline"
+    ET.SubElement(sequence, "name").text = resolved_timeline_name
     
     # We will compute and fill sequence duration after the loop
     seq_duration_el = ET.SubElement(sequence, "duration")
@@ -270,6 +394,7 @@ def convert_edl_to_xml(edl_path: Path, output_path: Path) -> None:
         
     print(f"\nSuccessfully generated Premiere-compatible XML:")
     print(f"  -> {output_path.resolve()}")
+    print(f"  -> Timeline name: {resolved_timeline_name}")
     print(f"  -> Total frames: {start_timeline_frame} (~{start_timeline_frame / seq_fps:.2f}s)")
 
 
@@ -279,6 +404,11 @@ def main() -> None:
                         help="Path to edl.json (default: raw_video/edit/edl.json)")
     parser.add_argument("-o", "--output", type=Path, default=None,
                         help="Output XML path (default: same directory as edl.json, named timeline.xml)")
+    parser.add_argument("--timeline-name", type=str, default=None,
+                        help='Premiere sequence name, e.g. "reels 35_cadastro_alano-cut". '
+                             "If omitted, reads EDL metadata.timeline_name or derives a fallback.")
+    parser.add_argument("--project-name", type=str, default=None,
+                        help="Optional FCP XML project name. Defaults to the timeline name.")
     args = parser.parse_args()
 
     edl_path = args.edl.resolve()
@@ -286,7 +416,12 @@ def main() -> None:
     if output_path is None:
         output_path = edl_path.parent / "timeline.xml"
         
-    convert_edl_to_xml(edl_path, output_path)
+    convert_edl_to_xml(
+        edl_path,
+        output_path,
+        timeline_name=args.timeline_name,
+        project_name=args.project_name,
+    )
 
 
 if __name__ == "__main__":

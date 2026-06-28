@@ -11,6 +11,7 @@ Usage:
     python helpers/transcribe.py <video_path> --edit-dir /custom/edit
     python helpers/transcribe.py <video_path> --language en
     python helpers/transcribe.py <video_path> --num-speakers 2
+    python helpers/transcribe.py raw_video/edit/preview.mp4 --edit-dir raw_video/edit --force
 """
 
 from __future__ import annotations
@@ -112,6 +113,7 @@ def transcribe_one(
     language: str | None = None,
     num_speakers: int | None = None,
     verbose: bool = True,
+    force: bool = False,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
 
@@ -121,12 +123,14 @@ def transcribe_one(
     transcripts_dir.mkdir(parents=True, exist_ok=True)
     out_path = transcripts_dir / f"{video.stem}.json"
 
-    if out_path.exists():
+    if out_path.exists() and not force:
         if verbose:
             print(f"cached: {out_path.name}")
         return out_path
 
     if verbose:
+        if out_path.exists() and force:
+            print(f"  re-transcribing {video.name} (--force)", flush=True)
         print(f"  extracting audio from {video.name}", flush=True)
 
     t0 = time.time()
@@ -171,6 +175,11 @@ def main() -> None:
         default=None,
         help="Optional number of speakers when known. Improves diarization accuracy.",
     )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-transcribe even when <edit_dir>/transcripts/<video_stem>.json already exists.",
+    )
     args = ap.parse_args()
 
     video = args.video.resolve()
@@ -186,6 +195,7 @@ def main() -> None:
         api_key=api_key,
         language=args.language,
         num_speakers=args.num_speakers,
+        force=args.force,
     )
 
 
