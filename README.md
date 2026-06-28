@@ -3,6 +3,8 @@
 
 Introducing **alano-rought-cut-ai** — a specialized AI assistant skill for rough video cutting and Adobe Premiere Pro timeline XML export.
 
+Current release: **v0.2.0**.
+
 This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as a **Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
 
 The agent instructions are modular: start with `AGENTS.md`, then load only the current step under `.agents/`. The old `SKILL.md` is now only a compatibility stub for tools that still look for that file.
@@ -32,6 +34,16 @@ irm https://raw.githubusercontent.com/moesuito/alano-rought-cut-ai/main/install.
 ```
 
 *Note: Restart your terminal/IDE after installation to load the updated `PATH` environment variables.*
+
+## Updating
+
+If `alanocut` is already installed, update the global install from the latest GitHub release:
+
+```powershell
+alanocut update
+```
+
+`alanocut init` also checks for updates before initializing a workspace.
 
 ## How to use (`alanocut init`)
 
@@ -75,6 +87,15 @@ Transcribe ──> Pack ──> LLM Reasons ──> EDL ──> Boundary QC ─�
 ```
 
 The self-eval loop runs boundary QC on every cut, uses `timeline_view` only on suspicious points, and can transcribe the preview to catch content-level problems before exporting `timeline.xml` for Premiere.
+
+## What's new in v0.2.0
+
+- Modular `AGENTS.md` + `.agents/` step workflow, replacing the previous monolithic instruction file.
+- Waveform-aware boundary QC through `helpers/validate_edl_boundaries.py`.
+- Preview transcript QC through `helpers/preview_transcript_qc.py`.
+- XML round-trip analysis through `helpers/fcpxml_to_edl.py`.
+- Context-aware Premiere sequence names such as `reels 35_cadastro_alano-cut`.
+- Safer preview transcript refresh with `helpers/transcribe.py --force`.
 
 ## QA helper commands
 

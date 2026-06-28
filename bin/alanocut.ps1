@@ -31,6 +31,38 @@ function Create-Junction {
     cmd /c mklink /j "$LinkPath" "$TargetDir" | Out-Null
 }
 
+function Convert-VersionTag {
+    param(
+        [string]$Tag
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Tag)) {
+        return [version]"0.0.0"
+    }
+
+    $Clean = $Tag.Trim()
+    if ($Clean.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $Clean = $Clean.Substring(1)
+    }
+
+    try {
+        return [version]$Clean
+    } catch {
+        return [version]"0.0.0"
+    }
+}
+
+function Test-RemoteVersionIsNewer {
+    param(
+        [string]$LatestTag,
+        [string]$LocalVersion
+    )
+
+    $Latest = Convert-VersionTag $LatestTag
+    $Local = Convert-VersionTag $LocalVersion
+    return ($Latest.CompareTo($Local) -gt 0)
+}
+
 function Update-System {
     param(
         [bool]$Silent = $false
@@ -74,6 +106,13 @@ function Update-System {
     if ($LatestTag -eq $LocalVersion) {
         if (!$Silent) {
             Write-Host "Alano Rough Cut AI is already up-to-date ($LocalVersion)." -ForegroundColor Green
+        }
+        return $false
+    }
+
+    if (!(Test-RemoteVersionIsNewer -LatestTag $LatestTag -LocalVersion $LocalVersion)) {
+        if (!$Silent) {
+            Write-Host "Local version $LocalVersion is newer than the latest release $LatestTag. Skipping update." -ForegroundColor Yellow
         }
         return $false
     }
