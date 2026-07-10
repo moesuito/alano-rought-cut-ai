@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- Clarified that `alanocut update` refreshes the global installation and existing workspaces require `alanocut init` to copy the new harness locally.
+
 ## v0.3.0 - 2026-07-10
 
 ### Changed

@@ -56,6 +56,14 @@ O update compara a versão local em `config.json` com a última release do GitHu
 
 O comando `alanocut init` também faz uma checagem silenciosa de update antes de criar uma nova workspace.
 
+O `alanocut update` atualiza a instalação global em `%APPDATA%\alano-rought-cut-ai`. Workspaces existentes mantêm as cópias de `AGENTS.md`, `.agents/`, helpers e configuração que já estavam nelas. Depois do update, entre em cada workspace que deve receber o harness novo e rode:
+
+```powershell
+alanocut init
+```
+
+Esse refresh preserva `.env`, `raw_video/` e todo o conteúdo de `raw_video/edit/` da workspace.
+
 ---
 
 ## Como Utilizar (`alanocut init`)

@@ -45,6 +45,14 @@ alanocut update
 
 `alanocut init` also checks for updates before initializing a workspace.
 
+`alanocut update` refreshes the global installation under `%APPDATA%\alano-rought-cut-ai`. Existing workspaces keep their copied `AGENTS.md`, `.agents/`, helpers, and configuration until they are refreshed. After updating, run this once inside each existing workspace that should receive the new harness:
+
+```powershell
+alanocut init
+```
+
+This refresh preserves the workspace's `.env`, `raw_video/`, and `raw_video/edit/` contents.
+
 ## How to use (`alanocut init`)
 
 Instead of cloning and registering the skill manually for each project, navigate to the folder containing your raw videos and run:
