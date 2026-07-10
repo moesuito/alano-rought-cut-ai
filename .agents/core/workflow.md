@@ -1,6 +1,11 @@
 # Workflow
 
-Follow steps in order. At each step, read only the listed step module plus core invariants and the active `edit/run_state.md`.
+Follow the steps in order under either operating protocol from `AGENTS.md`.
+
+- Protocol A (default): read the complete core workflow and all step modules before execution, then work end to end while checkpointing state.
+- Protocol B (context-constrained): at each step, read only the listed step module plus core invariants and the active `edit/run_state.md`.
+
+Both protocols use the same tasks, gates, artifacts, and completion criteria below.
 
 ## Step 01 - Inventory
 
@@ -170,3 +175,17 @@ Outputs:
 
 Next:
 - Done
+
+## Shared Completion Criteria
+
+These criteria apply identically to Protocol A and Protocol B. Finish only when:
+
+- every intended source is inventoried and accounted for;
+- every editorially relevant source has a readable transcript or a documented exclusion reason;
+- the EDL is coherent, duration-checked, structurally valid, and uses valid word-boundary ranges;
+- suspicious joins were investigated with transcript, waveform, preview, or visual evidence as required;
+- no unresolved `high_risk` boundary remains;
+- material EDL revisions were re-checked with boundary QC, preview rendering, and relevant transcript QC;
+- `edit/timeline.xml` exists, has the intended sequence name, and references original media;
+- `edit/run_state.md` and `edit/project.md` preserve the result for recovery and future sessions;
+- the final handoff reports the XML path and any outstanding human-review items.

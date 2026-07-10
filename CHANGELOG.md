@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.0 - 2026-07-10
+
+### Changed
+
+- Made the full-context capable-agent protocol the default operating path.
+- Kept the existing step-by-step context-loading policy as a constrained-agent fallback.
+- Replaced model-name-only routing with capability-based routing while retaining common capable-agent names as hints.
+- Added `.agents/core/capable_agent_protocol.md` as a unified end-to-end protocol.
+- Restored `SKILL.md` as an active protocol router instead of a deprecated compatibility stub.
+- Made core invariants, workflow, and step modules the single normative source for both protocols.
+- Promoted source coverage, transcript coverage, editorial planning, EDL integrity, QC, and handoff gates into shared modules.
+- Added shared completion criteria so capable and constrained agents use identical quality standards.
+- Added operating-protocol tracking to `edit/run_state.md`.
+
 ## v0.2.0 - 2026-06-27
 
 Large harness update for the Alano Rough Cut AI workflow.

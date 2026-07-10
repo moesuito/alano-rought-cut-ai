@@ -35,6 +35,10 @@ If the material is genuinely ambiguous, load at most two archetype files.
 - Do not create hand-scored moment rankings.
 - Use editorial judgment and document assumptions.
 
+## Gate
+
+Before selecting time ranges, identify what each intended narrative beat contributes. Drop unsupported beats rather than forcing the archetype.
+
 ## Output
 
 - updated `edit/run_state.md` with strategy and pre-scan notes

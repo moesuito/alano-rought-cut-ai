@@ -37,6 +37,7 @@ Goal: create the Premiere-compatible XML timeline.
 ```
 
 10. Update `edit/run_state.md` with XML path, timeline name, export status, and any round-trip comparison notes.
+11. Record meaningful human corrections in `edit/project.md` during Step 10. The round-trip helper enables comparison; do not claim it learns automatically.
 
 ## Output
 

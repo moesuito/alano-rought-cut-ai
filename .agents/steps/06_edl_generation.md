@@ -92,6 +92,17 @@ Write `edit/edl.json` using the current Alano format:
 9. Write `edit/edl.json` with `metadata.timeline_name`.
 10. Update `edit/run_state.md` with selected range summary, timeline name, stitched repairs, and known compromises.
 
+## EDL Integrity Gate
+
+Before runtime revision, verify:
+
+- every `ranges[].source` key exists in `sources` and resolves to the intended original media;
+- every range has numeric boundaries with `end > start`;
+- ranges appear in intended timeline order;
+- every cut edge follows the word-boundary rules above;
+- `total_duration_s` matches the sum of all range durations within normal rounding tolerance;
+- `metadata.timeline_name` follows the naming rules above.
+
 ## Output
 
 - `edit/edl.json`

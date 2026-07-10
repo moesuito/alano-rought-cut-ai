@@ -30,6 +30,12 @@ Append a concise session summary to `edit/project.md`:
 
 Keep it short. `project.md` is continuity, not a full reasoning transcript.
 
+Before finishing, report:
+
+- the final `edit/timeline.xml` path;
+- the exported sequence name;
+- any genuinely unresolved items for the human editor.
+
 ## Output
 
 - appended `edit/project.md`

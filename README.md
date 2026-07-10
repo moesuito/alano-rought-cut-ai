@@ -3,11 +3,11 @@
 
 Introducing **alano-rought-cut-ai** — a specialized AI assistant skill for rough video cutting and Adobe Premiere Pro timeline XML export.
 
-Current release: **v0.2.0**.
+Current release: **v0.3.0**.
 
 This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as a **Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
 
-The agent instructions are modular: start with `AGENTS.md`, then load only the current step under `.agents/`. The old `SKILL.md` is now only a compatibility stub for tools that still look for that file.
+The agent instructions use a capability-routed dual protocol. Capable agents read the complete operational workflow up front and execute end to end; context-constrained agents retain the modular, one-step-at-a-time fallback. `SKILL.md` and `AGENTS.md` route both kinds of agent explicitly.
 
 ## What it does
 
@@ -88,7 +88,24 @@ Transcribe ──> Pack ──> LLM Reasons ──> EDL ──> Boundary QC ─�
 
 The self-eval loop runs boundary QC on every cut, uses `timeline_view` only on suspicious points, and can transcribe the preview to catch content-level problems before exporting `timeline.xml` for Premiere.
 
-## What's new in v0.2.0
+## Agent protocols
+
+- **Protocol A — capable agent (default):** read the invariants, workflow, unified capable-agent protocol, and all ten step modules before editing. Keep the end-to-end model in context and execute continuously while checkpointing `run_state.md`.
+- **Protocol B — context-constrained fallback:** load one step module at a time and use `run_state.md` as the memory bridge.
+
+Routing is based on real context capacity, not a brittle model-name allowlist. ChatGPT, Codex, Claude Code, Claude Opus/Sonnet, Gemini, and Antigravity are typical Protocol A candidates. Both protocols keep archetype loading selective and produce the same artifacts and QC gates.
+
+The protocols differ only in context strategy. Core invariants, workflow, step modules, gates, helpers, artifacts, QC, and completion criteria are shared and normative for every agent.
+
+## What's new in v0.3.0
+
+- Full-context execution is now the default for capable agents.
+- The original modular one-step-at-a-time workflow remains available for context-constrained agents.
+- Both protocols now share one normative rule set and identical completion gates.
+- Shared gates explicitly cover source/transcript coverage, editorial planning, EDL integrity, unresolved high-risk boundaries, re-QC after revisions, XML verification, and final handoff.
+- `run_state.md` records which operating protocol handled the session.
+
+## What shipped in v0.2.0
 
 - Modular `AGENTS.md` + `.agents/` step workflow, replacing the previous monolithic instruction file.
 - Waveform-aware boundary QC through `helpers/validate_edl_boundaries.py`.

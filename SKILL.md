@@ -1,13 +1,17 @@
 ---
 name: alano-rought-cut-ai
-description: Compatibility stub. This project now uses AGENTS.md plus modular .agents step instructions for transcript-driven rough cut and Premiere XML export.
+description: Create transcript-driven rough cuts from talking-head or raw video, self-evaluate cut boundaries and content, and export a Premiere-compatible Final Cut Pro 7 XML timeline. Use when an agent needs to inspect raw footage, resolve retakes, build an editorial EDL, run preview QC, or produce timeline.xml for Adobe Premiere Pro.
 ---
 
-# Deprecated
+# Alano Rough Cut AI
 
-This project now uses `AGENTS.md`.
+Read `AGENTS.md` first and follow its capability-based protocol router.
 
-Read `AGENTS.md` first.
-Do not use this file as the main instruction source.
+Use the capable-agent protocol by default. Treat ChatGPT, Codex, Claude Code, Claude Opus/Sonnet, Gemini, and Antigravity as likely capable candidates, but choose based on actual context capacity rather than brand name.
 
-The detailed workflow is split into step modules under `.agents/` so agents can load only the current stage instead of a large monolithic skill file.
+- Capable/default: read `.agents/core/capable_agent_protocol.md`, core rules, and all step modules before executing the complete workflow.
+- Context-constrained fallback: load one step module at a time and bridge steps through `edit/run_state.md`.
+
+For both protocols, treat core invariants, workflow, step modules, gates, helpers, artifacts, QC, and completion criteria as one shared normative standard.
+
+Keep the hard scope: rough cut only. Deliver `<videos_dir>/edit/timeline.xml`; do not add finishing features or create a final high-quality render.

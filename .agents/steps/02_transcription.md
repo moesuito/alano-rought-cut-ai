@@ -26,6 +26,10 @@ Goal: create cached word-level Scribe JSON transcripts for each source.
 8. Store raw JSONs in `<videos_dir>/edit/transcripts/`.
 9. Update `edit/run_state.md` with transcription status.
 
+## Gate
+
+Every editorially relevant source must have a readable transcript or a documented exclusion reason before packing begins.
+
 ## Output
 
 - `edit/transcripts/<source>.json`

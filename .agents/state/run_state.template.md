@@ -6,6 +6,7 @@ Edit dir:
 Sources:
 
 ## Current Step
+Operating protocol:
 Step:
 Status:
 

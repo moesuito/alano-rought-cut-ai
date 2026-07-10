@@ -1,6 +1,6 @@
 # Instalando o Alano Rough Cut AI
 
-Versão atual: **v0.2.0**
+Versão atual: **v0.3.0**
 
 Esta documentação explica como instalar o assistente de corte bruto e exportação XML e configurar o comando global `alanocut` no Windows.
 
@@ -84,7 +84,7 @@ Esse comando inicializará a workspace configurando a seguinte estrutura:
 
 Além de criar a estrutura de arquivos e pastas, o comando `alanocut init` registrará e apontará a Skill de IA do Claude Code (`~/.claude/skills/video-use`) e Gemini (`~/.gemini/config/skills/video-use`) automaticamente para esta pasta atual.
 
-Na versão v0.2.0, essa workspace já inclui o fluxo modular `AGENTS.md` + `.agents/`, validação de cortes por waveform, QC de transcrição do preview, importação de XML corrigido de volta para EDL e nomes de timeline contextuais no XML do Premiere.
+Na versão v0.3.0, agentes capazes usam por padrão o protocolo completo com visão end-to-end, enquanto agentes com contexto limitado continuam usando o fluxo modular passo a passo. Ambos seguem as mesmas invariantes, etapas, gates de qualidade, helpers, artefatos e critérios de conclusão. A workspace também inclui validação de cortes por waveform, QC de transcrição do preview, importação de XML corrigido de volta para EDL e nomes de timeline contextuais no XML do Premiere.
 
 ### Próximos Passos:
 1. Adicione a sua chave no arquivo `.env` gerado: `ELEVENLABS_API_KEY=...`.

@@ -49,8 +49,15 @@ Goal: render a lightweight preview and inspect the rough cut before XML export.
    - leftover direction words or audio events such as "corta", "gravando", or mouth-click descriptions;
    - semantic mismatches introduced by retake stitching, for example a "pessoa fisica" phrase attached to CNPJ/razao social fields.
 11. Apply small EDL fixes if needed.
-12. If EDL changes materially, re-run boundary QC and re-render preview.
+12. If EDL changes materially, re-run boundary QC, re-render preview, and repeat any relevant preview transcript QC.
 13. Update `edit/run_state.md` with QC findings and fixes.
+
+## QC Gate
+
+- Do not proceed to XML export while any boundary still reports `high_risk: true`.
+- A transcript-only `inside_word` review signal does not block export when waveform and editorial inspection support the boundary.
+- For stitched semantic repairs, complete both waveform boundary QC and preview transcript QC as required by Step 06. If preview transcription is unavailable, avoid the stitch or leave the edit explicitly incomplete for human resolution.
+- Do not treat the existence of `preview.mp4` as proof that QC passed.
 
 ## Fade Wording
 

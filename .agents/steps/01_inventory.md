@@ -22,11 +22,17 @@ Goal: identify the source footage, determine `<videos_dir>`, and initialize run 
 5. Create `<videos_dir>/edit/` if missing.
 6. Initialize `<videos_dir>/edit/run_state.md` from `.agents/state/run_state.template.md` if missing.
 7. Record:
+   - operating protocol (`A - capable/full-context` or `B - context-constrained`);
    - videos dir;
    - edit dir;
    - source list;
    - basic metadata;
    - current step status.
+
+## Gate
+
+- Do not start transcription until the source list and output location are unambiguous.
+- Account for every intended source file in `edit/run_state.md`, including any source intentionally excluded and why.
 
 ## Output
 
