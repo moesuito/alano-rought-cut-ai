@@ -34,6 +34,7 @@ from helpers.audio_analysis import (
     extract_analysis_audio,
     get_combined_activity,
     DEFAULT_VAD_PARAMS,
+    run_vad_hysteresis,
 )
 
 
@@ -42,12 +43,12 @@ def load_words(transcripts_dir: Path, source_id: str) -> list[dict[str, Any]]:
     path = transcripts_dir / f"{source_id}.json"
     if not path.exists():
         raise FileNotFoundError(f"Transcript file not found: {path}")
-        
+
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         raise ValueError(f"Error parsing transcript JSON for {source_id}: {e}")
-        
+
     words = []
     for w in data.get("words", []):
         if w.get("type") != "word":
@@ -55,10 +56,10 @@ def load_words(transcripts_dir: Path, source_id: str) -> list[dict[str, Any]]:
         if w.get("start") is None or w.get("end") is None:
             continue
         words.append(w)
-        
+
     if not words:
         raise ValueError(f"No valid words found in transcript {path}")
-        
+
     return words
 
 
@@ -107,35 +108,35 @@ def get_refined_bound_on_signal(
     """Trace VAD activity forward and backward from overlapping word region."""
     w_start_f = int(round(w_start * 200))
     w_end_f = int(round(w_end * 200))
-    
+
     if w_start_f > w_end_f:
         w_start_f, w_end_f = w_end_f, w_start_f
-        
+
     w_start_f = max(0, min(len(activity_sig) - 1, w_start_f))
     w_end_f = max(0, min(len(activity_sig) - 1, w_end_f))
-    
+
     subset = activity_sig[w_start_f : w_end_f + 1]
     active_offsets = np.where(subset)[0]
-    
+
     if active_offsets.size == 0:
         return w_start, w_end, False
-        
+
     first_active = w_start_f + active_offsets[0]
-    
+
     # Trace backward to start of component
     i = first_active
     while i >= 0 and activity_sig[i]:
         i -= 1
     comp_start = (i + 1) * 0.005
-    
+
     last_active = w_start_f + active_offsets[-1]
-    
+
     # Trace forward to end of component
     i = last_active
     while i < len(activity_sig) and activity_sig[i]:
         i += 1
     comp_end = i * 0.005
-    
+
     return comp_start, comp_end, True
 
 
@@ -191,12 +192,12 @@ def main() -> None:
         src_path = Path(rel_path)
         if not src_path.is_absolute():
             src_path = (edit_dir / src_path).resolve()
-        
+
         # Preflight Check 4: Source media exists
         if not src_path.exists():
             print(f"Fatal Error: Source media missing for {source_id}: {src_path}", file=sys.stderr)
             sys.exit(1)
-            
+
         resolved_sources[source_id] = src_path
 
         # Preflight Check 5: Source is not VFR
@@ -273,11 +274,12 @@ def main() -> None:
     rms_raw_by_source = {}
     rms_rnn_by_source = {}
     nf_raw_by_source = {}
+    nf_rnn_by_source = {}
     analysis_dir = edit_dir / "audio_analysis"
 
     for source_id, src_path in resolved_sources.items():
         transcript_path = transcripts_dir / f"{source_id}.json"
-        
+
         # Fingerprint the analysis setup including transcript hash
         fingerprint = get_source_fingerprint(
             src_path,
@@ -287,7 +289,7 @@ def main() -> None:
             transcript_path
         )
         source_fingerprints[source_id] = fingerprint
-        
+
         # Extract and apply RNNoise (uses cached pcm files if available)
         try:
             raw_pcm, rnn_pcm = extract_analysis_audio(
@@ -299,7 +301,7 @@ def main() -> None:
                 transcript_path
             )
             # Run VAD and align signals
-            activity_raw, activity_rnn_aligned, lag, rms_raw, rms_rnn_aligned, nf_raw = get_combined_activity(
+            activity_raw, activity_rnn_aligned, lag, rms_raw, rms_rnn_aligned, nf_raw, nf_rnn_aligned = get_combined_activity(
                 raw_pcm, rnn_pcm, DEFAULT_VAD_PARAMS, words_by_source[source_id]
             )
             activity_by_source[source_id] = activity_raw
@@ -308,6 +310,7 @@ def main() -> None:
             rms_raw_by_source[source_id] = rms_raw
             rms_rnn_by_source[source_id] = rms_rnn_aligned
             nf_raw_by_source[source_id] = nf_raw
+            nf_rnn_by_source[source_id] = nf_rnn_aligned
         except Exception as e:
             print(f"Fatal Error: Audio analysis processing failed for {source_id}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -316,39 +319,84 @@ def main() -> None:
     updated_ranges = []
     for idx, r in enumerate(ranges):
         source_id = r["source"]
-        
+
         # Idempotence: load or initialize original boundaries
         orig_start = float(r.get("original_start", r["start"]))
         orig_end = float(r.get("original_end", r["end"]))
 
+        F_orig_in = time_to_frame(orig_start, fps, "round")
+        F_orig_out = time_to_frame(orig_end, fps, "round")
+
         words = words_by_source[source_id]
-        
+
         # Overlapping words (anchors)
         anchors = find_overlapping_words(words, orig_start, orig_end)
         if not anchors:
-            print(f"Fatal Error: No transcript anchor words overlap with range {idx} [{orig_start} - {orig_end}]", file=sys.stderr)
-            sys.exit(1)
+            # No-anchor case:
+            start_conf = "low"
+            end_conf = "low"
+            final_in_frame = F_orig_in
+            final_out_frame = F_orig_out
+            final_start_s = orig_start
+            final_end_s = orig_end
+            review_required = True
+            review_status = "low"
+            has_low_confidence = True
+
+            # Copy original range fields and update with refinement info
+            r_new = dict(r)
+            r_new.update({
+                "original_start": orig_start,
+                "original_end": orig_end,
+                "start": final_start_s,
+                "end": final_end_s,
+                "source_in_frame": final_in_frame,
+                "source_out_frame": final_out_frame,
+                "review_status": review_status,
+                "review_required": review_required
+            })
+            updated_ranges.append(r_new)
+
+            # Record boundary evidence
+            boundary_evidence.append({
+                "range_index": idx,
+                "source": source_id,
+                "original": {"start": orig_start, "end": orig_end, "in_frame": F_orig_in, "out_frame": F_orig_out},
+                "anchor_words": None,
+                "neighbor_words": None,
+                "vad_refined": None,
+                "clamped": None,
+                "tail_frames": None,
+                "snr_db": None,
+                "correlation": None,
+                "confidence": {"start": start_conf, "end": end_conf},
+                "spread": None,
+                "final_frames": {"in": final_in_frame, "out": final_out_frame},
+                "final_times": {"start": final_start_s, "end": final_end_s}
+            })
+            continue
 
         first_word = anchors[0]
         last_word = anchors[-1]
 
         # Preceding / following rejected words in transcript sequence
         all_words_sorted = sorted(words, key=lambda w: float(w["start"]))
-        
+
         first_word_idx = all_words_sorted.index(first_word)
         prev_word = all_words_sorted[first_word_idx - 1] if first_word_idx > 0 else None
-        
+
         last_word_idx = all_words_sorted.index(last_word)
         next_word = all_words_sorted[last_word_idx + 1] if last_word_idx < len(all_words_sorted) - 1 else None
 
         # Refine boundaries using the activities
         activity_raw = activity_by_source[source_id]
         activity_rnn = rnn_activity_by_source[source_id]
-        
+
         rms_raw = rms_raw_by_source[source_id]
         rms_rnn = rms_rnn_by_source[source_id]
         nf_raw = nf_raw_by_source[source_id]
-        
+        nf_rnn = nf_rnn_by_source[source_id]
+
         # Find refined start bound (from first word)
         t_onset_raw, _, has_start_raw = get_refined_bound_on_signal(activity_raw, float(first_word["start"]), float(first_word["end"]))
         # Find refined end bound (from last word)
@@ -378,10 +426,6 @@ def main() -> None:
                 t_offset = next_start
                 is_clamped_end = True
 
-        # Rational Frame math
-        F_orig_in = time_to_frame(orig_start, fps, "round")
-        F_orig_out = time_to_frame(orig_end, fps, "round")
-        
         # Exact in=floor onset fps, out=ceil offset fps+2
         F_in = time_to_frame(t_onset, fps, "floor")
         F_out_ideal = time_to_frame(t_offset, fps, "ceil") + 2
@@ -393,7 +437,7 @@ def main() -> None:
             if F_in < F_prev_limit:
                 F_in = F_prev_limit
                 is_clamped_start = True
-                
+
         if next_word is not None:
             F_next_limit = time_to_frame(float(next_word["start"]), fps, "floor")
             if F_out > F_next_limit:
@@ -405,57 +449,129 @@ def main() -> None:
         has_insufficient_tail = (tail_frames < 2)
 
         # Correlation check in the EDL range
-        start_frame_vad = int(orig_start * 200)
-        end_frame_vad = int(orig_end * 200)
+        start_frame_vad = max(0, min(len(rms_raw), int(orig_start * 200)))
+        end_frame_vad = max(0, min(len(rms_raw), int(orig_end * 200)))
         slice_raw = rms_raw[start_frame_vad:end_frame_vad]
         slice_rnn = rms_rnn[start_frame_vad:end_frame_vad]
         slice_nf = nf_raw[start_frame_vad:end_frame_vad]
-        
-        corr_val = 1.0
+
+        corr_val = None
         if len(slice_raw) > 5 and np.std(slice_raw) > 1e-4 and np.std(slice_rnn) > 1e-4:
-            corr_val = float(np.corrcoef(slice_raw, slice_rnn)[0, 1])
-            
+            c = np.corrcoef(slice_raw, slice_rnn)[0, 1]
+            if np.isfinite(c):
+                corr_val = float(c)
+
         # SNR check
-        snr_val = 15.0
+        snr_val = None
         if len(slice_raw) > 0:
-            snr_val = float(np.mean(slice_raw) - np.mean(slice_nf))
+            s_val = float(np.mean(slice_raw) - np.mean(slice_nf))
+            if np.isfinite(s_val):
+                snr_val = s_val
+
+        # Threshold sweep for agreement and stability
+        sweep_deltas = [(-1.0, -0.5), (0.0, 0.0), (1.0, 0.5)]
+        gap_frames = int(DEFAULT_VAD_PARAMS["gap_fill_ms"] / DEFAULT_VAD_PARAMS["hop_ms"])
+        trans_frames = int(DEFAULT_VAD_PARAMS["transient_protection_ms"] / DEFAULT_VAD_PARAMS["hop_ms"])
+
+        F_in_raw_vals = []
+        F_in_rnn_vals = []
+        F_out_raw_vals = []
+        F_out_rnn_vals = []
+
+        sweep_ok = True
+        for delta_high, delta_low in sweep_deltas:
+            high_t = DEFAULT_VAD_PARAMS["threshold_high_db"] + delta_high
+            low_t = DEFAULT_VAD_PARAMS["threshold_low_db"] + delta_low
+
+            act_raw_s = run_vad_hysteresis(
+                rms_raw, nf_raw,
+                high_t, low_t,
+                gap_frames, trans_frames
+            )
+            act_rnn_s = run_vad_hysteresis(
+                rms_rnn, nf_rnn,
+                high_t, low_t,
+                gap_frames, trans_frames
+            )
+
+            t_onset_raw_s, _, has_start_raw_s = get_refined_bound_on_signal(act_raw_s, float(first_word["start"]), float(first_word["end"]))
+            _, t_offset_raw_s, has_end_raw_s = get_refined_bound_on_signal(act_raw_s, float(last_word["start"]), float(last_word["end"]))
+            t_onset_rnn_s, _, has_start_rnn_s = get_refined_bound_on_signal(act_rnn_s, float(first_word["start"]), float(first_word["end"]))
+            _, t_offset_rnn_s, has_end_rnn_s = get_refined_bound_on_signal(act_rnn_s, float(last_word["start"]), float(last_word["end"]))
+
+            if not (has_start_raw_s and has_start_rnn_s and has_end_raw_s and has_end_rnn_s):
+                sweep_ok = False
+                break
+
+            F_in_raw_s = time_to_frame(t_onset_raw_s, fps, "floor")
+            F_in_rnn_s = time_to_frame(t_onset_rnn_s, fps, "floor")
+            F_out_raw_s = time_to_frame(t_offset_raw_s, fps, "ceil") + 2
+            F_out_rnn_s = time_to_frame(t_offset_rnn_s, fps, "ceil") + 2
+
+            F_in_raw_vals.append(F_in_raw_s)
+            F_in_rnn_vals.append(F_in_rnn_s)
+            F_out_raw_vals.append(F_out_raw_s)
+            F_out_rnn_vals.append(F_out_rnn_s)
+
+        if sweep_ok:
+            spread_in = max(F_in_raw_vals + F_in_rnn_vals) - min(F_in_raw_vals + F_in_rnn_vals)
+            spread_out = max(F_out_raw_vals + F_out_rnn_vals) - min(F_out_raw_vals + F_out_rnn_vals)
+        else:
+            spread_in = 9999
+            spread_out = 9999
 
         # Confidence Classification
         start_conf = "low"
-        if has_start_raw and has_start_rnn and not is_clamped_start and corr_val >= 0.5 and snr_val >= 6.0:
-            F_in_rnn = time_to_frame(t_onset_rnn, fps, "floor")
-            diff = abs(F_in - F_in_rnn)
-            if diff <= 1:
+        if (
+            snr_val is not None
+            and corr_val is not None
+            and snr_val >= 8.0
+            and corr_val >= 0.8
+            and has_start_raw
+            and has_start_rnn
+            and not is_clamped_start
+            and sweep_ok
+        ):
+            if spread_in <= 1:
                 start_conf = "high"
-            elif diff <= 2:
+            elif spread_in <= 2:
                 start_conf = "medium"
 
         end_conf = "low"
-        if has_end_raw and has_end_rnn and not is_clamped_end and not has_insufficient_tail and corr_val >= 0.5 and snr_val >= 6.0:
-            F_out_rnn = time_to_frame(t_offset_rnn, fps, "ceil") + 2
-            diff = abs(F_out - F_out_rnn)
-            if diff <= 1:
+        if (
+            snr_val is not None
+            and corr_val is not None
+            and snr_val >= 8.0
+            and corr_val >= 0.8
+            and has_end_raw
+            and has_end_rnn
+            and not is_clamped_end
+            and not has_insufficient_tail
+            and sweep_ok
+        ):
+            if spread_out <= 1:
                 end_conf = "high"
-            elif diff <= 2:
+            elif spread_out <= 2:
                 end_conf = "medium"
 
-        # Apply High/Medium endpoints, Low stays original
-        is_valid = (start_conf in ("high", "medium") and end_conf in ("high", "medium"))
-        
-        if is_valid:
+        # Apply High/Medium endpoints, Low stays original independently
+        if start_conf in ("high", "medium"):
             final_in_frame = F_in
-            final_out_frame = F_out
             final_start_s = frame_to_time(final_in_frame, fps)
-            final_end_s = frame_to_time(final_out_frame, fps)
-            review_required = False
-            review_status = "approved"
         else:
             final_in_frame = F_orig_in
-            final_out_frame = F_orig_out
             final_start_s = orig_start
+
+        if end_conf in ("high", "medium"):
+            final_out_frame = F_out
+            final_end_s = frame_to_time(final_out_frame, fps)
+        else:
+            final_out_frame = F_orig_out
             final_end_s = orig_end
-            review_required = True
-            review_status = "low"
+
+        review_required = (start_conf == "low" or end_conf == "low")
+        review_status = "approved" if not review_required else "low"
+        if review_required:
             has_low_confidence = True
 
         # Copy original range fields and update with refinement info
@@ -496,6 +612,7 @@ def main() -> None:
             "snr_db": snr_val,
             "correlation": corr_val,
             "confidence": {"start": start_conf, "end": end_conf},
+            "spread": {"start": int(spread_in) if sweep_ok else None, "end": int(spread_out) if sweep_ok else None},
             "final_frames": {"in": final_in_frame, "out": final_out_frame},
             "final_times": {"start": final_start_s, "end": final_end_s}
         })
@@ -514,7 +631,7 @@ def main() -> None:
     backups_dir = edit_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
     backup_path = backups_dir / f"edl.{input_hash}.json"
-    
+
     # Immutable create-exclusive dedup backup
     if not backup_path.exists():
         try:
@@ -543,12 +660,75 @@ def main() -> None:
     }
     report_output_str = json.dumps(report, indent=2, ensure_ascii=False)
 
-    # Write EDL and Report atomically
+    # Write EDL and Report atomically with staging and replacement safety
+    temp_report = args.report.with_suffix(args.report.suffix + f".{os.getpid()}.tmp")
+    temp_edl = edl_path.with_suffix(edl_path.suffix + f".{os.getpid()}.tmp")
+
+    # Read pre-existing contents for rollback in case of replacement failure
+    report_backup_bytes = args.report.read_bytes() if args.report.exists() else None
+    edl_backup_bytes = edl_path.read_bytes() if edl_path.exists() else None
+
+    # Stage both files (write + flush + fsync)
     try:
-        write_atomic(args.report, report_output_str)
-        write_atomic(edl_path, edl_output_str)
+        temp_report.parent.mkdir(parents=True, exist_ok=True)
+        with open(temp_report, "w", encoding="utf-8") as f:
+            f.write(report_output_str)
+            f.flush()
+            os.fsync(f.fileno())
+
+        temp_edl.parent.mkdir(parents=True, exist_ok=True)
+        with open(temp_edl, "w", encoding="utf-8") as f:
+            f.write(edl_output_str)
+            f.flush()
+            os.fsync(f.fileno())
     except Exception as e:
-        print(f"Fatal Error: Failed to write files atomically: {e}", file=sys.stderr)
+        if temp_report.exists():
+            temp_report.unlink()
+        if temp_edl.exists():
+            temp_edl.unlink()
+        print(f"Fatal Error: Failed to stage files: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Perform replacements with rollback capability
+    report_replaced = False
+    edl_replaced = False
+    try:
+        os.replace(str(temp_report), str(args.report))
+        report_replaced = True
+        os.replace(str(temp_edl), str(edl_path))
+        edl_replaced = True
+    except Exception as e:
+        # Clean up any leftover temp files first
+        for p in [temp_report, temp_edl]:
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
+        # Rollback report if replaced
+        if report_replaced:
+            try:
+                if report_backup_bytes is not None:
+                    args.report.write_bytes(report_backup_bytes)
+                else:
+                    if args.report.exists():
+                        args.report.unlink()
+            except Exception as rollback_err:
+                print(f"Warning: Failed to rollback report file: {rollback_err}", file=sys.stderr)
+
+        # Rollback EDL if replaced
+        if edl_replaced:
+            try:
+                if edl_backup_bytes is not None:
+                    edl_path.write_bytes(edl_backup_bytes)
+                else:
+                    if edl_path.exists():
+                        edl_path.unlink()
+            except Exception as rollback_err:
+                print(f"Warning: Failed to rollback EDL file: {rollback_err}", file=sys.stderr)
+
+        print(f"Fatal Error: Failed to replace files: {e}", file=sys.stderr)
         sys.exit(1)
 
     print(f"Successfully refined EDL boundaries: {edl_path}")

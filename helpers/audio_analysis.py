@@ -55,7 +55,7 @@ def verify_model_hash(model_path: Path) -> None:
     """Verify that the model file exists and matches the expected SHA-256 hash."""
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    
+
     h = hashlib.sha256()
     with open(model_path, "rb") as f:
         while chunk := f.read(65536):
@@ -82,17 +82,17 @@ def check_vfr(source_path: Path) -> bool:
         if not streams:
             # Audio-only streams are not video VFR
             return False
-            
+
         stream = streams[0]
         r_fps = stream.get("r_frame_rate")
         avg_fps = stream.get("avg_frame_rate")
-        
+
         if r_fps and avg_fps and r_fps != "0/0" and avg_fps != "0/0":
             r_frac = Fraction(r_fps)
             avg_frac = Fraction(avg_fps)
             if r_frac != avg_frac:
                 return True
-                
+
         # Also run vfrdet filter to perform definitive statistical duration check
         cmd_vfr = [
             "ffmpeg", "-i", str(source_path), "-vf", "vfrdet", "-an", "-f", "null", "-"
@@ -105,7 +105,7 @@ def check_vfr(source_path: Path) -> bool:
                 return True
     except Exception as e:
         raise RuntimeError(f"Error checking VFR on {source_path}: {e}")
-        
+
     return False
 
 
@@ -120,7 +120,7 @@ def get_source_fingerprint(
     stat = source_path.stat()
     mtime = stat.st_mtime
     size = stat.st_size
-    
+
     transcript_hash = ""
     if transcript_path and transcript_path.exists():
         h = hashlib.sha256()
@@ -128,7 +128,7 @@ def get_source_fingerprint(
             while chunk := f.read(65536):
                 h.update(chunk)
         transcript_hash = h.hexdigest()
-        
+
     # Bundle input metadata to make hash sensitive to modifications
     meta = {
         "path": str(source_path.resolve()),
@@ -143,6 +143,40 @@ def get_source_fingerprint(
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def validate_cache_metadata(
+    meta_path: Path,
+    fingerprint: str,
+    version: str,
+    params: dict[str, Any],
+    model_hash: str,
+    source_path: Path
+) -> bool:
+    """Validate that cache metadata matches setup and file status."""
+    if not meta_path.exists():
+        return False
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        if data.get("fingerprint") != fingerprint:
+            return False
+        if data.get("version") != version:
+            return False
+        if data.get("model") != model_hash:
+            return False
+        if data.get("params") != params:
+            return False
+        source_data = data.get("source", {})
+        stat = source_path.stat()
+        if source_data.get("path") != str(source_path.resolve()):
+            return False
+        if source_data.get("size") != stat.st_size:
+            return False
+        if abs(source_data.get("mtime", 0) - stat.st_mtime) > 1e-3:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def extract_analysis_audio(
     source_path: Path,
     output_dir: Path,
@@ -153,15 +187,16 @@ def extract_analysis_audio(
 ) -> tuple[Path, Path]:
     """Extract raw and RNNoise mono 48kHz audio and cache them using channel energy selection rules."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     raw_path = output_dir / f"{source_id}_{fingerprint}_raw.pcm"
     rnn_path = output_dir / f"{source_id}_{fingerprint}_rnn.pcm"
     meta_path = output_dir / f"{source_id}_{fingerprint}_meta.json"
-    
+
     # Cache hit
     if raw_path.exists() and rnn_path.exists() and meta_path.exists():
-        return raw_path, rnn_path
-        
+        if validate_cache_metadata(meta_path, fingerprint, "1.1", DEFAULT_VAD_PARAMS, EXPECTED_MODEL_HASH, source_path):
+            return raw_path, rnn_path
+
     # Check number of audio channels
     cmd_channels = [
         "ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -177,7 +212,7 @@ def extract_analysis_audio(
         C = int(streams[0].get("channels", 1))
     except Exception as e:
         raise RuntimeError(f"Failed to probe audio channels for {source_path}: {e}")
-        
+
     # Extract all channels to a temporary PCM file
     temp_multi_pcm = output_dir / f"{source_id}_{fingerprint}_multi.pcm.tmp"
     cmd_extract = [
@@ -192,7 +227,7 @@ def extract_analysis_audio(
         if temp_multi_pcm.exists():
             temp_multi_pcm.unlink()
         raise RuntimeError(f"FFmpeg multi-channel extraction failed for {source_path}: {e}")
-        
+
     try:
         # Load the multi-channel samples
         raw_data = np.fromfile(temp_multi_pcm, dtype=np.int16)
@@ -201,14 +236,14 @@ def extract_analysis_audio(
     finally:
         if temp_multi_pcm.exists():
             temp_multi_pcm.unlink()
-            
+
     # Calculate energy (sum of squares) for each channel to find the max-energy channel
     raw_energies = []
     for c in range(C):
         col = raw_multi[:, c].astype(np.float64)
         raw_energies.append(np.sum(col ** 2))
     raw_channel_idx = int(np.argmax(raw_energies))
-    
+
     # Load transcript words for RNNoise anchor-dominant channel selection
     words = []
     if transcript_path.exists():
@@ -219,7 +254,7 @@ def extract_analysis_audio(
                     words.append(w)
         except Exception:
             pass
-            
+
     # Create word mask for energy calculation
     mask = np.zeros(num_samples, dtype=bool)
     for w in words:
@@ -228,7 +263,7 @@ def extract_analysis_audio(
         start_idx = max(0, min(num_samples, int(start_t * 48000)))
         end_idx = max(0, min(num_samples, int(end_t * 48000)))
         mask[start_idx:end_idx] = True
-        
+
     if np.any(mask):
         rnn_energies = []
         for c in range(C):
@@ -237,22 +272,22 @@ def extract_analysis_audio(
         rnn_channel_idx = int(np.argmax(rnn_energies))
     else:
         rnn_channel_idx = raw_channel_idx
-        
+
     # Write the raw mono channel to raw_path
     raw_mono = raw_multi[:, raw_channel_idx]
     temp_raw = raw_path.with_suffix(".raw.tmp")
     raw_mono.tofile(temp_raw)
-    
+
     # Write the RNNoise mono channel to temp input
     rnn_mono = raw_multi[:, rnn_channel_idx]
     temp_rnn_in = rnn_path.with_suffix(".rnn_in.tmp")
     rnn_mono.tofile(temp_rnn_in)
-    
+
     # Run RNNoise filter on the anchor dominant channel
     escaped_model = str(model_path.resolve()).replace("\\", "/")
     escaped_model = escaped_model.replace(":", "\\:")
     escaped_model = escaped_model.replace("'", "'\\\\''")
-    
+
     temp_rnn_out = rnn_path.with_suffix(".rnn_out.tmp")
     cmd_rnn = [
         "ffmpeg", "-y", "-v", "error",
@@ -263,19 +298,17 @@ def extract_analysis_audio(
     ]
     try:
         subprocess.run(cmd_rnn, check=True)
-        # Atomically rename files
-        if raw_path.exists():
-            raw_path.unlink()
-        temp_raw.rename(raw_path)
-        
-        if rnn_path.exists():
-            rnn_path.unlink()
-        temp_rnn_out.rename(rnn_path)
-        
         # Write metadata JSON
         meta = {
-            "source_id": source_id,
             "fingerprint": fingerprint,
+            "version": "1.1",
+            "model": EXPECTED_MODEL_HASH,
+            "params": DEFAULT_VAD_PARAMS,
+            "source": {
+                "path": str(source_path.resolve()),
+                "size": source_path.stat().st_size,
+                "mtime": source_path.stat().st_mtime
+            },
             "channels": C,
             "raw_channel_idx": raw_channel_idx,
             "rnn_channel_idx": rnn_channel_idx,
@@ -283,10 +316,15 @@ def extract_analysis_audio(
             "rnn_energy": float(np.sum(raw_multi[mask, rnn_channel_idx].astype(np.float64) ** 2)) if np.any(mask) else raw_energies[raw_channel_idx]
         }
         temp_meta = meta_path.with_suffix(".meta.tmp")
-        temp_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        if meta_path.exists():
-            meta_path.unlink()
-        temp_meta.rename(meta_path)
+        with open(temp_meta, "w", encoding="utf-8") as f:
+            f.write(json.dumps(meta, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomically replace files (never unlink old ones first)
+        os.replace(str(temp_raw), str(raw_path))
+        os.replace(str(temp_rnn_out), str(rnn_path))
+        os.replace(str(temp_meta), str(meta_path))
     except Exception as e:
         for p in [temp_raw, temp_rnn_in, temp_rnn_out]:
             if p.exists():
@@ -295,7 +333,7 @@ def extract_analysis_audio(
     finally:
         if temp_rnn_in.exists():
             temp_rnn_in.unlink()
-            
+
     return raw_path, rnn_path
 
 
@@ -309,24 +347,24 @@ def compute_rms_db(samples: np.ndarray, window_size: int, hop_size: int) -> np.n
     n = len(samples)
     if n < window_size:
         return np.array([-120.0])
-        
+
     num_frames = (n - window_size) // hop_size + 1
     rms_db = np.zeros(num_frames, dtype=np.float64)
-    
+
     # Scale int16 samples to range [-1.0, 1.0]
     samples_float = samples.astype(np.float64) / 32768.0
-    
+
     for i in range(num_frames):
         start = i * hop_size
         end = start + window_size
         chunk = samples_float[start:end]
-        
+
         rms = np.sqrt(np.mean(np.square(chunk)))
         if rms <= 1e-9:
             rms_db[i] = -120.0
         else:
             rms_db[i] = 20.0 * np.log10(rms)
-            
+
     return rms_db
 
 
@@ -339,14 +377,14 @@ def compute_noise_floor_db(
     """Estimate local noise floor using the 10th percentile in a ±5s sliding window, excluding words."""
     n = len(rms_db)
     noise_floor = np.zeros(n, dtype=np.float64)
-    
+
     # 5 seconds in frames (e.g. 5.0s / 0.005s = 1000 frames)
     frames_half = int((window_s / 2.0) * (1000.0 / hop_size_ms))
-    
+
     for i in range(n):
         start = max(0, i - frames_half)
         end = min(n, i + frames_half + 1)
-        
+
         chunk_rms = rms_db[start:end]
         if word_mask is not None:
             chunk_mask = word_mask[start:end]
@@ -354,9 +392,9 @@ def compute_noise_floor_db(
             if len(non_word_rms) > 0:
                 noise_floor[i] = np.percentile(non_word_rms, 10)
                 continue
-                
+
         noise_floor[i] = np.percentile(chunk_rms, 10)
-        
+
     return noise_floor
 
 
@@ -371,21 +409,21 @@ def run_vad_hysteresis(
     """Run VAD using adaptive noise floor thresholds, gap filling, and transient protection."""
     n = len(rms_db)
     activity = np.zeros(n, dtype=bool)
-    
+
     is_active = False
     for i in range(n):
         high_t = noise_floor_db[i] + threshold_high_db
         low_t = noise_floor_db[i] + threshold_low_db
-        
+
         if is_active:
             if rms_db[i] < low_t:
                 is_active = False
         else:
             if rms_db[i] > high_t:
                 is_active = True
-                
+
         activity[i] = is_active
-        
+
     # Apply gap fill (40ms -> 8 frames by default)
     activity = activity.copy()
     i = 0
@@ -400,7 +438,7 @@ def run_vad_hysteresis(
                 activity[start:end] = True
         else:
             i += 1
-            
+
     # Apply transient protection (60ms -> 12 frames by default) with speech-following protection
     runs = []
     i = 0
@@ -413,7 +451,7 @@ def run_vad_hysteresis(
             runs.append({"start": start, "end": end, "is_speech": (end - start >= transient_protection_frames)})
         else:
             i += 1
-            
+
     keep_run = [False] * len(runs)
     for idx, run in enumerate(runs):
         if run["is_speech"]:
@@ -426,12 +464,12 @@ def run_vad_hysteresis(
                     if gap <= transient_protection_frames:
                         keep_run[idx] = True
                     break
-                    
+
     new_activity = np.zeros(n, dtype=bool)
     for idx, run in enumerate(runs):
         if keep_run[idx]:
             new_activity[run["start"]:run["end"]] = True
-            
+
     return new_activity
 
 
@@ -440,13 +478,13 @@ def align_signals(rms_raw: np.ndarray, rms_rnn: np.ndarray, max_lag_frames: int)
     n = min(len(rms_raw), len(rms_rnn))
     if n == 0:
         return 0
-        
+
     raw_norm = rms_raw[:n] - np.mean(rms_raw[:n])
     rnn_norm = rms_rnn[:n] - np.mean(rms_rnn[:n])
-    
+
     best_lag = 0
     max_corr = -float("inf")
-    
+
     for lag in range(-max_lag_frames, max_lag_frames + 1):
         if lag > 0:
             shifted = np.concatenate([np.zeros(lag), rnn_norm[:-lag]])
@@ -454,12 +492,12 @@ def align_signals(rms_raw: np.ndarray, rms_rnn: np.ndarray, max_lag_frames: int)
             shifted = np.concatenate([rnn_norm[-lag:], np.zeros(-lag)])
         else:
             shifted = rnn_norm
-            
+
         corr = np.dot(raw_norm, shifted)
         if corr > max_corr:
             max_corr = corr
             best_lag = lag
-            
+
     return best_lag
 
 
@@ -484,31 +522,31 @@ def get_combined_activity(
     rnn_pcm_path: Path,
     params: dict[str, Any],
     words: list[dict[str, Any]] | None = None
-) -> tuple[np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load audio PCM files, run VAD, align them, and return raw and RNNoise activities and RMS profiles."""
     raw_samples = load_pcm_data(raw_pcm_path)
     rnn_samples = load_pcm_data(rnn_pcm_path)
-    
+
     sr = params["sample_rate"]
     win_samples = int(sr * params["window_ms"] / 1000)
     hop_samples = int(sr * params["hop_ms"] / 1000)
-    
+
     rms_raw = compute_rms_db(raw_samples, win_samples, hop_samples)
     rms_rnn = compute_rms_db(rnn_samples, win_samples, hop_samples)
-    
+
     n_min = min(len(rms_raw), len(rms_rnn))
     rms_raw = rms_raw[:n_min]
     rms_rnn = rms_rnn[:n_min]
-    
+
     # Compute noise floors using word-excluded sliding window
     word_mask = build_word_mask(n_min, words, params["hop_ms"])
     nf_raw = compute_noise_floor_db(rms_raw, params["hop_ms"], params["noise_floor_window_s"], word_mask)
     nf_rnn = compute_noise_floor_db(rms_rnn, params["hop_ms"], params["noise_floor_window_s"], word_mask)
-    
+
     gap_frames = int(params["gap_fill_ms"] / params["hop_ms"])
     trans_frames = int(params["transient_protection_ms"] / params["hop_ms"])
     max_lag_frames = int(params["max_lag_ms"] / params["hop_ms"])
-    
+
     activity_raw = run_vad_hysteresis(
         rms_raw, nf_raw,
         params["threshold_high_db"], params["threshold_low_db"],
@@ -519,17 +557,20 @@ def get_combined_activity(
         params["threshold_high_db"], params["threshold_low_db"],
         gap_frames, trans_frames
     )
-    
+
     lag = align_signals(rms_raw, rms_rnn, max_lag_frames)
-    
+
     # Align RNNoise activity and RMS to raw timeline using the optimal lag
     activity_rnn_aligned = np.zeros(n_min, dtype=bool)
     rms_rnn_aligned = np.zeros(n_min, dtype=np.float64)
+    nf_rnn_aligned = np.zeros(n_min, dtype=np.float64)
     for i in range(n_min):
         idx = i - lag
         if 0 <= idx < len(activity_rnn):
             activity_rnn_aligned[i] = activity_rnn[idx]
         if 0 <= idx < len(rms_rnn):
             rms_rnn_aligned[i] = rms_rnn[idx]
-            
-    return activity_raw, activity_rnn_aligned, lag, rms_raw, rms_rnn_aligned, nf_raw
+        if 0 <= idx < len(nf_rnn):
+            nf_rnn_aligned[i] = nf_rnn[idx]
+
+    return activity_raw, activity_rnn_aligned, lag, rms_raw, rms_rnn_aligned, nf_raw, nf_rnn_aligned

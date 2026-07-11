@@ -35,7 +35,7 @@ def parse_fps_fraction(fps: Any) -> Fraction:
             return parse_fps_fraction(float(fps))
         except ValueError:
             raise ValueError(f"Invalid frame rate string: {fps}")
-            
+
     raise TypeError(f"Invalid frame rate type: {type(fps)}")
 
 
