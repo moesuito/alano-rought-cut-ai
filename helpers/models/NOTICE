@@ -1,0 +1,6 @@
+Model: cb.rnnn (Conjoined Burgers RNNNoise model)
+Source Repository: https://github.com/GregorR/rnnoise-models
+Source Commit: 3eee541a283fd3b8f81b85b1748e3b9ccbefa04d
+File Path in Source: conjoined-burgers-2018-08-28/cb.rnnn
+SHA-256: F1357C4E5BE9DEE8467BEAD486DFCED2D75B640C26AD0B594FA7F102322371D9
+Description: A pre-trained Recurrent Neural Network (RNN) model file used with the FFmpeg `arnndn` filter for noise suppression.
