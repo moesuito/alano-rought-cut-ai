@@ -3,7 +3,7 @@
 
 Introducing **alano-rought-cut-ai** — a specialized AI assistant skill for rough video cutting and Adobe Premiere Pro timeline XML export.
 
-Current release: **v0.3.0**.
+Current release: **v0.4.0**.
 
 This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as a **Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
 
@@ -22,7 +22,7 @@ The agent instructions use a capability-routed dual protocol. Capable agents rea
 - **Names the Premiere XML sequence from context**, using names like `reels 35_cadastro_alano-cut` instead of a generic fixed timeline name.
 - **Round-trips corrected Premiere XML back to EDL JSON** for comparison against the agent cut.
 - **Maps audio to a single linked stereo track (A1)**, preventing Premiere Pro from importing duplicate mono tracks.
-- **Renders quick, lightweight preview videos** for visual/audio boundary checks.
+- **Renders quick, lightweight preview audio (preview.wav)** for audio boundary checks, accompanied by a timeline mapping JSON file.
 - **Persists session memory** in `project.md` so editing sessions can resume seamlessly.
 
 ## Installation (Windows PowerShell)
@@ -105,29 +105,27 @@ Routing is based on real context capacity, not a brittle model-name allowlist. C
 
 The protocols differ only in context strategy. Core invariants, workflow, step modules, gates, helpers, artifacts, QC, and completion criteria are shared and normative for every agent.
 
-## What's new in v0.3.0
+## What's new in v0.4.0
+
+- Added a strict quality gate script (`verify_edit_ready.py`) run before XML export.
+- Support for `source_in_frame` / `source_out_frame` mapping inside EDL ranges and XML conversion for precise cut alignment.
+- Switched workflow to be audio-only (`preview.wav` and `preview_timeline.json`), rejecting `.mp4` visual renders.
+- Marked `timeline_view.py` as legacy, scheduled for removal in v0.5.0.
+
+## What shipped in v0.3.0
 
 - Full-context execution is now the default for capable agents.
 - The original modular one-step-at-a-time workflow remains available for context-constrained agents.
 - Both protocols now share one normative rule set and identical completion gates.
-- Shared gates explicitly cover source/transcript coverage, editorial planning, EDL integrity, unresolved high-risk boundaries, re-QC after revisions, XML verification, and final handoff.
-- `run_state.md` records which operating protocol handled the session.
-
-## What shipped in v0.2.0
-
-- Modular `AGENTS.md` + `.agents/` step workflow, replacing the previous monolithic instruction file.
-- Waveform-aware boundary QC through `helpers/validate_edl_boundaries.py`.
-- Preview transcript QC through `helpers/preview_transcript_qc.py`.
-- XML round-trip analysis through `helpers/fcpxml_to_edl.py`.
-- Context-aware Premiere sequence names such as `reels 35_cadastro_alano-cut`.
-- Safer preview transcript refresh with `helpers/transcribe.py --force`.
 
 ## QA helper commands
 
 ```powershell
 .venv\Scripts\python.exe helpers\validate_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts -o raw_video\edit\edl_boundary_qc.json
-.venv\Scripts\python.exe helpers\transcribe.py raw_video\edit\preview.mp4 --edit-dir raw_video\edit --force
+.venv\Scripts\python.exe helpers\render.py raw_video\edit\edl.json -o raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
+.venv\Scripts\python.exe helpers\transcribe.py raw_video\edit\preview.wav --edit-dir raw_video\edit --force
 .venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\transcripts\preview.json -o raw_video\edit\preview_transcript_qc.json
+.venv\Scripts\python.exe helpers\verify_edit_ready.py raw_video\edit\edl.json
 .venv\Scripts\python.exe helpers\edl_to_fcpxml.py raw_video\edit\edl.json -o raw_video\edit\timeline.xml --timeline-name "reels 35_cadastro_alano-cut"
 .venv\Scripts\python.exe helpers\fcpxml_to_edl.py raw_video\edit\timeline_fix.xml -o raw_video\edit\timeline_fix_from_xml.edl.json --media-root raw_video
 ```

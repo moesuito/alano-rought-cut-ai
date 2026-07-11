@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 - 2026-07-11
 
-### Documentation
+### Added
+- Added `verify_edit_ready.py` gate validation prior to XML timeline export in Step 09.
+- Added non-blocking QC verification warning when executing `edl_to_fcpxml.py` manually.
+- Support for `source_in_frame` / `source_out_frame` in XML conversion, matching preview frames exactly.
+- Added opt-in private regression testing using `ALANOCUT_LESSON08_DIR` environment variable.
 
-- Clarified that `alanocut update` refreshes the global installation and existing workspaces require `alanocut init` to copy the new harness locally.
+### Changed
+- Shifted the workflow to be audio-only, using `preview.wav` and `preview_timeline.json` instead of `preview.mp4`.
+- Marked `timeline_view.py` as legacy, slated for removal in v0.5.0.
+- Updated README, installation instructions, and modular steps.
 
 ## v0.3.0 - 2026-07-10
 

@@ -21,6 +21,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+# Support running directly as a script
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from helpers.timing import parse_fps_fraction, time_to_frame
+
+
 
 FALLBACK_SUFFIX = "alano-cut"
 
@@ -209,6 +216,27 @@ def convert_edl_to_xml(
     if not edl_path.exists():
         sys.exit(f"Error: EDL file not found at {edl_path}")
         
+    # Warn but do not block if QC check fails or is stale
+    verify_script = Path(__file__).parent / "verify_edit_ready.py"
+    if verify_script.exists():
+        edit_dir = edl_path.parent
+        cmd = [
+            sys.executable, str(verify_script), str(edl_path),
+            "--transcripts", str(edit_dir / "transcripts"),
+            "--boundary-report", str(edit_dir / "edl_boundary_qc.json"),
+            "--audio-report", str(edit_dir / "preview_audio_qc.json"),
+            "--semantic-report", str(edit_dir / "edl_semantic_qc.json"),
+            "--transcript-report", str(edit_dir / "preview_transcript_qc.json"),
+            "--audio", str(edit_dir / "preview.wav"),
+            "--timeline-map", str(edit_dir / "preview_timeline.json")
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                print(f"Warning: QC verification failed or reports are stale (exit code {res.returncode}). Proceeding with XML generation.", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: could not run verification check: {e}", file=sys.stderr)
+
     edl = json.loads(edl_path.read_text(encoding="utf-8"))
     sources = edl.get("sources", {})
     ranges = edl.get("ranges", [])
@@ -289,8 +317,16 @@ def convert_edl_to_xml(
         clip_timebase, clip_ntsc = get_timebase_and_ntsc(clip_fps)
         
         # Calculate frame ranges
-        in_frame = int(round(start_sec * clip_fps))
-        out_frame = int(round(end_sec * clip_fps))
+        clip_fps_frac = parse_fps_fraction(clip_fps)
+        in_frame = r.get("source_in_frame")
+        out_frame = r.get("source_out_frame")
+        if in_frame is None:
+            in_frame = time_to_frame(start_sec, clip_fps_frac, "round")
+        if out_frame is None:
+            out_frame = time_to_frame(end_sec, clip_fps_frac, "round")
+        
+        in_frame = int(in_frame)
+        out_frame = int(out_frame)
         duration_frames = out_frame - in_frame
         
         end_timeline_frame = start_timeline_frame + duration_frames

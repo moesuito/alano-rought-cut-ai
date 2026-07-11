@@ -76,3 +76,8 @@ docs/scratches/
 
 # Linked git worktrees kept inside this workspace
 .worktrees/
+
+# Private regression manifests
+regression_manifest.json
+manifest.json
+

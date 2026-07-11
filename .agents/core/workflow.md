@@ -134,7 +134,8 @@ Inputs:
 - source media
 
 Outputs:
-- `edit/preview.mp4`
+- `edit/preview.wav`
+- `edit/preview_timeline.json`
 - `edit/edl_boundary_qc.json`
 - `edit/preview_transcript_qc.json`, if preview audio is transcribed
 - verification notes in `edit/run_state.md`
