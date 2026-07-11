@@ -152,3 +152,49 @@ def test_private_regression_opt_in():
         for src_name, rel_path in manifest["sources"].items():
             full_path = lesson_path / rel_path
             assert full_path.exists(), f"Source file from manifest missing: {full_path}"
+
+
+def test_alanocut_init_smoke(tmp_path):
+    """Verify that alanocut init runs and sets up the workspace."""
+    env = os.environ.copy()
+    env["USERPROFILE"] = str(tmp_path / "home")
+    (tmp_path / "home").mkdir()
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    ps_script = Path("bin/alanocut.ps1").absolute()
+    
+    res = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script), "init"],
+        cwd=str(workspace),
+        env=env,
+        capture_output=True,
+        text=True
+    )
+    
+    assert res.returncode == 0, f"alanocut init failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    
+    # Check created files
+    assert (workspace / "helpers").exists()
+    assert (workspace / "AGENTS.md").exists()
+    assert (workspace / "SKILL.md").exists()
+    assert (workspace / "pyproject.toml").exists()
+    assert (workspace / ".gitignore").exists()
+    assert (workspace / "config.json").exists()
+    assert (workspace / ".agents").exists()
+    assert (workspace / "raw_video").exists()
+    assert (workspace / "raw_video/edit").exists()
+
+
+def test_alanocut_update_smoke():
+    """Verify that alanocut update runs successfully."""
+    ps_script = Path("bin/alanocut.ps1").absolute()
+    res = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script), "update"],
+        capture_output=True,
+        text=True
+    )
+    # It might warn about gh CLI, but should exit with 0 if it skips or succeeds
+    assert res.returncode == 0, f"alanocut update failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+
