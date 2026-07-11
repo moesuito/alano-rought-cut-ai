@@ -63,19 +63,19 @@ def extract_audio_segment(
     out_path: Path,
 ) -> None:
     """Extract a sample range as stereo PCM16 48kHz WAV using ffmpeg filter graphs.
-    
+
     Resamples input to 48000 Hz and channel layout to stereo first,
     then trims to exact start and end samples, resetting PTS.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # We use aformat to enforce 48000 Hz, stereo, and s16 format before trimming.
     filter_str = (
         f"aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
         f"atrim=start_sample={start_sample}:end_sample={end_sample},"
         f"asetpts=PTS-STARTPTS"
     )
-    
+
     cmd = [
         "ffmpeg", "-y", "-v", "error",
         "-i", str(source_path),
@@ -109,40 +109,40 @@ def main() -> None:
     ap.add_argument("edl", type=Path, help="Path to edl.json")
     ap.add_argument("-o", "--output", type=Path, required=True, help="Output audio WAV path")
     ap.add_argument("--timeline-map", type=Path, required=True, help="Output timeline map JSON path")
-    
+
     # Deprecated no-ops for v0.4 compatibility
     ap.add_argument("--preview", action="store_true", help="Deprecated no-op")
     ap.add_argument("--draft", action="store_true", help="Deprecated no-op")
     ap.add_argument("--build-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-loudnorm", action="store_true", help=argparse.SUPPRESS)
-    
+
     args = ap.parse_args()
-    
+
     # Reject .mp4 output files
     if args.output.suffix.lower() == ".mp4":
         print("Error: Rendering to .mp4 is rejected in v0.4. Audio-only WAV is required.", file=sys.stderr)
         sys.exit(1)
-        
+
     edl_path = args.edl.resolve()
     if not edl_path.exists():
         print(f"Error: EDL not found at {edl_path}", file=sys.stderr)
         sys.exit(1)
-        
+
     # Read EDL and compute hash
     edl_bytes = edl_path.read_bytes()
     edl_hash = hashlib.sha256(edl_bytes).hexdigest()
-    
+
     try:
         edl = json.loads(edl_bytes.decode("utf-8"))
     except Exception as e:
         print(f"Error: Failed to parse EDL JSON: {e}", file=sys.stderr)
         sys.exit(1)
-        
+
     edit_dir = edl_path.parent
     sources = edl.get("sources", {})
     ranges = edl.get("ranges", [])
-    
+
     # Determine FPS from sources or metadata
     fps_set = set()
     for source_id, rel_path in sources.items():
@@ -162,7 +162,7 @@ def main() -> None:
                     fps_set.add(parse_fps_fraction(r_fps))
         except Exception:
             pass
-            
+
     if len(fps_set) == 1:
         fps = list(fps_set)[0]
     else:
@@ -176,16 +176,16 @@ def main() -> None:
         else:
             print("Error: No frame rate found in sources or EDL metadata.", file=sys.stderr)
             sys.exit(1)
-            
+
     # Process ranges
     ranges_map = []
     cum_start = 0
-    
+
     # We will perform all rendering inside a temp directory to keep the workspace clean
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
         segment_files = []
-        
+
         try:
             for i, r in enumerate(ranges):
                 source_id = r["source"]
@@ -193,7 +193,7 @@ def main() -> None:
                 if not src_path.exists():
                     print(f"Error: Source file not found: {src_path}", file=sys.stderr)
                     sys.exit(1)
-                    
+
                 # Resolve frame boundaries
                 F_in = r.get("source_in_frame")
                 F_out = r.get("source_out_frame")
@@ -201,25 +201,25 @@ def main() -> None:
                     F_in = time_to_frame(r["start"], fps, "round")
                 if F_out is None:
                     F_out = time_to_frame(r["end"], fps, "round")
-                    
+
                 start_sample = frame_to_sample(F_in, fps)
                 end_sample = frame_to_sample(F_out, fps)
                 duration_samples = end_sample - start_sample
-                
+
                 channels = probe_channels(src_path)
                 channel_policy = "mono_to_stereo" if channels == 1 else "stereo_preserve" if channels == 2 else "multichannel_downmix"
-                
+
                 temp_wav = temp_dir_path / f"seg_{i:04d}.wav"
-                
+
                 extract_audio_segment(
                     source_path=src_path,
                     start_sample=start_sample,
                     end_sample=end_sample,
                     out_path=temp_wav
                 )
-                
+
                 segment_files.append(temp_wav)
-                
+
                 ranges_map.append({
                     "source": source_id,
                     "source_frames": [int(F_in), int(F_out)],
@@ -229,14 +229,14 @@ def main() -> None:
                     "source_channels": channels,
                     "channel_policy": channel_policy
                 })
-                
+
                 cum_start += duration_samples
-                
+
             # Concatenate the segments using the concat demuxer
             concat_list_path = temp_dir_path / "concat_list.txt"
             concat_content = "".join(f"file '{p.name}'\n" for p in segment_files)
             concat_list_path.write_text(concat_content, encoding="utf-8")
-            
+
             temp_output_wav = temp_dir_path / "preview.wav"
             concat_cmd = [
                 "ffmpeg", "-y", "-v", "error",
@@ -248,7 +248,7 @@ def main() -> None:
             ]
             # Execute concat in the temp directory so relative filenames resolve correctly
             subprocess.run(concat_cmd, check=True, cwd=temp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            
+
             # Formulate the global channel policy
             channel_policies = [rm["channel_policy"] for rm in ranges_map]
             if not channel_policies:
@@ -261,7 +261,7 @@ def main() -> None:
                 global_channel_policy = "multichannel_downmix"
             else:
                 global_channel_policy = "mixed"
-                
+
             timeline_map = {
                 "edl_hash": edl_hash,
                 "output_format": {
@@ -273,15 +273,15 @@ def main() -> None:
                 },
                 "ranges": ranges_map
             }
-            
+
             # Atomic replacement of both outputs
             out_wav_path = args.output.resolve()
             out_map_path = args.timeline_map.resolve()
-            
+
             # Write map JSON atomically
             map_content = json.dumps(timeline_map, indent=2)
             write_atomic(out_map_path, map_content)
-            
+
             # Copy temp WAV to final output path atomically
             temp_final_wav = out_wav_path.with_suffix(out_wav_path.suffix + f".{os.getpid()}.tmp")
             try:
@@ -292,9 +292,9 @@ def main() -> None:
                 if temp_final_wav.exists():
                     temp_final_wav.unlink()
                 raise e
-                
+
             print(f"Render completed: {out_wav_path} ({cum_start} samples)")
-            
+
         except subprocess.CalledProcessError as e:
             err_msg = e.stderr.decode("utf-8") if e.stderr else str(e)
             print(f"Error during audio processing: {err_msg}", file=sys.stderr)
