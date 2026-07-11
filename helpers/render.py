@@ -1,64 +1,28 @@
-"""Render a video from an EDL.
+"""Render a WAV preview from an EDL.
 
-Implements the rough-cut render pipeline:
-  1. Per-segment extract with 30ms audio fades baked in to prevent pops.
-  2. Lossless -c copy concat into final.mp4/preview.mp4.
-
-Usage:
-    python helpers/render.py <edl.json> -o final.mp4
-    python helpers/render.py <edl.json> -o preview.mp4 --preview
+Implements the dry, deterministic audio-only preview pipeline:
+  1. Per-segment extract as PCM16 48kHz stereo WAV from EDL boundaries.
+  2. Lossless concatenation into final WAV.
+  3. Generation of a timeline map JSON.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
+from fractions import Fraction
 from pathlib import Path
 
+# Support running directly as a script
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# -------- HDR -> SDR tone mapping (HLG / PQ sources) --------------------------
-# iPhone defaults to HLG HDR in Rec.2020. Tone-map to Rec.709 SDR.
-HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}  # PQ (HDR10) and HLG
-
-TONEMAP_CHAIN = (
-    "zscale=t=linear:npl=100,"
-    "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=hable:desat=0,"
-    "zscale=t=bt709:m=bt709:r=tv,"
-    "format=yuv420p"
-)
-
-
-def is_hdr_source(video: Path) -> bool:
-    """Return True if the source uses a PQ or HLG transfer function."""
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=color_transfer",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
-            capture_output=True, text=True, check=True,
-        )
-        return out.stdout.strip() in HDR_TRANSFERS
-    except subprocess.CalledProcessError:
-        return False
-
-
-def is_portrait_source(video: Path) -> bool:
-    """Return True if the video's height > width (portrait / vertical)."""
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height",
-             "-of", "csv=p=0", str(video)],
-            capture_output=True, text=True, check=True,
-        )
-        w, h = map(int, out.stdout.strip().split(","))
-        return h > w
-    except Exception:
-        return False
+from helpers.timing import parse_fps_fraction, time_to_frame
 
 
 def resolve_path(maybe_path: str, base: Path) -> Path:
@@ -69,155 +33,275 @@ def resolve_path(maybe_path: str, base: Path) -> Path:
     return (base / p).resolve()
 
 
-# -------- Per-segment extraction --------------------------------------------
+def probe_channels(source_path: Path) -> int:
+    """Probe the number of audio channels in a source file."""
+    cmd_channels = [
+        "ffprobe", "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=channels",
+        "-of", "json", str(source_path)
+    ]
+    try:
+        out_c = subprocess.check_output(cmd_channels, text=True)
+        data_c = json.loads(out_c)
+        streams = data_c.get("streams", [])
+        if not streams:
+            return 1
+        return int(streams[0].get("channels", 1))
+    except Exception:
+        return 1
 
-def extract_segment(
-    source: Path,
-    seg_start: float,
-    duration: float,
+
+def frame_to_sample(frame: int, fps: Fraction, sample_rate: int = 48000) -> int:
+    """Convert a frame index to a sample index using rational math."""
+    return int(round(Fraction(frame) * sample_rate / fps))
+
+
+def extract_audio_segment(
+    source_path: Path,
+    start_sample: int,
+    end_sample: int,
     out_path: Path,
-    preview: bool = False,
-    draft: bool = False,
 ) -> None:
-    """Extract a cut range as its own MP4 with 30ms audio fades baked in.
-
-    -ss before -i for fast seeking. Scale to 1080p (or 720p in draft).
+    """Extract a sample range as stereo PCM16 48kHz WAV using ffmpeg filter graphs.
+    
+    Resamples input to 48000 Hz and channel layout to stereo first,
+    then trims to exact start and end samples, resetting PTS.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    portrait = is_portrait_source(source)
-    if draft:
-        scale = "scale=-2:1280" if portrait else "scale=1280:-2"
-    else:
-        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
-
-    vf_parts: list[str] = []
-    if is_hdr_source(source):
-        vf_parts.append(TONEMAP_CHAIN)
-    vf_parts.append(scale)
-    vf = ",".join(vf_parts)
-
-    # 30ms audio fades at both edges (prevents pops)
-    fade_out_start = max(0.0, duration - 0.03)
-    af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
-
-    if draft:
-        preset, crf = "ultrafast", "28"
-    elif preview:
-        preset, crf = "medium", "22"
-    else:
-        preset, crf = "fast", "20"
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", f"{seg_start:.3f}",
-        "-i", str(source),
-        "-t", f"{duration:.3f}",
-        "-vf", vf,
-        "-af", af,
-        "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-        "-movflags", "+faststart",
-        str(out_path),
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-
-def extract_all_segments(
-    edl: dict,
-    edit_dir: Path,
-    preview: bool,
-    draft: bool = False,
-) -> list[Path]:
-    """Extract every EDL range into temporary segment clips."""
-    clips_dir = edit_dir / (
-        "clips_draft" if draft else ("clips_preview" if preview else "clips_graded")
+    
+    # We use aformat to enforce 48000 Hz, stereo, and s16 format before trimming.
+    filter_str = (
+        f"aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
+        f"atrim=start_sample={start_sample}:end_sample={end_sample},"
+        f"asetpts=PTS-STARTPTS"
     )
-    clips_dir.mkdir(parents=True, exist_ok=True)
-
-    ranges = edl["ranges"]
-    sources = edl["sources"]
-
-    seg_paths: list[Path] = []
-    print(f"extracting {len(ranges)} segment(s) -> {clips_dir.name}/")
-    for i, r in enumerate(ranges):
-        src_name = r["source"]
-        src_path = resolve_path(sources[src_name], edit_dir)
-        start = float(r["start"])
-        end = float(r["end"])
-        duration = end - start
-        out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
-
-        note = r.get("beat") or r.get("note") or ""
-        print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
-        extract_segment(src_path, start, duration, out_path, preview=preview, draft=draft)
-        seg_paths.append(out_path)
-
-    return seg_paths
-
-
-# -------- Lossless concat ----------------------------------------------------
-
-def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -> None:
-    """Lossless concat via the concat demuxer. No re-encode."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    concat_list = edit_dir / "_concat.txt"
-    concat_list.write_text("".join(f"file '{p.resolve()}'\n" for p in segment_paths), encoding="utf-8")
-
+    
     cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", str(concat_list),
-        "-c", "copy",
-        "-movflags", "+faststart",
-        str(out_path),
+        "ffmpeg", "-y", "-v", "error",
+        "-i", str(source_path),
+        "-vn",
+        "-af", filter_str,
+        "-c:a", "pcm_s16le",
+        "-rf64", "auto",
+        str(out_path)
     ]
-    print(f"concat -> {out_path.name}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    concat_list.unlink(missing_ok=True)
 
 
-# -------- Main ---------------------------------------------------------------
+def write_atomic(dest_path: Path, content: str) -> None:
+    """Write string content atomically to a file using a temp file."""
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = dest_path.with_suffix(dest_path.suffix + f".{os.getpid()}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(temp_path), str(dest_path))
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise e
+
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Render a video from an EDL (Rough Cut)")
+    ap = argparse.ArgumentParser(description="Render a WAV preview from an EDL")
     ap.add_argument("edl", type=Path, help="Path to edl.json")
-    ap.add_argument("-o", "--output", type=Path, required=True, help="Output video path")
-    ap.add_argument(
-        "--preview",
-        action="store_true",
-        help="Preview mode: 1080p, medium, CRF 22 — faster than final.",
-    )
-    ap.add_argument(
-        "--draft",
-        action="store_true",
-        help="Draft mode: 720p, ultrafast, CRF 28 — cut-point verification only.",
-    )
-    # Kept arguments as no-ops to avoid breaking existing workflow integrations
+    ap.add_argument("-o", "--output", type=Path, required=True, help="Output audio WAV path")
+    ap.add_argument("--timeline-map", type=Path, required=True, help="Output timeline map JSON path")
+    
+    # Deprecated no-ops for v0.4 compatibility
+    ap.add_argument("--preview", action="store_true", help="Deprecated no-op")
+    ap.add_argument("--draft", action="store_true", help="Deprecated no-op")
     ap.add_argument("--build-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-loudnorm", action="store_true", help=argparse.SUPPRESS)
+    
     args = ap.parse_args()
-
+    
+    # Reject .mp4 output files
+    if args.output.suffix.lower() == ".mp4":
+        print("Error: Rendering to .mp4 is rejected in v0.4. Audio-only WAV is required.", file=sys.stderr)
+        sys.exit(1)
+        
     edl_path = args.edl.resolve()
     if not edl_path.exists():
-        sys.exit(f"edl not found: {edl_path}")
-
-    edl = json.loads(edl_path.read_text(encoding="utf-8"))
+        print(f"Error: EDL not found at {edl_path}", file=sys.stderr)
+        sys.exit(1)
+        
+    # Read EDL and compute hash
+    edl_bytes = edl_path.read_bytes()
+    edl_hash = hashlib.sha256(edl_bytes).hexdigest()
+    
+    try:
+        edl = json.loads(edl_bytes.decode("utf-8"))
+    except Exception as e:
+        print(f"Error: Failed to parse EDL JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+        
     edit_dir = edl_path.parent
-    out_path = args.output.resolve()
-
-    # 1. Extract segments
-    segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft
-    )
-
-    # 2. Concat directly to the destination
-    concat_segments(segment_paths, out_path, edit_dir)
-
-    size_mb = out_path.stat().st_size / (1024 * 1024)
-    print(f"\ndone: {out_path} ({size_mb:.1f} MB)")
+    sources = edl.get("sources", {})
+    ranges = edl.get("ranges", [])
+    
+    # Determine FPS from sources or metadata
+    fps_set = set()
+    for source_id, rel_path in sources.items():
+        src_path = resolve_path(rel_path, edit_dir)
+        cmd_fps = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "json", str(src_path)
+        ]
+        try:
+            out = subprocess.check_output(cmd_fps, text=True)
+            data = json.loads(out)
+            streams = data.get("streams", [])
+            if streams:
+                r_fps = streams[0].get("r_frame_rate")
+                if r_fps and r_fps != "0/0":
+                    fps_set.add(parse_fps_fraction(r_fps))
+        except Exception:
+            pass
+            
+    if len(fps_set) == 1:
+        fps = list(fps_set)[0]
+    else:
+        seq_fps = edl.get("metadata", {}).get("sequence_fps")
+        if seq_fps:
+            try:
+                fps = parse_fps_fraction(seq_fps)
+            except Exception as e:
+                print(f"Error: Invalid sequence_fps metadata: {seq_fps} ({e})", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print("Error: No frame rate found in sources or EDL metadata.", file=sys.stderr)
+            sys.exit(1)
+            
+    # Process ranges
+    ranges_map = []
+    cum_start = 0
+    
+    # We will perform all rendering inside a temp directory to keep the workspace clean
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        segment_files = []
+        
+        try:
+            for i, r in enumerate(ranges):
+                source_id = r["source"]
+                src_path = resolve_path(sources[source_id], edit_dir)
+                if not src_path.exists():
+                    print(f"Error: Source file not found: {src_path}", file=sys.stderr)
+                    sys.exit(1)
+                    
+                # Resolve frame boundaries
+                F_in = r.get("source_in_frame")
+                F_out = r.get("source_out_frame")
+                if F_in is None:
+                    F_in = time_to_frame(r["start"], fps, "round")
+                if F_out is None:
+                    F_out = time_to_frame(r["end"], fps, "round")
+                    
+                start_sample = frame_to_sample(F_in, fps)
+                end_sample = frame_to_sample(F_out, fps)
+                duration_samples = end_sample - start_sample
+                
+                channels = probe_channels(src_path)
+                channel_policy = "mono_to_stereo" if channels == 1 else "stereo_preserve" if channels == 2 else "multichannel_downmix"
+                
+                temp_wav = temp_dir_path / f"seg_{i:04d}.wav"
+                
+                extract_audio_segment(
+                    source_path=src_path,
+                    start_sample=start_sample,
+                    end_sample=end_sample,
+                    out_path=temp_wav
+                )
+                
+                segment_files.append(temp_wav)
+                
+                ranges_map.append({
+                    "source": source_id,
+                    "source_frames": [int(F_in), int(F_out)],
+                    "source_sample_interval": [start_sample, end_sample],
+                    "output_cumulative_sample_interval": [cum_start, cum_start + duration_samples],
+                    "seconds": round(float(Fraction(F_out - F_in) / fps), 6),
+                    "source_channels": channels,
+                    "channel_policy": channel_policy
+                })
+                
+                cum_start += duration_samples
+                
+            # Concatenate the segments using the concat demuxer
+            concat_list_path = temp_dir_path / "concat_list.txt"
+            concat_content = "".join(f"file '{p.name}'\n" for p in segment_files)
+            concat_list_path.write_text(concat_content, encoding="utf-8")
+            
+            temp_output_wav = temp_dir_path / "preview.wav"
+            concat_cmd = [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list_path),
+                "-c", "copy",
+                "-rf64", "auto",
+                str(temp_output_wav)
+            ]
+            # Execute concat in the temp directory so relative filenames resolve correctly
+            subprocess.run(concat_cmd, check=True, cwd=temp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            
+            # Formulate the global channel policy
+            channel_policies = [rm["channel_policy"] for rm in ranges_map]
+            if not channel_policies:
+                global_channel_policy = "empty"
+            elif all(cp == "mono_to_stereo" for cp in channel_policies):
+                global_channel_policy = "mono_to_stereo"
+            elif all(cp == "stereo_preserve" for cp in channel_policies):
+                global_channel_policy = "stereo_preserve"
+            elif all(cp == "multichannel_downmix" for cp in channel_policies):
+                global_channel_policy = "multichannel_downmix"
+            else:
+                global_channel_policy = "mixed"
+                
+            timeline_map = {
+                "edl_hash": edl_hash,
+                "output_format": {
+                    "format": "PCM16",
+                    "sample_rate": 48000,
+                    "channels": 2,
+                    "channel_policy": global_channel_policy,
+                    "sequence_fps": float(fps)
+                },
+                "ranges": ranges_map
+            }
+            
+            # Atomic replacement of both outputs
+            out_wav_path = args.output.resolve()
+            out_map_path = args.timeline_map.resolve()
+            
+            # Write map JSON atomically
+            map_content = json.dumps(timeline_map, indent=2)
+            write_atomic(out_map_path, map_content)
+            
+            # Copy temp WAV to final output path atomically
+            temp_final_wav = out_wav_path.with_suffix(out_wav_path.suffix + f".{os.getpid()}.tmp")
+            try:
+                import shutil
+                shutil.copy2(temp_output_wav, temp_final_wav)
+                os.replace(str(temp_final_wav), str(out_wav_path))
+            except Exception as e:
+                if temp_final_wav.exists():
+                    temp_final_wav.unlink()
+                raise e
+                
+            print(f"Render completed: {out_wav_path} ({cum_start} samples)")
+            
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.decode("utf-8") if e.stderr else str(e)
+            print(f"Error during audio processing: {err_msg}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
