@@ -59,4 +59,20 @@ takes_packed.md
 edl.json
 project.md
 raw_video/
+audio/
+audio_analysis/
+preview.wav
+preview_timeline.json
+preview_audio_qc.json
+edl_boundary_qc.json
+edl_semantic_qc.json
+backups/
 
+
+# --- orchestrator-worker-harness (local working state) ---
+task.md
+orchestrator-state.md
+docs/scratches/
+
+# Linked git worktrees kept inside this workspace
+.worktrees/
