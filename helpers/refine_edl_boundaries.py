@@ -103,26 +103,55 @@ def write_atomic(dest_path: Path, content: str) -> None:
 
 
 def is_cue_word(word_text: str) -> bool:
-    """Return True if the word is a generic recording cue."""
+    """Return True if the word is a generic recording cue (e.g. corta, cortar)."""
     cleaned = word_text.strip().lower().rstrip(".,?!:;()")
-    return cleaned in {"corta", "deixar", "cortar", "deixa"}
+    return cleaned in {"corta", "cortar"}
 
 
-def get_refined_bound_on_signal(
+def get_local_metrics(
+    rms_raw: np.ndarray,
+    rms_rnn: np.ndarray,
+    nf_raw: np.ndarray,
+    start_time: float,
+    end_time: float
+) -> tuple[float | None, float | None]:
+    """Calculate the average SNR and correlation in a local time window."""
+    start_idx = max(0, int(start_time * 200))
+    end_idx = max(0, min(len(rms_raw), int(end_time * 200)))
+    if start_idx >= end_idx:
+        return None, None
+
+    slice_raw = rms_raw[start_idx:end_idx]
+    slice_rnn = rms_rnn[start_idx:end_idx]
+    slice_nf = nf_raw[start_idx:end_idx]
+
+    corr_val = None
+    if len(slice_raw) > 5 and np.std(slice_raw) > 1e-4 and np.std(slice_rnn) > 1e-4:
+        c = np.corrcoef(slice_raw, slice_rnn)[0, 1]
+        if np.isfinite(c):
+            corr_val = float(c)
+
+    snr_val = None
+    if len(slice_raw) > 0:
+        s_val = float(np.mean(slice_raw) - np.mean(slice_nf))
+        if np.isfinite(s_val):
+            snr_val = s_val
+
+    return snr_val, corr_val
+
+
+def get_scored_refined_bound(
     activity_sig: np.ndarray,
     w_start: float,
-    w_end: float
-) -> tuple[float, float, bool]:
-    """Find the active component overlapping [w_start, w_end] (padded by 40ms) with maximum overlap."""
+    w_end: float,
+    prev_end: float | None,
+    next_start: float | None
+) -> tuple[float, float, bool, list[dict[str, Any]]]:
+    """Find and score contiguous active VAD components overlapping the lexical word [w_start, w_end]."""
+    # We use a search tolerance of 40ms to handle transcript alignment uncertainty
     pad_s = 0.04
-    w_start_f = int(round((w_start - pad_s) * 200))
-    w_end_f = int(round((w_end + pad_s) * 200))
-
-    if w_start_f > w_end_f:
-        w_start_f, w_end_f = w_end_f, w_start_f
-
-    w_start_f = max(0, min(len(activity_sig) - 1, w_start_f))
-    w_end_f = max(0, min(len(activity_sig) - 1, w_end_f))
+    w_start_padded = w_start - pad_s
+    w_end_padded = w_end + pad_s
 
     # Find all contiguous active components
     components = []
@@ -141,25 +170,59 @@ def get_refined_bound_on_signal(
     if in_comp:
         components.append((start_idx, n))
 
-    # Find components overlapping [w_start_f, w_end_f]
-    overlapping_comps = []
-    for c in components:
-        c_start, c_end = c
-        if c_end > w_start_f and c_start <= w_end_f:
-            overlap = min(c_end, w_end_f + 1) - max(c_start, w_start_f)
-            overlapping_comps.append((overlap, c))
+    candidates = []
+    # Narrow down components overlapping the padded word boundaries
+    for c_start_idx, c_end_idx in components:
+        c_start = c_start_idx * 0.005
+        c_end = c_end_idx * 0.005
 
-    if not overlapping_comps:
-        return w_start, w_end, False
+        if c_end > w_start_padded and c_start < w_end_padded:
+            overlap = max(0.0, min(c_end, w_end) - max(c_start, w_start))
+            duration = c_end - c_start
 
-    # Choose the component with maximum overlap
-    overlapping_comps.sort(key=lambda x: (x[0], -x[1][0]), reverse=True)
-    best_overlap, best_comp = overlapping_comps[0]
+            # Distance score if no overlap
+            if overlap > 0.0:
+                dist_score = overlap * 10.0
+            else:
+                dist = max(0.0, w_start - c_end) + max(0.0, c_start - w_end)
+                dist_score = -dist * 20.0
 
-    comp_start = best_comp[0] * 0.005
-    comp_end = best_comp[1] * 0.005
+            # Length penalty (breath/transient protection)
+            length_penalty = 0.0
+            if duration < 0.12:
+                length_penalty = -15.0
 
-    return comp_start, comp_end, True
+            # Collision penalty
+            collision_penalty = 0.0
+            if prev_end is not None and c_start < prev_end:
+                collision_penalty -= 100.0
+            if next_start is not None and c_end > next_start:
+                collision_penalty -= 100.0
+
+            score = dist_score + length_penalty + collision_penalty
+
+            candidates.append({
+                "start": c_start,
+                "end": c_end,
+                "score": score,
+                "overlap": overlap,
+                "duration": duration,
+                "is_selected": False,
+                "reasons": f"overlap={overlap:.3f}, dur={duration:.3f}, len_pen={length_penalty:.1f}, coll_pen={collision_penalty:.1f}"
+            })
+
+    if not candidates:
+        return w_start, w_end, False, []
+
+    # Sort candidates by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    best_cand = candidates[0]
+
+    has_signal = True
+    best_cand["is_selected"] = True
+
+    return best_cand["start"], best_cand["end"], has_signal, candidates
+
 
 
 
@@ -443,81 +506,118 @@ def main() -> None:
             if np.isfinite(s_val):
                 snr_val = s_val
 
+        prev_end = float(prev_word["end"]) if prev_word else None
+        next_start = float(next_word["start"]) if next_word else None
+
+        # Start side window: around first word start
+        start_win_t1 = float(first_word["start"]) - 0.5
+        start_win_t2 = float(first_word["end"]) + 0.5
+        # End side window: around last word end
+        end_win_t1 = float(last_word["start"]) - 0.5
+        end_win_t2 = float(last_word["end"]) + 0.5
+
+        # Measure local metrics per side
+        start_snr, start_corr = get_local_metrics(rms_raw, rms_rnn, nf_raw, start_win_t1, start_win_t2)
+        end_snr, end_corr = get_local_metrics(rms_raw, rms_rnn, nf_raw, end_win_t1, end_win_t2)
+
+
         # Find refined start bound (from first word)
-        comp_start_raw, comp_end_raw, has_start_raw = get_refined_bound_on_signal(activity_raw, float(first_word["start"]), float(first_word["end"]))
-        comp_start_rnn, comp_end_rnn, has_start_rnn = get_refined_bound_on_signal(activity_rnn, float(first_word["start"]), float(first_word["end"]))
+        comp_start_raw, comp_end_raw, has_start_raw, start_raw_candidates = get_scored_refined_bound(
+            activity_raw, float(first_word["start"]), float(first_word["end"]), prev_end, next_start
+        )
+        comp_start_rnn, comp_end_rnn, has_start_rnn, start_rnn_candidates = get_scored_refined_bound(
+            activity_rnn, float(first_word["start"]), float(first_word["end"]), prev_end, next_start
+        )
 
         t_onset_raw = comp_start_raw if has_start_raw else float(first_word["start"])
         t_onset_rnn = comp_start_rnn if has_start_rnn else float(first_word["start"])
 
-        # Determine start boundary
+        # Default: average VAD start if both are active/found, or whichever is found
+        if has_start_raw and has_start_rnn:
+            t_onset = (t_onset_raw + t_onset_rnn) / 2.0
+        elif has_start_raw:
+            t_onset = t_onset_raw
+        elif has_start_rnn:
+            t_onset = t_onset_rnn
+        else:
+            t_onset = float(first_word["start"])
+
+        # Determine start boundary collisions and guards
         has_start_collision = False
         cue_guarded_start = False
         is_clamped_start = False
+        start_rejection_reasons = []
 
-        if prev_word is not None:
-            prev_end = float(prev_word["end"])
+        # Exact neighbor limit in frame
+        F_prev_limit = time_to_frame(prev_end, fps, "ceil") if prev_end is not None else 0
+
+        # Overlapping lexical intervals check
+        if prev_word is not None and prev_end > float(first_word["start"]):
+            t_onset = orig_start
+            is_clamped_start = True
+            start_rejection_reasons.append("overlapping_lexical_intervals")
+        elif prev_word is not None:
+            # Check for VAD-level collision
             raw_collides = has_start_raw and (comp_start_raw < prev_end)
             rnn_collides = has_start_rnn and (comp_start_rnn < prev_end)
+
             if raw_collides or rnn_collides:
                 has_start_collision = True
                 if is_cue_word(prev_word["text"]):
-                    # Cue guard: exclude cue with lexical frame guard (floor of first word start)
+                    # Cue guard
                     t_onset = float(first_word["start"])
                     cue_guarded_start = True
                 else:
-                    # Non-cue collision -> retain original limit and return low/review
+                    # Non-cue collision -> keep original and low/review
                     t_onset = orig_start
                     is_clamped_start = True
-            else:
-                if has_start_raw and has_start_rnn:
-                    t_onset = t_onset_raw
-                elif has_start_raw:
-                    t_onset = t_onset_raw
-                elif has_start_rnn:
-                    t_onset = t_onset_rnn
-                else:
-                    t_onset = float(first_word["start"])
-        else:
-            if has_start_raw:
-                t_onset = t_onset_raw
-            elif has_start_rnn:
-                t_onset = t_onset_rnn
-            else:
-                t_onset = float(first_word["start"])
+                    start_rejection_reasons.append("non_cue_collision")
 
-        # Check lexical fallback for start if VAD missed it
+        # Convert start time to frame
+        F_in = time_to_frame(t_onset, fps, "floor")
+
+        # Frame limit guard: if F_in is before F_prev_limit, clamp it.
+        if prev_word is not None and F_in < F_prev_limit:
+            F_in = F_prev_limit
+            if t_onset < prev_end:
+                is_overlapping_lexical = (prev_end > float(first_word["start"]))
+                if is_cue_word(prev_word["text"]) and not is_overlapping_lexical:
+                    cue_guarded_start = True
+                else:
+                    is_clamped_start = True
+                    start_rejection_reasons.append("frame_clamp_collision")
+
+        # Check lexical fallback for start if VAD missed it (quiet first word)
         is_lexical_fallback_start = False
         if not has_start_raw or not has_start_rnn:
             # Check if later speech is present
-            _, _, has_end_raw_check = get_refined_bound_on_signal(activity_raw, float(last_word["start"]), float(last_word["end"]))
-            _, _, has_end_rnn_check = get_refined_bound_on_signal(activity_rnn, float(last_word["start"]), float(last_word["end"]))
+            _, _, has_end_raw_check, _ = get_scored_refined_bound(activity_raw, float(last_word["start"]), float(last_word["end"]), prev_end, next_start)
+            _, _, has_end_rnn_check, _ = get_scored_refined_bound(activity_rnn, float(last_word["start"]), float(last_word["end"]), prev_end, next_start)
             has_later_speech = (has_end_raw_check or has_end_rnn_check)
-            local_metrics_ok = (snr_val is not None and corr_val is not None and snr_val >= 8.0 and corr_val >= 0.8)
-            no_prev_collision = (prev_word is None or float(prev_word["end"]) <= float(first_word["start"]))
+
+            # Use local start metrics!
+            local_metrics_ok = (start_snr is not None and start_corr is not None and start_snr >= 8.0 and start_corr >= 0.8)
+            no_prev_collision = (prev_word is None or prev_end <= float(first_word["start"]))
+
             if has_later_speech and local_metrics_ok and no_prev_collision:
                 t_onset = float(first_word["start"])
                 is_lexical_fallback_start = True
-
-        # Convert start time to frame and apply F_prev_limit clamp
-        F_in = time_to_frame(t_onset, fps, "floor")
-        if prev_word is not None:
-            F_prev_limit = time_to_frame(float(prev_word["end"]), fps, "ceil")
-            if F_in < F_prev_limit:
-                F_in = F_prev_limit
-                if is_cue_word(prev_word["text"]):
-                    cue_guarded_start = True
-                else:
-                    is_clamped_start = True
+                F_in = time_to_frame(t_onset, fps, "floor")
+                if prev_word is not None and F_in < F_prev_limit:
+                    F_in = F_prev_limit
 
         # Find refined end bound (from last word)
-        comp_start_raw_end, comp_end_raw, has_end_raw = get_refined_bound_on_signal(activity_raw, float(last_word["start"]), float(last_word["end"]))
-        comp_start_rnn_end, comp_end_rnn, has_end_rnn = get_refined_bound_on_signal(activity_rnn, float(last_word["start"]), float(last_word["end"]))
+        comp_start_raw_end, comp_end_raw, has_end_raw, end_raw_candidates = get_scored_refined_bound(
+            activity_raw, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
+        )
+        comp_start_rnn_end, comp_end_rnn, has_end_rnn, end_rnn_candidates = get_scored_refined_bound(
+            activity_rnn, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
+        )
 
         t_offset_raw = comp_end_raw if has_end_raw else float(last_word["end"])
         t_offset_rnn = comp_end_rnn if has_end_rnn else float(last_word["end"])
 
-        # Prefer the later raw tail over an earlier RNNoise tail
+        # Default: prefer raw tail over RNNoise tail
         if has_end_raw and has_end_rnn:
             t_offset = max(comp_end_raw, comp_end_rnn)
         elif has_end_raw:
@@ -534,23 +634,43 @@ def main() -> None:
         # Check for collision with next word
         has_end_collision = False
         is_clamped_end = False
-        if next_word is not None:
-            next_start = float(next_word["start"])
-            if t_offset > next_start:
-                t_offset = next_start
-                has_end_collision = True
-                is_clamped_end = True
+        end_rejection_reasons = []
 
-        # Exact end boundary: ceil of offset + 2 frames
+        F_next_limit = time_to_frame(next_start, fps, "floor") if next_start is not None else 999999
+
+        # Overlapping lexical intervals check
+        if next_word is not None and next_start < float(last_word["end"]):
+            t_offset = orig_end
+            is_clamped_end = True
+            end_rejection_reasons.append("overlapping_lexical_intervals")
+        elif next_word is not None:
+            # Check for VAD-level collision
+            raw_collides = has_end_raw and (comp_end_raw > next_start)
+            rnn_collides = has_end_rnn and (comp_end_rnn > next_start)
+
+            if raw_collides or rnn_collides:
+                has_end_collision = True
+                if is_cue_word(next_word["text"]):
+                    # Cue guard
+                    t_offset = float(last_word["end"])
+                else:
+                    # Non-cue collision -> keep original and low/review
+                    t_offset = orig_end
+                    is_clamped_end = True
+                    end_rejection_reasons.append("non_cue_collision")
+
+        # Convert to frame and check frame limits
         F_out = time_to_frame(t_offset, fps, "ceil") + 2
 
-        if next_word is not None:
-            F_next_limit = time_to_frame(float(next_word["start"]), fps, "floor")
-            if F_out > F_next_limit:
-                F_out = F_next_limit
-                is_clamped_end = True
+        if next_word is not None and F_out > F_next_limit:
+            F_out = F_next_limit
+            if t_offset > next_start:
+                if is_cue_word(next_word["text"]):
+                    pass
+                else:
+                    is_clamped_end = True
+                    end_rejection_reasons.append("frame_clamp_collision")
 
-        # Cuts last word?
         # Cuts last word?
         cuts_last_word = (F_out < time_to_frame(float(last_word["end"]), fps, "ceil"))
 
@@ -569,34 +689,37 @@ def main() -> None:
 
         orig_cuts_last_word = (orig_end < float(last_word["end"]))
 
+        # Check VAD activity around original out-point to detect crossing tails
+        has_tail_crossing = False
+        try:
+            idx_start = max(0, int((orig_end - 0.05) * 200))
+            idx_end = min(len(activity_raw), int((orig_end + 0.05) * 200))
+            for idx_check in range(idx_start, idx_end):
+                if activity_raw[idx_check] or activity_rnn[idx_check]:
+                    has_tail_crossing = True
+                    break
+        except Exception:
+            pass
+
         # Check if original out-point is medium lexical-safe
         is_lexical_safe_end = False
         if vad_invalid:
-            metrics_ok = (snr_val is not None and corr_val is not None and snr_val >= 8.0 and corr_val >= 0.8)
+            metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
             contains_last_word = (orig_end >= float(last_word["end"]))
-            excludes_next_word = (next_word is None or F_orig_out < time_to_frame(float(next_word["start"]), fps, "floor"))
+            excludes_next_word = (next_word is None or F_orig_out <= F_next_limit)
+            no_tail_crossing = not has_tail_crossing
 
-            no_clipping = True
-            try:
-                raw_samples = raw_samples_by_source[source_id]
-                t_center = orig_end
-                idx_start = max(0, int((t_center - 0.1) * 48000))
-                idx_end = min(len(raw_samples), int((t_center + 0.1) * 48000))
-                slice_samples = raw_samples[idx_start:idx_end]
-                if len(slice_samples) > 0:
-                    max_val = np.max(np.abs(slice_samples))
-                    if max_val >= 32000:
-                        no_clipping = False
-            except Exception:
-                no_clipping = False
-
-            if metrics_ok and contains_last_word and excludes_next_word and no_clipping and not orig_cuts_last_word:
+            if metrics_ok and contains_last_word and excludes_next_word and no_tail_crossing and not orig_cuts_last_word:
                 is_lexical_safe_end = True
 
         if is_lexical_safe_end:
             F_out = F_orig_out
             t_offset = orig_end
 
+            # Recompute tail padding and cuts last word properties after override
+            tail_frames = F_out - time_to_frame(t_offset, fps, "ceil")
+            has_insufficient_tail = (tail_frames < 2)
+            cuts_last_word = (F_out < time_to_frame(float(last_word["end"]), fps, "ceil"))
 
 
         # Threshold sweep for agreement and stability independently
@@ -609,9 +732,13 @@ def main() -> None:
         F_out_raw_vals = []
         F_out_rnn_vals = []
 
-        sweep_start_ok = True
-        sweep_end_ok = True
-        for delta_high, delta_low in sweep_deltas:
+        baseline_start_ok = False
+        baseline_end_ok = False
+
+        start_sweep_records = []
+        end_sweep_records = []
+
+        for s_idx, (delta_high, delta_low) in enumerate(sweep_deltas):
             high_t = DEFAULT_VAD_PARAMS["threshold_high_db"] + delta_high
             low_t = DEFAULT_VAD_PARAMS["threshold_low_db"] + delta_low
 
@@ -627,54 +754,82 @@ def main() -> None:
             )
 
             # Resolve start sweep
-            t_onset_raw_s, _, has_start_raw_s = get_refined_bound_on_signal(act_raw_s, float(first_word["start"]), float(first_word["end"]))
-            t_onset_rnn_s, _, has_start_rnn_s = get_refined_bound_on_signal(act_rnn_s, float(first_word["start"]), float(first_word["end"]))
+            t_onset_raw_s, _, has_start_raw_s, _ = get_scored_refined_bound(
+                act_raw_s, float(first_word["start"]), float(first_word["end"]), prev_end, next_start
+            )
+            t_onset_rnn_s, _, has_start_rnn_s, _ = get_scored_refined_bound(
+                act_rnn_s, float(first_word["start"]), float(first_word["end"]), prev_end, next_start
+            )
 
-            if not (has_start_raw_s and has_start_rnn_s):
-                sweep_start_ok = False
+            start_sweep_records.append({
+                "delta": (delta_high, delta_low),
+                "has_raw": has_start_raw_s,
+                "has_rnn": has_start_rnn_s,
+                "t_raw": t_onset_raw_s if has_start_raw_s else None,
+                "t_rnn": t_onset_rnn_s if has_start_rnn_s else None
+            })
 
-            else:
+            if has_start_raw_s and has_start_rnn_s:
                 F_in_raw_s = time_to_frame(t_onset_raw_s, fps, "floor")
                 F_in_rnn_s = time_to_frame(t_onset_rnn_s, fps, "floor")
                 F_in_raw_vals.append(F_in_raw_s)
                 F_in_rnn_vals.append(F_in_rnn_s)
+                if s_idx == 1: # Baseline index
+                    baseline_start_ok = True
 
             # Resolve end sweep
-            _, t_offset_raw_s, has_end_raw_s = get_refined_bound_on_signal(act_raw_s, float(last_word["start"]), float(last_word["end"]))
-            _, t_offset_rnn_s, has_end_rnn_s = get_refined_bound_on_signal(act_rnn_s, float(last_word["start"]), float(last_word["end"]))
+            _, t_offset_raw_s, has_end_raw_s, _ = get_scored_refined_bound(
+                act_raw_s, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
+            )
+            _, t_offset_rnn_s, has_end_rnn_s, _ = get_scored_refined_bound(
+                act_rnn_s, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
+            )
 
-            if not (has_end_raw_s and has_end_rnn_s):
-                sweep_end_ok = False
-            else:
+            end_sweep_records.append({
+                "delta": (delta_high, delta_low),
+                "has_raw": has_end_raw_s,
+                "has_rnn": has_end_rnn_s,
+                "t_raw": t_offset_raw_s if has_end_raw_s else None,
+                "t_rnn": t_offset_rnn_s if has_end_rnn_s else None
+            })
+
+            if has_end_raw_s and has_end_rnn_s:
                 F_out_raw_s = time_to_frame(t_offset_raw_s, fps, "ceil") + 2
                 F_out_rnn_s = time_to_frame(t_offset_rnn_s, fps, "ceil") + 2
                 F_out_raw_vals.append(F_out_raw_s)
                 F_out_rnn_vals.append(F_out_rnn_s)
+                if s_idx == 1: # Baseline index
+                    baseline_end_ok = True
 
-        if sweep_start_ok and len(F_in_raw_vals) > 0:
+        # Determine start sweep stability
+        if baseline_start_ok and len(F_in_raw_vals) >= 2:
             spread_in = max(F_in_raw_vals + F_in_rnn_vals) - min(F_in_raw_vals + F_in_rnn_vals)
+            sweep_start_ok = True
         else:
             spread_in = 9999
+            sweep_start_ok = False
 
-        if sweep_end_ok and len(F_out_raw_vals) > 0:
+        # Determine end sweep stability
+        if baseline_end_ok and len(F_out_raw_vals) >= 2:
             spread_out = max(F_out_raw_vals + F_out_rnn_vals) - min(F_out_raw_vals + F_out_rnn_vals)
+            sweep_end_ok = True
         else:
             spread_out = 9999
+            sweep_end_ok = False
 
         # Start confidence classification
         start_conf = "low"
+        start_metrics_ok = (start_snr is not None and start_corr is not None and start_snr >= 8.0 and start_corr >= 0.8)
+
         if (
-            snr_val is not None
-            and corr_val is not None
-            and snr_val >= 8.0
-            and corr_val >= 0.8
+            start_metrics_ok
             and (has_start_raw or cue_guarded_start or is_lexical_fallback_start)
             and (has_start_rnn or cue_guarded_start or is_lexical_fallback_start)
             and (sweep_start_ok or is_lexical_fallback_start or cue_guarded_start)
         ):
             if is_lexical_fallback_start:
                 start_conf = "medium"
-            elif has_start_collision:
+            elif has_start_collision or cue_guarded_start:
                 if cue_guarded_start:
                     start_conf = "medium"
                 else:
@@ -685,26 +840,52 @@ def main() -> None:
                 elif spread_in <= 2:
                     start_conf = "medium"
 
+        # Record start rejection reasons
+        if not start_metrics_ok:
+            start_rejection_reasons.append("poor_local_metrics")
+        if not (has_start_raw or cue_guarded_start or is_lexical_fallback_start) or not (has_start_rnn or cue_guarded_start or is_lexical_fallback_start):
+            start_rejection_reasons.append("vad_missed")
+        if not (sweep_start_ok or is_lexical_fallback_start or cue_guarded_start):
+            start_rejection_reasons.append("unstable_sweep")
+
         # End confidence classification
         end_conf = "low"
         if is_lexical_safe_end:
             end_conf = "medium"
-        elif (
-            snr_val is not None
-            and corr_val is not None
-            and snr_val >= 8.0
-            and corr_val >= 0.8
-            and has_end_raw
-            and has_end_rnn
-            and not is_clamped_end
-            and not has_insufficient_tail
-            and not cuts_last_word
-            and sweep_end_ok
-        ):
-            if spread_out <= 1:
-                end_conf = "high"
-            elif spread_out <= 2:
-                end_conf = "medium"
+        else:
+            end_metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
+            if (
+                end_metrics_ok
+                and has_end_raw
+                and has_end_rnn
+                and not is_clamped_end
+                and not has_insufficient_tail
+                and not cuts_last_word
+                and not has_tail_crossing
+                and sweep_end_ok
+            ):
+                if spread_out <= 1:
+                    end_conf = "high"
+                elif spread_out <= 2:
+                    end_conf = "medium"
+
+        # Record end rejection reasons
+        if not is_lexical_safe_end:
+            end_metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
+            if not end_metrics_ok:
+                end_rejection_reasons.append("poor_local_metrics")
+            if not has_end_raw or not has_end_rnn:
+                end_rejection_reasons.append("vad_missed")
+            if is_clamped_end:
+                end_rejection_reasons.append("clamped_end")
+            if has_insufficient_tail:
+                end_rejection_reasons.append("insufficient_tail")
+            if cuts_last_word:
+                end_rejection_reasons.append("cuts_last_word")
+            if not sweep_end_ok:
+                end_rejection_reasons.append("unstable_sweep")
+            if has_tail_crossing:
+                end_rejection_reasons.append("tail_crossing")
 
         # Apply High/Medium endpoints, Low stays original independently
         if start_conf in ("high", "medium"):
@@ -753,14 +934,56 @@ def main() -> None:
                 "prev": {"text": prev_word["text"], "start": float(prev_word["start"]), "end": float(prev_word["end"])} if prev_word else None,
                 "next": {"text": next_word["text"], "start": float(next_word["start"]), "end": float(next_word["end"])} if next_word else None
             },
-            "vad_refined": {
-                "onset_raw": t_onset_raw,
-                "offset_raw": t_offset_raw,
-                "onset_rnn": t_onset_rnn,
-                "offset_rnn": t_offset_rnn
+            "local_metrics": {
+                "start": {
+                    "snr_db": start_snr,
+                    "correlation": start_corr
+                },
+                "end": {
+                    "snr_db": end_snr,
+                    "correlation": end_corr
+                }
             },
-            "clamped": {"start": is_clamped_start, "end": is_clamped_end},
-            "tail_frames": tail_frames,
+            "start_side": {
+                "candidates": start_raw_candidates,
+                "selected_component": {
+                    "start": comp_start_raw if has_start_raw else None,
+                    "end": comp_end_raw if has_start_raw else None
+                },
+                "lexical_fallback": is_lexical_fallback_start,
+                "cue_guard": cue_guarded_start,
+                "collision": has_start_collision,
+                "exact_neighbor_frame_limit": F_prev_limit,
+                "attack_guard_ms": float(max(0.0, F_in * 1000.0 / fps - t_onset * 1000.0)),
+                "attack_guard_frames": int(max(0, F_in - time_to_frame(t_onset, fps, "floor"))),
+                "sweep_results": {
+                    "ok": sweep_start_ok,
+                    "spread": int(spread_in) if spread_in != 9999 else None,
+                    "records": start_sweep_records
+                },
+                "rejection_reasons": start_rejection_reasons,
+                "final_decision": "fallback" if is_lexical_fallback_start else ("cue_guarded" if cue_guarded_start else "refined")
+            },
+            "end_side": {
+                "candidates": end_raw_candidates,
+                "selected_component": {
+                    "start": comp_start_raw_end if has_end_raw else None,
+                    "end": comp_end_raw if has_end_raw else None
+                },
+                "lexical_fallback": is_lexical_safe_end,
+                "cue_guard": has_end_collision and is_cue_word(next_word["text"]) if next_word else False,
+                "collision": has_end_collision,
+                "exact_neighbor_frame_limit": F_next_limit if F_next_limit != 999999 else None,
+                "tail_guard_ms": float(tail_frames * 1000.0 / fps),
+                "tail_guard_frames": int(tail_frames),
+                "sweep_results": {
+                    "ok": sweep_end_ok,
+                    "spread": int(spread_out) if spread_out != 9999 else None,
+                    "records": end_sweep_records
+                },
+                "rejection_reasons": end_rejection_reasons,
+                "final_decision": "lexical_safe" if is_lexical_safe_end else "refined"
+            },
             "snr_db": snr_val,
             "correlation": corr_val,
             "confidence": {"start": start_conf, "end": end_conf},
@@ -769,8 +992,17 @@ def main() -> None:
                 "end": int(spread_out) if (sweep_end_ok and spread_out != 9999) else None
             },
             "final_frames": {"in": final_in_frame, "out": final_out_frame},
-            "final_times": {"start": final_start_s, "end": final_end_s}
+            "final_times": {"start": final_start_s, "end": final_end_s},
+            "tail_frames": tail_frames,
+            "vad_refined": {
+                "onset_raw": t_onset_raw,
+                "offset_raw": t_offset_raw,
+                "onset_rnn": t_onset_rnn,
+                "offset_rnn": t_offset_rnn
+            },
+            "clamped": {"start": is_clamped_start, "end": is_clamped_end}
         })
+
 
 
     # Prepare updated EDL dict
