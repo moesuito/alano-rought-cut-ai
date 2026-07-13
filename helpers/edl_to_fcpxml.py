@@ -25,6 +25,7 @@ from typing import Any
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from fractions import Fraction
 from helpers.timing import parse_fps_fraction, time_to_frame
 
 
@@ -46,15 +47,18 @@ def get_video_metadata(file_path: Path) -> dict:
         if not streams:
             raise ValueError("No video streams found")
         stream = streams[0]
-        
-        # Parse frame rate (can be a fraction like "24/1" or "30000/1001")
+
+        # Parse frame rate as exact Fraction
         r_frame_rate = stream.get("r_frame_rate", "24/1")
-        if "/" in r_frame_rate:
-            num, den = map(int, r_frame_rate.split("/"))
-            fps = num / den if den != 0 else 24.0
-        else:
-            fps = float(r_frame_rate)
-            
+        try:
+            fps = Fraction(r_frame_rate)
+        except Exception:
+            if "/" in r_frame_rate:
+                num, den = map(int, r_frame_rate.split("/"))
+                fps = Fraction(num, den) if den != 0 else Fraction(24, 1)
+            else:
+                fps = Fraction(float(r_frame_rate))
+
         duration = float(stream.get("duration", 0.0))
         # If duration is missing, try format container duration
         if duration == 0.0:
@@ -66,7 +70,7 @@ def get_video_metadata(file_path: Path) -> dict:
             out_fmt = subprocess.check_output(cmd_fmt, text=True)
             data_fmt = json.loads(out_fmt)
             duration = float(data_fmt.get("format", {}).get("duration", 0.0))
-            
+
         return {
             "width": int(stream.get("width", 1920)),
             "height": int(stream.get("height", 1080)),
@@ -79,21 +83,24 @@ def get_video_metadata(file_path: Path) -> dict:
         return {
             "width": 1920,
             "height": 1080,
-            "fps": 24.0,
+            "fps": Fraction(24, 1),
             "duration": 3600.0  # fallback 1 hour
         }
 
 
-def get_timebase_and_ntsc(fps: float) -> tuple[int, str]:
-    """Map FPS to FCP 7 XML timebase and NTSC standards."""
-    if abs(fps - 23.976) < 0.1:
+def get_timebase_and_ntsc(fps: Fraction) -> tuple[int, str]:
+    """Map FPS Fraction to FCP 7 XML timebase and NTSC standards."""
+    if fps == Fraction(24000, 1001):
         return 24, "TRUE"
-    elif abs(fps - 29.97) < 0.1:
+    elif fps == Fraction(30000, 1001):
         return 30, "TRUE"
-    elif abs(fps - 59.94) < 0.1:
+    elif fps == Fraction(60000, 1001):
         return 60, "TRUE"
+    elif fps.denominator == 1:
+        return int(fps.numerator), "FALSE"
     else:
-        return int(round(fps)), "FALSE"
+        # Non-canonical fractional rates must be NTSC FALSE
+        return int(round(float(fps))), "FALSE"
 
 
 def strip_accents(value: str) -> str:
@@ -215,7 +222,7 @@ def convert_edl_to_xml(
     # Load EDL JSON
     if not edl_path.exists():
         sys.exit(f"Error: EDL file not found at {edl_path}")
-        
+
     # Warn but do not block if QC check fails or is stale
     verify_script = Path(__file__).parent / "verify_edit_ready.py"
     if verify_script.exists():
@@ -242,7 +249,7 @@ def convert_edl_to_xml(
     ranges = edl.get("ranges", [])
     resolved_timeline_name = resolve_timeline_name(edl, edl_path, timeline_name)
     resolved_project_name = sanitize_timeline_name(project_name) if project_name else resolved_timeline_name
-    
+
     if not ranges:
         sys.exit("Error: No cut ranges found in the EDL")
 
@@ -251,12 +258,45 @@ def convert_edl_to_xml(
     first_src_path = Path(sources[first_src_name])
     if not first_src_path.is_absolute():
         first_src_path = (edl_path.parent / first_src_path).resolve()
-        
+
     first_metadata = get_video_metadata(first_src_path)
-    seq_fps = first_metadata["fps"]
-    seq_timebase, seq_ntsc = get_timebase_and_ntsc(seq_fps)
     seq_width = first_metadata["width"]
     seq_height = first_metadata["height"]
+
+    # Determine timeline sequence fps authority
+    seq_fps = None
+    metadata_fps = edl.get("metadata", {}).get("sequence_fps")
+    if metadata_fps is not None:
+        try:
+            seq_fps = parse_fps_fraction(metadata_fps)
+        except Exception as e:
+            print(f"Warning: Invalid sequence_fps in metadata: {metadata_fps} ({e})", file=sys.stderr)
+
+    if seq_fps is None:
+        # Fallback to probing sources, but if a source is WAV, it is WAV-only and doesn't dictate fps.
+        # Let's check non-WAV sources first.
+        fps_set = set()
+        for source_name, source_rel_path in sources.items():
+            source_path = Path(source_rel_path)
+            if not source_path.is_absolute():
+                source_path = (edl_path.parent / source_path).resolve()
+            if source_path.suffix.lower() != ".wav":
+                try:
+                    source_meta = get_video_metadata(source_path)
+                    fps_set.add(parse_fps_fraction(source_meta["fps"]))
+                except Exception:
+                    pass
+        if len(fps_set) == 1:
+            seq_fps = list(fps_set)[0]
+        elif len(fps_set) > 1:
+            seq_fps = list(fps_set)[0]
+        else:
+            try:
+                seq_fps = parse_fps_fraction(first_metadata["fps"])
+            except Exception:
+                seq_fps = Fraction(24, 1)
+
+    seq_timebase, seq_ntsc = get_timebase_and_ntsc(seq_fps)
 
     # --- Build XML Tree ---
     # Root element
@@ -270,24 +310,24 @@ def convert_edl_to_xml(
     # Sequence structure
     sequence = ET.SubElement(children, "sequence")
     ET.SubElement(sequence, "name").text = resolved_timeline_name
-    
+
     # We will compute and fill sequence duration after the loop
     seq_duration_el = ET.SubElement(sequence, "duration")
-    
+
     seq_rate = ET.SubElement(sequence, "rate")
     ET.SubElement(seq_rate, "timebase").text = str(seq_timebase)
     ET.SubElement(seq_rate, "ntsc").text = seq_ntsc
 
     # Media tracks setup
     media = ET.SubElement(sequence, "media")
-    
+
     # Video setup
     video = ET.SubElement(media, "video")
     v_format = ET.SubElement(video, "format")
     v_sc = ET.SubElement(v_format, "samplecharacteristics")
     ET.SubElement(v_sc, "width").text = str(seq_width)
     ET.SubElement(v_sc, "height").text = str(seq_height)
-    
+
     video_track = ET.SubElement(video, "track")
 
     # Audio setup (Single Stereo track layout)
@@ -302,41 +342,45 @@ def convert_edl_to_xml(
     for idx, r in enumerate(ranges, start=1):
         source_name = r["source"]
         source_path_raw = Path(sources[source_name])
-        
+
         # Resolve path
         if source_path_raw.is_absolute():
             source_path = source_path_raw
         else:
             source_path = (edl_path.parent / source_path_raw).resolve()
-            
+
         start_sec = float(r["start"])
         end_sec = float(r["end"])
-        
+
         metadata = get_video_metadata(source_path)
-        clip_fps = metadata["fps"]
-        clip_timebase, clip_ntsc = get_timebase_and_ntsc(clip_fps)
-        
+        is_wav = source_path.suffix.lower() == ".wav"
+        if is_wav:
+            clip_fps_frac = seq_fps
+        else:
+            clip_fps_frac = metadata["fps"]
+
+        clip_timebase, clip_ntsc = get_timebase_and_ntsc(clip_fps_frac)
+
         # Calculate frame ranges
-        clip_fps_frac = parse_fps_fraction(clip_fps)
         in_frame = r.get("source_in_frame")
         out_frame = r.get("source_out_frame")
         if in_frame is None:
             in_frame = time_to_frame(start_sec, clip_fps_frac, "round")
         if out_frame is None:
             out_frame = time_to_frame(end_sec, clip_fps_frac, "round")
-        
+
         in_frame = int(in_frame)
         out_frame = int(out_frame)
         duration_frames = out_frame - in_frame
-        
+
         end_timeline_frame = start_timeline_frame + duration_frames
-        
+
         file_id = f"file-{source_name}"
-        
+
         # Unique IDs for each track item
         clip_v_id = f"clipitem-v-{idx}"
         clip_a1_id = f"clipitem-a1-{idx}"
-        
+
         # Print status of segment
         note = r.get("beat") or r.get("note") or f"segment_{idx}"
         print(f"  [{idx:02d}] {source_name} ({start_sec:.2f}s - {end_sec:.2f}s) -> frames {start_timeline_frame} to {end_timeline_frame} [{note}]")
@@ -345,57 +389,57 @@ def convert_edl_to_xml(
         clipitem_v = ET.SubElement(video_track, "clipitem", id=clip_v_id)
         ET.SubElement(clipitem_v, "name").text = source_path.name
         ET.SubElement(clipitem_v, "duration").text = str(duration_frames)
-        
+
         rate = ET.SubElement(clipitem_v, "rate")
         ET.SubElement(rate, "timebase").text = str(clip_timebase)
         ET.SubElement(rate, "ntsc").text = clip_ntsc
-        
+
         ET.SubElement(clipitem_v, "in").text = str(in_frame)
         ET.SubElement(clipitem_v, "out").text = str(out_frame)
         ET.SubElement(clipitem_v, "start").text = str(start_timeline_frame)
         ET.SubElement(clipitem_v, "end").text = str(end_timeline_frame)
-        
+
         ET.SubElement(clipitem_v, "pixelaspect").text = "Square"
         ET.SubElement(clipitem_v, "anamorphic").text = "FALSE"
-        
+
         file_el_v = ET.SubElement(clipitem_v, "file", id=file_id)
         if file_id not in defined_files:
             defined_files.add(file_id)
             ET.SubElement(file_el_v, "name").text = source_path.name
             ET.SubElement(file_el_v, "pathurl").text = source_path.as_uri()
-            
+
             f_rate = ET.SubElement(file_el_v, "rate")
             ET.SubElement(f_rate, "timebase").text = str(clip_timebase)
             ET.SubElement(f_rate, "ntsc").text = clip_ntsc
-            
-            file_dur_frames = int(round(metadata["duration"] * clip_fps))
+
+            file_dur_frames = int(round(float(Fraction(metadata["duration"]) * clip_fps_frac)))
             ET.SubElement(file_el_v, "duration").text = str(file_dur_frames)
-            
+
             # Master media description
             m_desc = ET.SubElement(file_el_v, "media")
-            
+
             v_desc = ET.SubElement(m_desc, "video")
             v_sc = ET.SubElement(v_desc, "samplecharacteristics")
             ET.SubElement(v_sc, "width").text = str(metadata["width"])
             ET.SubElement(v_sc, "height").text = str(metadata["height"])
-            
+
             a_desc = ET.SubElement(m_desc, "audio")
             ET.SubElement(a_desc, "channelcount").text = "2"
-        
+
         # ------------------ AUDIO TRACK 1 CLIPITEM ------------------
         clipitem_a1 = ET.SubElement(audio_track1, "clipitem", id=clip_a1_id)
         ET.SubElement(clipitem_a1, "name").text = source_path.name
         ET.SubElement(clipitem_a1, "duration").text = str(duration_frames)
-        
+
         rate = ET.SubElement(clipitem_a1, "rate")
         ET.SubElement(rate, "timebase").text = str(clip_timebase)
         ET.SubElement(rate, "ntsc").text = clip_ntsc
-        
+
         ET.SubElement(clipitem_a1, "in").text = str(in_frame)
         ET.SubElement(clipitem_a1, "out").text = str(out_frame)
         ET.SubElement(clipitem_a1, "start").text = str(start_timeline_frame)
         ET.SubElement(clipitem_a1, "end").text = str(end_timeline_frame)
-        
+
         ET.SubElement(clipitem_a1, "file", id=file_id)
         s_track1 = ET.SubElement(clipitem_a1, "sourcetrack")
         ET.SubElement(s_track1, "mediatype").text = "audio"
@@ -407,7 +451,7 @@ def convert_edl_to_xml(
             ET.SubElement(l_v, "mediatype").text = "video"
             ET.SubElement(l_v, "trackindex").text = "1"
             ET.SubElement(l_v, "clipindex").text = str(idx)
-            
+
             l_a1 = ET.SubElement(item, "link")
             ET.SubElement(l_a1, "linkclipref").text = clip_a1_id
             ET.SubElement(l_a1, "mediatype").text = "audio"
@@ -421,13 +465,13 @@ def convert_edl_to_xml(
 
     # Output XML bytes
     xml_bytes = ET.tostring(root, encoding="utf-8")
-    
+
     # Save with custom header
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:
         f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n')
         f.write(xml_bytes)
-        
+
     print(f"\nSuccessfully generated Premiere-compatible XML:")
     print(f"  -> {output_path.resolve()}")
     print(f"  -> Timeline name: {resolved_timeline_name}")
@@ -451,7 +495,7 @@ def main() -> None:
     output_path = args.output
     if output_path is None:
         output_path = edl_path.parent / "timeline.xml"
-        
+
     convert_edl_to_xml(
         edl_path,
         output_path,

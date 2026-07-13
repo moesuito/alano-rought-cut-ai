@@ -116,6 +116,7 @@ def main() -> None:
     ap.add_argument("--build-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-subtitles", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-loudnorm", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--allow-manual-fallback", action="store_true", help="Allow fallback to start/end seconds conversion when source frames are missing")
 
     args = ap.parse_args()
 
@@ -143,10 +144,22 @@ def main() -> None:
     sources = edl.get("sources", {})
     ranges = edl.get("ranges", [])
 
-    # Determine FPS from sources or metadata
-    fps_set = set()
+    # Determine FPS from sources or metadata: metadata.sequence_fps is authority first.
+    seq_fps_val = edl.get("metadata", {}).get("sequence_fps")
+    authority_fps = None
+    if seq_fps_val:
+        try:
+            authority_fps = parse_fps_fraction(seq_fps_val)
+        except Exception as e:
+            print(f"Error: Invalid sequence_fps metadata: {seq_fps_val} ({e})", file=sys.stderr)
+            sys.exit(1)
+
+    probed_video_fps = None
     for source_id, rel_path in sources.items():
         src_path = resolve_path(rel_path, edit_dir)
+        if src_path.suffix.lower() == ".wav":
+            continue  # WAV does not dictate FPS
+
         cmd_fps = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=r_frame_rate",
@@ -155,27 +168,44 @@ def main() -> None:
         try:
             out = subprocess.check_output(cmd_fps, text=True)
             data = json.loads(out)
-            streams = data.get("streams", [])
-            if streams:
-                r_fps = streams[0].get("r_frame_rate")
-                if r_fps and r_fps != "0/0":
-                    fps_set.add(parse_fps_fraction(r_fps))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error: ffprobe failed for non-WAV source '{source_id}' ({src_path.name}): {e}", file=sys.stderr)
+            sys.exit(1)
 
-    if len(fps_set) == 1:
-        fps = list(fps_set)[0]
-    else:
-        seq_fps = edl.get("metadata", {}).get("sequence_fps")
-        if seq_fps:
-            try:
-                fps = parse_fps_fraction(seq_fps)
-            except Exception as e:
-                print(f"Error: Invalid sequence_fps metadata: {seq_fps} ({e})", file=sys.stderr)
+        streams = data.get("streams", [])
+        if not streams:
+            print(f"Error: Video stream 'v:0' not found in non-WAV source '{source_id}' ({src_path.name}).", file=sys.stderr)
+            sys.exit(1)
+
+        r_fps = streams[0].get("r_frame_rate")
+        if not r_fps or r_fps == "0/0":
+            print(f"Error: Invalid or missing frame rate 'r_frame_rate' in video stream for source '{source_id}'.", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            probed_fps = parse_fps_fraction(r_fps)
+        except Exception as e:
+            print(f"Error parsing probed frame rate '{r_fps}' for source '{source_id}': {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if authority_fps is not None:
+            if probed_fps != authority_fps:
+                print(f"Error: Probed video FPS {probed_fps} for source '{source_id}' does not match sequence authority FPS {authority_fps}", file=sys.stderr)
                 sys.exit(1)
         else:
-            print("Error: No frame rate found in sources or EDL metadata.", file=sys.stderr)
-            sys.exit(1)
+            if probed_video_fps is None:
+                probed_video_fps = probed_fps
+            elif probed_fps != probed_video_fps:
+                print(f"Error: Multiple video source frame rates detected and no sequence authority FPS defined in metadata.", file=sys.stderr)
+                sys.exit(1)
+
+    if authority_fps is not None:
+        fps = authority_fps
+    elif probed_video_fps is not None:
+        fps = probed_video_fps
+    else:
+        print("Error: No frame rate found in sources or EDL metadata.", file=sys.stderr)
+        sys.exit(1)
 
     # Process ranges
     ranges_map = []
@@ -197,10 +227,31 @@ def main() -> None:
                 # Resolve frame boundaries
                 F_in = r.get("source_in_frame")
                 F_out = r.get("source_out_frame")
-                if F_in is None:
-                    F_in = time_to_frame(r["start"], fps, "round")
-                if F_out is None:
-                    F_out = time_to_frame(r["end"], fps, "round")
+                if F_in is None or F_out is None:
+                    if not args.allow_manual_fallback:
+                        print("Error: Missing exact source frame boundaries ('source_in_frame' or 'source_out_frame') in EDL range. "
+                              "Exact source frames are required in the automated renderer path.", file=sys.stderr)
+                        sys.exit(1)
+                    else:
+                        print("Warning: Missing source frame boundaries. Using noisy manual fallback conversion from seconds.", file=sys.stderr)
+                        if F_in is None:
+                            F_in = time_to_frame(r["start"], fps, "round")
+                        if F_out is None:
+                            F_out = time_to_frame(r["end"], fps, "round")
+
+                # Validate source_in_frame/source_out_frame as int non-bool, non-negative, and out > in
+                if (not isinstance(F_in, int) or isinstance(F_in, bool) or
+                    not isinstance(F_out, int) or isinstance(F_out, bool)):
+                    print(f"Error: Resolved frames {F_in} and {F_out} must be integers and not booleans.", file=sys.stderr)
+                    sys.exit(1)
+
+                if F_in < 0 or F_out < 0:
+                    print(f"Error: Resolved frames {F_in} and {F_out} must be non-negative.", file=sys.stderr)
+                    sys.exit(1)
+
+                if F_out <= F_in:
+                    print(f"Error: Resolved out frame {F_out} must be strictly greater than in frame {F_in}.", file=sys.stderr)
+                    sys.exit(1)
 
                 start_sample = frame_to_sample(F_in, fps)
                 end_sample = frame_to_sample(F_out, fps)

@@ -207,7 +207,8 @@ def test_render_and_qc_integration(tmp_path, monkeypatch):
         str(edl_path),
         "-o", str(preview_wav),
         "--timeline-map", str(timeline_map_path),
-        "--preview" # Deprecated no-op
+        "--preview", # Deprecated no-op
+        "--allow-manual-fallback"
     ]
     monkeypatch.setattr(sys, "argv", test_argv_render)
     render_main()

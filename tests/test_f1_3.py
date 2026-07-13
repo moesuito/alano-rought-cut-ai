@@ -50,7 +50,7 @@ def temp_workspace(tmp_path):
 
     # Create dummy source files
     create_synthetic_wav(edit_dir / "source1.wav")
-    
+
     # Create source transcript
     transcript1 = {
         "words": [
@@ -295,21 +295,58 @@ def test_preview_transcript_qc_recording_cues_and_duplicates():
 def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
     """Test readiness gate exit codes across pass, review, fatal, and stale reports."""
     edit_dir = temp_workspace["edit"]
-    
+
     # 1. Create a dummy preview WAV & timeline map
     preview_wav = edit_dir / "preview.wav"
     create_synthetic_wav(preview_wav)
-    
-    preview_timeline = edit_dir / "preview_timeline.json"
-    preview_timeline.write_text("{}", encoding="utf-8")
 
     edl_path = edit_dir / "edl.json"
     edl = {
         "version": 1,
         "sources": {"source1": "source1.wav"},
-        "ranges": [],
-        "metadata": {"required_beats": []}
+        "ranges": [
+            {
+                "source": "source1",
+                "start": 0.0,
+                "end": 0.5,
+                "source_in_frame": 0,
+                "source_out_frame": 12,
+                "review_required": False
+            }
+        ],
+        "metadata": {
+            "required_beats": [],
+            "sequence_fps": "24"
+        }
     }
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+
+    edl_hash = hashlib.sha256(edl_path.read_bytes()).hexdigest()
+    wav_hash = hashlib.sha256(preview_wav.read_bytes()).hexdigest()
+
+    preview_timeline = edit_dir / "preview_timeline.json"
+    valid_map = {
+        "edl_hash": edl_hash,
+        "output_format": {
+            "format": "PCM16",
+            "sample_rate": 48000,
+            "channels": 2,
+            "sequence_fps": 24.0
+        },
+        "ranges": [
+            {
+                "source": "source1",
+                "source_frames": [0, 12],
+                "source_sample_interval": [0, 24000],
+                "output_cumulative_sample_interval": [0, 24000],
+                "seconds": 0.5,
+                "source_channels": 2,
+                "channel_policy": "stereo_preserve"
+            }
+        ]
+    }
+    preview_timeline.write_text(json.dumps(valid_map), encoding="utf-8")
+    map_hash = hashlib.sha256(preview_timeline.read_bytes()).hexdigest()
     edl_path.write_text(json.dumps(edl), encoding="utf-8")
 
     edl_hash = hashlib.sha256(edl_path.read_bytes()).hexdigest()
@@ -319,11 +356,11 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
 
     # 2. Write four passing and fresh reports
     boundary_qc = {
-        "edl": str(edl_path),
-        "high_risk_count": 0,
-        "waveform_error_count": 0,
-        "missing_source_count": 0,
-        "results": []
+        "status": "pass",
+        "input_edl_hash": "dummy",
+        "output_edl_hash": edl_hash,
+        "boundary_evidence": [],
+        "confidence_summary": {}
     }
     edit_dir.joinpath("edl_boundary_qc.json").write_text(json.dumps(boundary_qc), encoding="utf-8")
 
@@ -349,7 +386,17 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "transcript": "generated",
         "preview_wav_hash": wav_hash,
         "transcript_hash": "some_hash",
-        "summary": {"status": "pass", "blocking_flags": []}
+        "summary": {
+            "status": "pass",
+            "word_count": 10,
+            "timed_word_count": 10,
+            "timing_coverage": 1.0,
+            "blocking_flags": []
+        },
+        "words_evidence": [
+            {"text": f"word{i}", "type": "word", "start": float(i), "end": float(i) + 0.5}
+            for i in range(10)
+        ]
     }
     edit_dir.joinpath("preview_transcript_qc.json").write_text(json.dumps(transcript_qc), encoding="utf-8")
 

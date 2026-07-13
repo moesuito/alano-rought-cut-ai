@@ -319,6 +319,21 @@ def build_report(
     semantic = semantic_warnings(tokens)
     expected_diff = compare_expected(text, expected)
 
+    words_list = [w for w in transcript_data.get("words", []) if w.get("type") == "word"]
+    word_count = len(words_list) if "words" in transcript_data else len(tokens)
+    timed_word_count = sum(1 for w in words_list if w.get("start") is not None and w.get("end") is not None)
+    timing_coverage = (timed_word_count / word_count) if word_count > 0 else 0.0
+
+    words_evidence = [
+        {
+            "text": w.get("text"),
+            "type": w.get("type"),
+            "start": w.get("start"),
+            "end": w.get("end")
+        }
+        for w in transcript_data.get("words", [])
+    ]
+
     blocking_flags = []
     if repeats or ngrams:
         blocking_flags.append("possible_duplicate_content")
@@ -326,6 +341,8 @@ def build_report(
         blocking_flags.append("possible_leftover_direction_or_audio_event")
     if semantic:
         blocking_flags.append("semantic_review_needed")
+    if timed_word_count == 0:
+        blocking_flags.append("missing_timed_words")
 
     if expected_diff:
         if expected_diff["similarity"] < 0.85:
@@ -354,6 +371,9 @@ def build_report(
         "summary": {
             "text_chars": len(text),
             "token_count": len(tokens),
+            "word_count": word_count,
+            "timed_word_count": timed_word_count,
+            "timing_coverage": round(timing_coverage, 4),
             "sentence_count": len(sentences),
             "adjacent_repeat_count": len(repeats),
             "repeated_ngram_count": len(ngrams),
@@ -364,6 +384,7 @@ def build_report(
             "status": "review" if blocking_flags else "pass",
             "blocking_flags": blocking_flags,
         },
+        "words_evidence": words_evidence,
         "text": text,
         "adjacent_repeats": repeats,
         "repeated_ngrams": ngrams,
