@@ -22,7 +22,7 @@ from pathlib import Path
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helpers.timing import parse_fps_fraction, time_to_frame
+from helpers.timing import frame_to_sample, parse_fps_fraction, time_to_frame
 
 
 def resolve_path(maybe_path: str, base: Path) -> Path:
@@ -49,11 +49,6 @@ def probe_channels(source_path: Path) -> int:
         return int(streams[0].get("channels", 1))
     except Exception:
         return 1
-
-
-def frame_to_sample(frame: int, fps: Fraction, sample_rate: int = 48000) -> int:
-    """Convert a frame index to a sample index using rational math."""
-    return int(round(Fraction(frame) * sample_rate / fps))
 
 
 def extract_audio_segment(

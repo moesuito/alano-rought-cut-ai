@@ -428,8 +428,11 @@ def test_early_silence_trim(setup_dirs, monkeypatch):
     write_dummy_cache(analysis_dir, fingerprint, source_path)
 
     # VAD starts at 0.35s (index 70)
-    dummy_rms = np.full(200, -10.0)
-    dummy_rms[::2] = -9.0
+    # Raw energy is genuinely at the local floor before the selected onset;
+    # this distinguishes removable ASR lead-in from a weak lexical attack.
+    dummy_rms = np.full(200, -50.0)
+    dummy_rms[70:] = -10.0
+    dummy_rms[70::2] = -9.0
     dummy_nf = np.full(200, -50.0)
     def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
         act = np.zeros(200, dtype=bool)
@@ -528,6 +531,80 @@ def test_quiet_lexical_fallback_acceptance(setup_dirs, monkeypatch):
     # Start should fallback to 0.2 (medium) because local metrics are good and there is later speech
     assert evidence["confidence"]["start"] == "medium"
     assert evidence["final_times"]["start"] == 0.2
+
+
+def test_lexical_fallback_requires_both_later_detectors(setup_dirs, monkeypatch):
+    """One later VAD signal is not stable support for a missed first word."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.4, "type": "word"},
+            {"text": "world", "start": 0.5, "end": 0.7, "type": "word"},
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    dummy_rms = np.full(200, -10.0)
+    dummy_rms[::2] = -9.0
+    dummy_nf = np.full(200, -50.0)
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        raw = np.zeros(200, dtype=bool)
+        raw[100:140] = True
+        rnn = np.zeros(200, dtype=bool)
+        return raw, rnn, 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.run_vad_hysteresis",
+        lambda *args, **kwargs: np.zeros(200, dtype=bool),
+    )
+
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": {"test_source": "test_source.wav"},
+            "ranges": [{"source": "test_source", "start": 0.15, "end": 0.8}],
+        }),
+        encoding="utf-8",
+    )
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        refine_main()
+    assert exc.value.code == 2
+    evidence = json.loads(report_path.read_text(encoding="utf-8"))["boundary_evidence"][0]
+    assert evidence["start_side"]["lexical_fallback"] is False
+    assert evidence["confidence"]["start"] == "low"
 
 
 def test_quiet_lexical_fallback_rejection(setup_dirs, monkeypatch):
@@ -759,8 +836,11 @@ def test_weak_tail_crossing_cutoff(setup_dirs, monkeypatch):
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     evidence = report["boundary_evidence"][0]
-    # End confidence must remain low because tail crosses the original out-point (0.5s is active in VAD)
-    assert evidence["confidence"]["end"] == "low"
+    # The original endpoint cannot be promoted as lexical-safe. A stable VAD
+    # refinement may still move the endpoint past the tail and pass.
+    assert evidence["end_side"]["tail_crossing_orig"] is True
+    assert evidence["end_side"]["lexical_fallback"] is False
+    assert evidence["final_frames"]["out"] > 15
 
 
 def test_neighbor_frame_limits_guard(setup_dirs, monkeypatch):
@@ -942,3 +1022,913 @@ def test_report_evidence_completeness(setup_dirs, monkeypatch):
     assert "selected_component" in evidence["start_side"]
     assert "rejection_reasons" in evidence["start_side"]
     assert "sweep_results" in evidence["start_side"]
+
+
+def test_exact_no_overlap_wrong_component_reproduction(setup_dirs, monkeypatch):
+    """Test that a non-overlapping component (overlap == 0) is not selected over an overlapping one, even if longer."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.200, "end": 0.300, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Active regions:
+    # 1. 0.200 - 0.300 (correct component, duration 100ms, overlap 100ms)
+    # 2. 0.310 - 0.450 (unrelated component, duration 140ms, overlap 0ms)
+    dummy_rms = np.full(200, -10.0)
+    dummy_rms[::2] = -9.0
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[40:60] = True   # 0.200 to 0.300
+        act[62:90] = True   # 0.310 to 0.450
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[40:60] = True
+        act[62:90] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    # The correct component must be selected
+    assert evidence["start_side"]["selected_component"]["start"] == 0.200
+
+
+def test_short_real_plosive_vs_longer_off_word(setup_dirs, monkeypatch):
+    """Test that a short real plosive/sibilant overlapping the anchor (duration 50ms) is selected over a longer off-word component (duration 130ms)."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.200, "end": 0.300, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Active regions:
+    # 1. 0.190 - 0.240 (short plosive, duration 50ms, overlap 40ms)
+    # 2. 0.320 - 0.450 (longer off-word, duration 130ms, overlap 0ms)
+    dummy_rms = np.full(200, -10.0)
+    dummy_rms[::2] = -9.0
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[38:48] = True   # 0.190 to 0.240
+        act[64:90] = True   # 0.320 to 0.450
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[38:48] = True
+        act[64:90] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    # Short plosive must be selected
+    assert evidence["start_side"]["selected_component"]["start"] == 0.190
+
+
+def test_same_frame_cue_anchor_no_attack_cut(setup_dirs, monkeypatch):
+    """Test that a same-frame cue/anchor overlap preserves the word attack frame (floor of first_start) under cue guard."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "corta", "start": 0.1, "end": 0.349, "type": "word"},
+            {"text": "anchor", "start": 0.350, "end": 0.5, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # VAD has signal for both detectors
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[80:100] = True # acoustic onset drifts to 0.400, after lexical attack
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[80:100] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.350, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    edl_new = json.loads(edl_path.read_text(encoding="utf-8"))
+    assert edl_new["ranges"][0]["source_in_frame"] == 10
+    evidence = report["boundary_evidence"][0]
+    assert evidence["start_side"]["cue_guard"] is True
+    assert evidence["start_side"]["attack_cut_ms"] == 0.0
+    assert "sub_frame_cue_coexistence" in evidence["start_side"]["notes"]
+    assert "sub_frame_cue_coexistence" not in evidence["start_side"]["rejection_reasons"]
+
+
+def test_non_cue_collision_cannot_be_overridden_by_fallback(setup_dirs, monkeypatch):
+    """Test that a non-cue collision sets confidence to low and cannot be overridden by fallback."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "other", "start": 0.1, "end": 0.349, "type": "word"},
+            {"text": "anchor", "start": 0.350, "end": 0.5, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Local metrics are good, VAD misses on one detector
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act_raw = np.zeros(200, dtype=bool)
+        act_raw[70:100] = True # 0.350 to 0.5
+        act_rnn = np.zeros(200, dtype=bool) # RNN missed
+        return act_raw, act_rnn, 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[70:100] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.350, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    # Because of non-cue collision, start confidence must be low and fallback is blocked
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["start_side"]["lexical_fallback"] is False
+    assert evidence["start_side"]["final_decision"] == "retained_original_low"
+
+
+def test_single_detector_cue_remains_low(setup_dirs, monkeypatch):
+    """Test that if cue guard is triggered but only one VAD detector finds signal, start confidence remains low."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "corta", "start": 0.1, "end": 0.349, "type": "word"},
+            {"text": "anchor", "start": 0.350, "end": 0.5, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # One detector has VAD signal, other missed
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act_raw = np.zeros(200, dtype=bool)
+        act_raw[70:100] = True
+        act_rnn = np.zeros(200, dtype=bool)
+        return act_raw, act_rnn, 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[70:100] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.350, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["start_side"]["final_decision"] == "retained_original_low"
+
+
+def test_one_missing_threshold_variant_invalidates_sweep(setup_dirs, monkeypatch):
+    """Test that if one of the 3 sweep variants has no VAD signal, the sweep is marked unstable."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.4, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[40:80] = True
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    # Mock VAD hysteresis such that one sweep index returns empty activity
+    sweep_idx = 0
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        nonlocal sweep_idx
+        act = np.zeros(200, dtype=bool)
+        if sweep_idx != 0: # Let index 0 fail
+            act[40:80] = True
+        sweep_idx = (sweep_idx + 1) % 3
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["start_side"]["sweep_results"]["ok"] is False
+
+
+def test_activity_ending_just_before_out_is_not_crossing(setup_dirs, monkeypatch):
+    """Test that a component ending 5-20ms before the out-point is not classified as crossing."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.4, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Activity ends at 0.48s, out-point is 0.5s. It does not cross 0.5s.
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[40:96] = True # ends at 0.48s
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[40:96] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.2, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["end_side"]["tail_crossing_orig"] is False
+
+
+def test_true_connected_crossing_is_low(setup_dirs, monkeypatch):
+    """Test that a true connected VAD component crossing the boundary flags crossing tail and sets confidence to low."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.4, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Activity from 0.2 to 0.55 spans the original 0.5s endpoint.
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[40:110] = True # ends at 0.55s
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[40:110] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.2, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["end_side"]["tail_crossing_orig"] is True
+    assert evidence["end_side"]["lexical_fallback"] is False
+    assert evidence["confidence"]["end"] == "low"
+    assert evidence["final_frames"]["out"] == 15
+
+
+def test_lexical_safe_end_enforces_two_frames(setup_dirs, monkeypatch):
+    """Test that lexical safe ending override is only allowed if it has at least a two-frame tail after the word end."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.40, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # VAD invalid, forcing lexical safe check.
+    # Set dummy_rms to vary to ensure correlation coefficient is calculated and metrics_ok is True
+    dummy_rms = np.full(200, -5.0)
+    dummy_rms[::2] = -4.0
+    dummy_rms_rnn = np.full(200, -5.0)
+    dummy_rms_rnn[::2] = -4.0
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act_raw = np.zeros(200, dtype=bool)
+        act_rnn = np.zeros(200, dtype=bool)
+        return act_raw, act_rnn, 0, dummy_rms, dummy_rms_rnn, dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        return np.zeros(200, dtype=bool)
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    # Range with out-point at 0.433 (1 frame of tail at 30fps since ceil(0.40)*30 = 12, round(0.433)*30 = 13).
+    # 13 < 12 + 2, so it has insufficient tail for lexical safe.
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.2, "end": 0.433}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["end_side"]["lexical_fallback"] is False # Failed 2-frame tail check
+
+    # Now let's try with 0.467 (frame 14, which is 12 + 2 tail frames)
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.2, "end": 0.467}]
+    }
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["end_side"]["lexical_fallback"] is True
+
+
+def test_rejected_cue_excluded_from_local_metrics(setup_dirs, monkeypatch):
+    """Test that all words other than the anchor word are excluded from the local metrics calculation window."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "corta", "start": 0.1, "end": 0.36, "type": "word"},
+            {"text": "manter", "start": 0.4, "end": 0.6, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    dummy_rms = np.full(200, -5.0)
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[80:120] = True
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[80:120] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.4, "end": 0.6}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    excludes = evidence["start_side"]["local_metric_excludes"]
+    # "corta" at 0.1-0.36 must be excluded
+    assert [0.1, 0.36] in excludes
+
+
+def test_final_decision_evidence_matches_written_frame(setup_dirs, monkeypatch):
+    """Test that report's final_decision matches the actual confidence and written frames."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "hello", "start": 0.2, "end": 0.4, "type": "word"}
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(source_path, EXPECTED_MODEL_HASH, DEFAULT_VAD_PARAMS, "ffmpeg version 5.0.1", transcript_path)
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Let SNR be very low (poor SNR -> low confidence)
+    dummy_rms = np.full(200, -49.0) # very close to nf
+    dummy_nf = np.full(200, -50.0)
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = np.zeros(200, dtype=bool)
+        act[40:80] = True
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.get_combined_activity", mock_get_combined_activity)
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        act = np.zeros(200, dtype=bool)
+        act[40:80] = True
+        return act
+
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", mock_run_vad)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}]
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+
+    test_argv = ["helpers/refine_edl_boundaries.py", str(edl_path), "--transcripts", str(transcripts_dir), "--report", str(report_path)]
+    monkeypatch.setattr(sys, "argv", test_argv)
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["start_side"]["final_decision"] == "retained_original_low"
+    edl_new = json.loads(edl_path.read_text(encoding="utf-8"))
+    assert edl_new["ranges"][0]["source_in_frame"] == 4 # retained original 0.15 (4 frames)
+
+
+def test_stable_vad_inside_first_word_is_rejected_when_raw_attack_precedes_it(
+    setup_dirs, monkeypatch
+):
+    """Stable detectors cannot approve a late onset that discards weak raw speech."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "plosiva", "start": 0.2, "end": 0.4, "type": "word"},
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Both VADs agree on 0.300, but the low-threshold raw waveform already
+    # carries connected speech from the lexical onset at 0.200.
+    dummy_nf = np.full(200, -50.0)
+    dummy_rms = np.full(200, -50.0)
+    dummy_rms[40:120] = -10.0
+    dummy_rms[40:120:2] = -9.0
+
+    def activity(*args, **kwargs):
+        act = np.zeros(200, dtype=bool)
+        act[60:80] = True
+        return act
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = activity()
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", activity)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}],
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        refine_main()
+    assert exc.value.code == 2
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["start_side"]["pre_onset_attack_risk"] is True
+    assert "raw_activity_before_selected_onset" in evidence["start_side"]["rejection_reasons"]
+    assert evidence["start_side"]["pre_onset_attack_evidence"]["longest_low_activity_ms"] >= 10.0
+
+    updated = json.loads(edl_path.read_text(encoding="utf-8"))
+    assert updated["ranges"][0]["source_in_frame"] == 4
+
+
+def test_subframe_non_cue_neighbor_quantizes_safely_after_previous_word(
+    setup_dirs, monkeypatch
+):
+    """A clean acoustic onset just after a neighbor may quantize to ceil(prev.end)."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "deixar", "start": 0.1, "end": 0.349, "type": "word"},
+            {"text": "informe", "start": 0.5, "end": 0.6, "type": "word"},
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    dummy_nf = np.full(200, -50.0)
+    dummy_rms = np.full(200, -10.0)
+    dummy_rms[::2] = -9.0
+
+    def activity(*args, **kwargs):
+        act = np.zeros(200, dtype=bool)
+        act[70:120] = True  # 0.350: after 0.349, but both floor to frame 10.
+        return act
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = activity()
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", activity)
+
+    edl = {
+        "version": 1,
+        "sources": {"test_source": "test_source.wav"},
+        "ranges": [{"source": "test_source", "start": 0.45, "end": 0.7}],
+    }
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    evidence = report["boundary_evidence"][0]
+    assert evidence["confidence"]["start"] == "medium"
+    assert evidence["final_frames"]["in"] == 11
+    assert evidence["start_side"]["is_clamped"] is False
+    assert "sub_frame_neighbor_quantization" in evidence["start_side"]["notes"]
+    assert "frame_clamp_collision" not in evidence["start_side"]["rejection_reasons"]
+
+
+def test_single_word_is_not_later_speech_for_lexical_fallback(setup_dirs, monkeypatch):
+    """A detector miss cannot use the same anchor as its own later support."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [{"text": "hello", "start": 0.2, "end": 0.4, "type": "word"}]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    dummy_rms = np.full(200, -5.0)
+    dummy_rms[::2] = -4.0
+    dummy_nf = np.full(200, -50.0)
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        raw = np.zeros(200, dtype=bool)
+        raw[40:80] = True
+        rnn = np.zeros(200, dtype=bool)
+        return raw, rnn, 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.run_vad_hysteresis",
+        lambda *args, **kwargs: np.zeros(200, dtype=bool),
+    )
+
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": {"test_source": "test_source.wav"},
+            "ranges": [{"source": "test_source", "start": 0.15, "end": 0.5}],
+        }),
+        encoding="utf-8",
+    )
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        refine_main()
+    assert exc.value.code == 2
+
+    evidence = json.loads(report_path.read_text(encoding="utf-8"))["boundary_evidence"][0]
+    assert evidence["start_side"]["lexical_fallback"] is False
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["final_frames"]["in"] == 4

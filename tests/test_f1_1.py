@@ -33,6 +33,7 @@ def test_rational_frame_math():
     assert parse_fps_fraction("24000/1001") == Fraction(24000, 1001)
     assert parse_fps_fraction(23.976) == Fraction(24000, 1001)
     assert parse_fps_fraction("29.97") == Fraction(30000, 1001)
+    assert parse_fps_fraction("23.98") == Fraction(1199, 50)
 
     fps = Fraction(30000, 1001)
     # floor onset
@@ -42,6 +43,33 @@ def test_rational_frame_math():
 
     # conversion back to time
     assert abs(frame_to_time(29, fps) - 29 * 1001 / 30000) < 1e-6
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "fps_text", "mode", "expected"),
+    [
+        (0.1, "30/1", "ceil", 3),
+        (0.3, "30/1", "floor", 9),
+        (0.4, "30/1", "ceil", 12),
+        (0.35, "30/1", "floor", 10),
+        (0.15000000000000002, "30/1", "ceil", 5),
+        (1001 / 30000, "30000/1001", "ceil", 1),
+        (1.001, "24000/1001", "floor", 24),
+        (1.001, "30000/1001", "floor", 30),
+        (1.001, "60000/1001", "floor", 60),
+        (0.10000000001, "30/1", "ceil", 4),
+    ],
+)
+def test_time_quantization_ignores_binary_float_noise(timestamp, fps_text, mode, expected):
+    assert time_to_frame(timestamp, parse_fps_fraction(fps_text), mode) == expected
+
+
+@pytest.mark.parametrize("frame", [1, 7673, 7681, 100_000])
+def test_ntsc_frame_derived_timestamps_snap_to_the_source_frame(frame):
+    fps = parse_fps_fraction("30000/1001")
+    timestamp = float(Fraction(frame, 1) / fps)
+    assert time_to_frame(timestamp, fps, "floor") == frame
+    assert time_to_frame(timestamp, fps, "ceil") == frame
 
 # 2. Raw model/hash preflight tests
 def test_model_hash_preflight(tmp_path):

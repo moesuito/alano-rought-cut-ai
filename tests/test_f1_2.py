@@ -14,7 +14,8 @@ import pytest
 
 from helpers.timing import parse_fps_fraction, time_to_frame
 from helpers.render import main as render_main, frame_to_sample
-from helpers.preview_audio_qc import main as qc_main
+from helpers.preview_audio_qc import main as qc_main, two_frame_sample_count
+from helpers.verify_edit_ready import frame_to_sample as readiness_frame_to_sample
 
 
 def create_synthetic_wav(
@@ -68,7 +69,9 @@ def test_frame_to_sample_parity():
 
     # 29.97 (30000/1001)
     fps_29 = parse_fps_fraction(29.97)
+    assert frame_to_sample(1, fps_29, sample_rate) == 1602
     assert frame_to_sample(30, fps_29, sample_rate) == 48048
+    assert readiness_frame_to_sample(1, fps_29, sample_rate) == 1602
 
     # 30
     fps_30 = parse_fps_fraction(30)
@@ -77,6 +80,13 @@ def test_frame_to_sample_parity():
     # 59.94 (60000/1001)
     fps_59 = parse_fps_fraction(59.94)
     assert frame_to_sample(60, fps_59, sample_rate) == 48048
+
+    assert two_frame_sample_count("30000/1001", sample_rate) == 3203
+    assert two_frame_sample_count(
+        "30000/1001",
+        sample_rate,
+        end_frame=6,
+    ) == 3204
 
 
 def test_render_rejects_mp4(tmp_path, monkeypatch):
@@ -284,6 +294,7 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
     wav_path = qc_dir / "preview_pop.wav"
     samples_left = np.full(48000, 5000, dtype=np.int16)
     samples_right = np.full(48000, -5000, dtype=np.int16)
+    samples_right[-3200:] = 0
     samples_all = np.concatenate([samples_left, samples_right])
     # Stereo
     samples_stereo = np.column_stack((samples_all, samples_all))
@@ -351,6 +362,7 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
     # So this should be a warning!
     samples_left_w = np.full(48000, 1000, dtype=np.int16)
     samples_right_w = np.full(48000, -1000, dtype=np.int16)
+    samples_right_w[-3200:] = 0
     samples_all_w = np.concatenate([samples_left_w, samples_right_w])
     samples_stereo_w = np.column_stack((samples_all_w, samples_all_w))
 
@@ -370,3 +382,107 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
 
     # Clean up
     shutil.rmtree(qc_dir, ignore_errors=True)
+
+
+def test_qc_uses_worst_channel_for_antiphase_tail_and_join(tmp_path, monkeypatch):
+    """Anti-phase stereo must not cancel tail or join evidence."""
+    wav_path = tmp_path / "antiphase.wav"
+    map_path = tmp_path / "timeline.json"
+    report_path = tmp_path / "qc.json"
+
+    left = np.tile(np.array([1000, -1000], dtype=np.int16), (48000, 1))
+    right = np.tile(np.array([-1000, 1000], dtype=np.int16), (48000, 1))
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(np.vstack((left, right)).tobytes())
+
+    map_path.write_text(json.dumps({
+        "output_format": {"sequence_fps": 30},
+        "ranges": [
+            {
+                "source": "left",
+                "source_frames": [0, 30],
+                "output_cumulative_sample_interval": [0, 48000],
+            },
+            {
+                "source": "right",
+                "source_frames": [0, 30],
+                "output_cumulative_sample_interval": [48000, 96000],
+            },
+        ],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "helpers/preview_audio_qc.py",
+        str(wav_path),
+        "-m", str(map_path),
+        "-o", str(report_path),
+    ])
+    qc_main()
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["two_frame_tail_coverage_ok"] is True
+    assert report["two_frame_tail_ok"] is False
+    assert report["tail_rms_db"] > -60.0
+    assert report["warning_pops_count"] == 1
+    assert report["joins"][0]["status"] == "warning"
+    assert report["status"] == "review"
+    assert [channel["delta"] for channel in report["joins"][0]["channels"]] == [2000.0, 2000.0]
+
+
+def test_qc_tail_window_is_endpoint_relative_and_requires_full_audio(tmp_path, monkeypatch):
+    """The final NTSC tail uses rounded endpoint differences and cannot be partial."""
+    fps = parse_fps_fraction("30000/1001")
+    source_out_frame = 6
+    output_end = frame_to_sample(source_out_frame, fps)
+    exact_tail_start = frame_to_sample(source_out_frame - 2, fps)
+
+    wav_path = tmp_path / "endpoint_tail.wav"
+    map_path = tmp_path / "timeline.json"
+    report_path = tmp_path / "qc.json"
+    samples = np.zeros((output_end, 2), dtype=np.int16)
+    # This sample belongs to the exact 3204-sample tail but not to the old
+    # origin-relative 3203-sample window.
+    samples[exact_tail_start] = 32767
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(samples.tobytes())
+
+    timeline_map = {
+        "output_format": {"sequence_fps": "30000/1001"},
+        "ranges": [{
+            "source": "source",
+            "source_frames": [0, source_out_frame],
+            "output_cumulative_sample_interval": [0, output_end],
+        }],
+    }
+    map_path.write_text(json.dumps(timeline_map), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "helpers/preview_audio_qc.py",
+        str(wav_path),
+        "-m", str(map_path),
+        "-o", str(report_path),
+    ])
+    qc_main()
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["two_frame_tail_required_samples"] == 3204
+    assert report["two_frame_tail_window"] == [exact_tail_start, output_end]
+    assert report["two_frame_tail_coverage_ok"] is True
+    assert report["two_frame_tail_ok"] is False
+
+    # Truncating even one sample below the mapped endpoint invalidates coverage,
+    # regardless of whether the available audio is silent.
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(np.zeros((output_end - 1, 2), dtype=np.int16).tobytes())
+    qc_main()
+    truncated_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert truncated_report["two_frame_tail_coverage_ok"] is False
+    assert truncated_report["two_frame_tail_ok"] is False

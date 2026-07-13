@@ -359,8 +359,15 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "status": "pass",
         "input_edl_hash": "dummy",
         "output_edl_hash": edl_hash,
-        "boundary_evidence": [],
-        "confidence_summary": {}
+        "boundary_evidence": [
+            {
+                "range_index": 0,
+                "source": "source1",
+                "confidence": {"start": "high", "end": "high"},
+                "final_frames": {"in": 0, "out": 12},
+            }
+        ],
+        "confidence_summary": {"high": 2, "medium": 0, "low": 0}
     }
     edit_dir.joinpath("edl_boundary_qc.json").write_text(json.dumps(boundary_qc), encoding="utf-8")
 
@@ -368,6 +375,25 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "edl_hash": edl_hash,
         "timeline_map_hash": map_hash,
         "preview_wav_hash": wav_hash,
+        "wav_format_ok": True,
+        "sample_rate": 48000,
+        "channels": 2,
+        "sample_width": 16,
+        "sample_count_parity_ok": True,
+        "two_frame_tail_ok": True,
+        "two_frame_tail_coverage_ok": True,
+        "two_frame_tail_required_samples": 4000,
+        "two_frame_tail_window": [20000, 24000],
+        "tail_rms_db": -100.0,
+        "tail_rms_db_by_channel": [-100.0, -100.0],
+        "speech_clipping_ok": True,
+        "boundary_clipping_detected": False,
+        "clipping_events_count": 0,
+        "total_samples": 24000,
+        "expected_samples": 24000,
+        "severe_pops_count": 0,
+        "warning_pops_count": 0,
+        "joins": [],
         "status": "pass"
     }
     edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
@@ -418,7 +444,30 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         verify_ready_main()
     assert excinfo.value.code == 0
 
-    # 3. Verify review case: status=2 (change audio_qc to review)
+    # A non-empty EDL cannot be approved by an empty boundary evidence shell.
+    valid_boundary_evidence = boundary_qc["boundary_evidence"]
+    valid_confidence_summary = boundary_qc["confidence_summary"]
+    boundary_qc["boundary_evidence"] = []
+    boundary_qc["confidence_summary"] = {"high": 0, "medium": 0, "low": 0}
+    edit_dir.joinpath("edl_boundary_qc.json").write_text(json.dumps(boundary_qc), encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        verify_ready_main()
+    assert excinfo.value.code == 1
+    boundary_qc["boundary_evidence"] = valid_boundary_evidence
+    boundary_qc["confidence_summary"] = valid_confidence_summary
+    edit_dir.joinpath("edl_boundary_qc.json").write_text(json.dumps(boundary_qc), encoding="utf-8")
+
+    # 3. A failed mandatory tail check cannot hide behind status=pass or a
+    # contradictory boolean flag.
+    audio_qc["tail_rms_db"] = -30.3
+    audio_qc["tail_rms_db_by_channel"] = [-30.3, -31.0]
+    edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        verify_ready_main()
+    assert excinfo.value.code == 1
+
+    # A truthful review status stops XML automation with exit 2.
+    audio_qc["two_frame_tail_ok"] = False
     audio_qc["status"] = "review"
     edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
@@ -426,7 +475,19 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
     assert excinfo.value.code == 2
 
     # Reset audio_qc to pass
+    audio_qc["two_frame_tail_ok"] = True
+    audio_qc["tail_rms_db"] = -100.0
+    audio_qc["tail_rms_db_by_channel"] = [-100.0, -100.0]
     audio_qc["status"] = "pass"
+    edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
+
+    # Declared sample parity is recomputed from its numeric evidence.
+    audio_qc["total_samples"] = 1
+    edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        verify_ready_main()
+    assert excinfo.value.code == 1
+    audio_qc["total_samples"] = 24000
     edit_dir.joinpath("preview_audio_qc.json").write_text(json.dumps(audio_qc), encoding="utf-8")
 
     # 4. Verify fatal case: status=1 (change semantic_qc_data to fail)

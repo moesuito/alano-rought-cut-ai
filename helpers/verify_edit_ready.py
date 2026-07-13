@@ -19,7 +19,11 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any
+
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from helpers.timing import frame_to_sample, parse_fps_fraction
 
 
 def compute_sha256(path: Path) -> str:
@@ -37,23 +41,264 @@ def get_mtime(path: Path) -> float:
 
 
 import math
-from fractions import Fraction
 
-def parse_fps_fraction(fps_val: Any) -> Fraction:
-    """Parse FPS value into a Fraction. Supports int, float, Fraction, and string format."""
-    if isinstance(fps_val, Fraction):
-        return fps_val
-    if isinstance(fps_val, (int, float)):
-        return Fraction(fps_val)
-    fps_str = str(fps_val).strip()
-    if "/" in fps_str:
-        num, den = map(int, fps_str.split("/"))
-        return Fraction(num, den)
-    return Fraction(float(fps_str))
 
-def frame_to_sample(frame: int, fps: Fraction, sample_rate: int = 48000) -> int:
-    """Convert frame number to audio sample index with precise rational timing."""
-    return int(frame * sample_rate / fps)
+KNOWN_STATUSES = {"pass", "warning", "review", "fail", "error"}
+STATUS_SEVERITY = {"pass": 0, "warning": 1, "review": 2, "fail": 3, "error": 3}
+BOUNDARY_CONFIDENCES = {"high", "medium", "low"}
+
+
+def validate_boundary_report(
+    boundary_data: object,
+    edl_ranges: list[dict[str, object]],
+) -> list[str]:
+    """Return structural/consistency errors for a refiner boundary report."""
+    errors: list[str] = []
+    if not isinstance(boundary_data, dict):
+        return ["report is not a JSON object"]
+
+    evidence = boundary_data.get("boundary_evidence")
+    summary = boundary_data.get("confidence_summary")
+    if not isinstance(evidence, list):
+        errors.append("boundary_evidence is not a list")
+        return errors
+    if not isinstance(summary, dict):
+        errors.append("confidence_summary is not an object")
+        return errors
+    if len(evidence) != len(edl_ranges):
+        errors.append(
+            f"boundary_evidence count {len(evidence)} does not match EDL range count {len(edl_ranges)}"
+        )
+
+    observed_counts = {"high": 0, "medium": 0, "low": 0}
+    seen_indices: set[int] = set()
+    for position, item in enumerate(evidence):
+        if not isinstance(item, dict):
+            errors.append(f"boundary_evidence[{position}] is not an object")
+            continue
+        range_index = item.get("range_index")
+        if (
+            not isinstance(range_index, int)
+            or isinstance(range_index, bool)
+            or range_index < 0
+            or range_index >= len(edl_ranges)
+        ):
+            errors.append(f"boundary_evidence[{position}] has invalid range_index")
+            continue
+        if range_index in seen_indices:
+            errors.append(f"boundary_evidence has duplicate range_index {range_index}")
+            continue
+        seen_indices.add(range_index)
+
+        edl_range = edl_ranges[range_index]
+        if item.get("source") != edl_range.get("source"):
+            errors.append(f"boundary_evidence[{position}] source does not match EDL range {range_index}")
+
+        final_frames = item.get("final_frames")
+        if not isinstance(final_frames, dict):
+            errors.append(f"boundary_evidence[{position}] final_frames is invalid")
+        elif (
+            final_frames.get("in") != edl_range.get("source_in_frame")
+            or final_frames.get("out") != edl_range.get("source_out_frame")
+        ):
+            errors.append(f"boundary_evidence[{position}] final_frames do not match EDL range {range_index}")
+
+        confidence = item.get("confidence")
+        if not isinstance(confidence, dict):
+            errors.append(f"boundary_evidence[{position}] confidence is invalid")
+            continue
+        for side in ("start", "end"):
+            value = confidence.get(side)
+            if value not in BOUNDARY_CONFIDENCES:
+                errors.append(f"boundary_evidence[{position}] has invalid {side} confidence")
+            else:
+                observed_counts[value] += 1
+
+        expected_review = "low" in {confidence.get("start"), confidence.get("end")}
+        if edl_range.get("review_required") is not expected_review:
+            errors.append(
+                f"EDL range {range_index} review_required is inconsistent with boundary confidence"
+            )
+
+    for confidence_name, expected_count in observed_counts.items():
+        reported_count = summary.get(confidence_name)
+        if (
+            not isinstance(reported_count, int)
+            or isinstance(reported_count, bool)
+            or reported_count != expected_count
+        ):
+            errors.append(
+                f"confidence_summary.{confidence_name}={reported_count!r}, expected {expected_count}"
+            )
+
+    status = boundary_data.get("status")
+    if status not in KNOWN_STATUSES:
+        errors.append("status is missing or unknown")
+    else:
+        minimum_status = "review" if observed_counts["low"] else "pass"
+        if STATUS_SEVERITY[status] < STATUS_SEVERITY[minimum_status]:
+            errors.append(
+                f"status {status!r} is less severe than confidence evidence requires ({minimum_status})"
+            )
+    return errors
+
+
+def validate_audio_report(audio_data: object) -> list[str]:
+    """Return structural/consistency errors for mandatory preview audio gates."""
+    errors: list[str] = []
+    if not isinstance(audio_data, dict):
+        return ["report is not a JSON object"]
+
+    required_bool_fields = (
+        "wav_format_ok",
+        "sample_count_parity_ok",
+        "two_frame_tail_ok",
+        "two_frame_tail_coverage_ok",
+        "speech_clipping_ok",
+        "boundary_clipping_detected",
+    )
+    for key in required_bool_fields:
+        if not isinstance(audio_data.get(key), bool):
+            errors.append(f"{key} is missing or not boolean")
+
+    for key in (
+        "total_samples",
+        "expected_samples",
+        "sample_rate",
+        "channels",
+        "sample_width",
+        "two_frame_tail_required_samples",
+        "clipping_events_count",
+        "severe_pops_count",
+        "warning_pops_count",
+    ):
+        value = audio_data.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            errors.append(f"{key} is missing or not a non-negative integer")
+
+    expected_wav_format_ok = (
+        audio_data.get("sample_rate") == 48000
+        and audio_data.get("channels") == 2
+        and audio_data.get("sample_width") == 16
+    )
+    if audio_data.get("wav_format_ok") is not expected_wav_format_ok:
+        errors.append("wav_format_ok contradicts sample_rate/channels/sample_width evidence")
+
+    joins = audio_data.get("joins")
+    if not isinstance(joins, list):
+        errors.append("joins is missing or not a list")
+        joins = []
+    else:
+        severe_count = 0
+        warning_count = 0
+        for index, join in enumerate(joins):
+            if not isinstance(join, dict):
+                errors.append(f"joins[{index}] is not an object")
+                continue
+            join_status = join.get("status")
+            if join_status == "severe":
+                severe_count += 1
+            elif join_status == "warning":
+                warning_count += 1
+            elif join_status != "pass":
+                errors.append(f"joins[{index}] has unknown status")
+        if audio_data.get("severe_pops_count") != severe_count:
+            errors.append("severe_pops_count does not match join evidence")
+        if audio_data.get("warning_pops_count") != warning_count:
+            errors.append("warning_pops_count does not match join evidence")
+
+    total_samples = audio_data.get("total_samples")
+    expected_samples = audio_data.get("expected_samples")
+    if (
+        isinstance(total_samples, int)
+        and not isinstance(total_samples, bool)
+        and isinstance(expected_samples, int)
+        and not isinstance(expected_samples, bool)
+    ):
+        allowed_discrepancy = max(1, len(joins))
+        expected_parity_ok = abs(total_samples - expected_samples) <= allowed_discrepancy
+        if audio_data.get("sample_count_parity_ok") is not expected_parity_ok:
+            errors.append("sample_count_parity_ok contradicts total/expected sample evidence")
+
+    tail_window = audio_data.get("two_frame_tail_window")
+    tail_required = audio_data.get("two_frame_tail_required_samples")
+    tail_window_valid = (
+        isinstance(tail_window, list)
+        and len(tail_window) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in tail_window)
+        and tail_window[0] >= 0
+        and tail_window[1] > tail_window[0]
+        and isinstance(tail_required, int)
+        and not isinstance(tail_required, bool)
+        and tail_required > 0
+        and tail_window[1] - tail_window[0] == tail_required
+        and isinstance(total_samples, int)
+        and not isinstance(total_samples, bool)
+        and isinstance(expected_samples, int)
+        and not isinstance(expected_samples, bool)
+        and tail_window[1] == expected_samples
+        and tail_window[1] <= total_samples
+    )
+    if audio_data.get("two_frame_tail_coverage_ok") is not tail_window_valid:
+        errors.append("two_frame_tail_coverage_ok contradicts mapped tail window evidence")
+
+    tail_rms = audio_data.get("tail_rms_db")
+    tail_rms_by_channel = audio_data.get("tail_rms_db_by_channel")
+    tail_rms_evidence_valid = (
+        isinstance(tail_rms, (int, float))
+        and not isinstance(tail_rms, bool)
+        and math.isfinite(float(tail_rms))
+        and isinstance(tail_rms_by_channel, list)
+        and len(tail_rms_by_channel) > 0
+        and len(tail_rms_by_channel) == audio_data.get("channels")
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in tail_rms_by_channel
+        )
+    )
+    if not tail_rms_evidence_valid:
+        errors.append("tail RMS evidence is missing or invalid")
+        expected_tail_ok = False
+    else:
+        worst_channel_rms = max(float(value) for value in tail_rms_by_channel)
+        if abs(float(tail_rms) - worst_channel_rms) > 1e-6:
+            errors.append("tail_rms_db does not equal the worst per-channel tail RMS")
+        expected_tail_ok = tail_window_valid and worst_channel_rms < -60.0
+    if audio_data.get("two_frame_tail_ok") is not expected_tail_ok:
+        errors.append("two_frame_tail_ok contradicts coverage/RMS evidence")
+
+    expected_speech_clipping_ok = audio_data.get("boundary_clipping_detected") is False
+    if audio_data.get("speech_clipping_ok") is not expected_speech_clipping_ok:
+        errors.append("speech_clipping_ok contradicts boundary_clipping_detected")
+
+    structural_failure = (
+        audio_data.get("wav_format_ok") is False
+        or audio_data.get("sample_count_parity_ok") is False
+        or audio_data.get("two_frame_tail_coverage_ok") is False
+    )
+    review_failure = (
+        audio_data.get("two_frame_tail_ok") is False
+        or audio_data.get("speech_clipping_ok") is False
+        or audio_data.get("boundary_clipping_detected") is True
+        or (isinstance(audio_data.get("severe_pops_count"), int) and audio_data.get("severe_pops_count", 0) > 0)
+    )
+    warning_present = (
+        isinstance(audio_data.get("warning_pops_count"), int)
+        and audio_data.get("warning_pops_count", 0) > 0
+    )
+    minimum_status = "fail" if structural_failure else (
+        "review" if review_failure else ("warning" if warning_present else "pass")
+    )
+    status = audio_data.get("status")
+    if status not in KNOWN_STATUSES:
+        errors.append("status is missing or unknown")
+    elif STATUS_SEVERITY[status] < STATUS_SEVERITY[minimum_status]:
+        errors.append(
+            f"status {status!r} is less severe than mandatory checks require ({minimum_status})"
+        )
+    return errors
 
 
 def main() -> None:
@@ -271,16 +516,17 @@ def main() -> None:
     stale = False
 
     # A. Boundary QC (Refiner Report)
-    if "boundary_evidence" not in boundary_data or "confidence_summary" not in boundary_data:
-        print("FATAL: Boundary QC report is not in the refiner report schema format.")
+    boundary_errors = validate_boundary_report(boundary_data, edl_ranges)
+    if boundary_errors:
+        for error in boundary_errors:
+            print(f"FATAL: Boundary QC schema/consistency error: {error}.")
         stale = True
-    else:
-        if boundary_data.get("output_edl_hash") != current_edl_hash:
-            print("STALE: Boundary QC report output EDL hash mismatch. Re-run boundary refinement.")
-            stale = True
-        if get_mtime(boundary_path) < edl_mtime - 1.0:
-            print("STALE: Boundary QC report is older than EDL. Re-run boundary refinement.")
-            stale = True
+    if boundary_data.get("output_edl_hash") != current_edl_hash:
+        print("STALE: Boundary QC report output EDL hash mismatch. Re-run boundary refinement.")
+        stale = True
+    if get_mtime(boundary_path) < edl_mtime - 1.0:
+        print("STALE: Boundary QC report is older than EDL. Re-run boundary refinement.")
+        stale = True
 
     # B. Audio QC
     if audio_data.get("edl_hash") != current_edl_hash:
@@ -291,6 +537,11 @@ def main() -> None:
         stale = True
     if audio_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Audio QC report preview WAV hash mismatch. Re-run audio QC.")
+        stale = True
+    audio_errors = validate_audio_report(audio_data)
+    if audio_errors:
+        for error in audio_errors:
+            print(f"FATAL: Audio QC schema/consistency error: {error}.")
         stale = True
 
     # C. Semantic QC
@@ -459,10 +710,8 @@ def main() -> None:
 
     # 4. Status mapping
     # We evaluate the statuses of all reports.
-    # Statuses must belong to KNOWN_STATUSES enum known statuses
-    KNOWN_STATUSES = {"pass", "warning", "review", "fail", "error"}
-
-    if "boundary_evidence" not in boundary_data or "confidence_summary" not in boundary_data:
+    # Statuses must belong to the known enum.
+    if validate_boundary_report(boundary_data, edl_ranges):
         boundary_status = "fail"
     else:
         boundary_status = boundary_data.get("status")
