@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import wave
 from pathlib import Path
@@ -23,6 +24,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helpers.timing import frame_to_sample, parse_fps_fraction
+from helpers.audio_analysis import compute_rms_db
 
 
 def two_frame_sample_count(
@@ -48,6 +50,20 @@ def compute_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def write_atomic_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def rms_db(samples: np.ndarray) -> float:
     """Compute the RMS value of a signal in dB FS (relative to 32768)."""
     if len(samples) == 0:
@@ -57,6 +73,84 @@ def rms_db(samples: np.ndarray) -> float:
         return -100.0
     # Relative to PCM16 Full Scale (32768)
     return float(20.0 * np.log10(rms / 32768.0))
+
+
+def activity_profile(samples: np.ndarray, sample_rate: int = 48000) -> dict:
+    """Return phase-safe adaptive activity evidence for a multichannel span."""
+    if samples.ndim == 1:
+        samples = samples.reshape((-1, 1))
+    window_samples = int(sample_rate * 0.010)
+    hop_samples = int(sample_rate * 0.005)
+    if len(samples) < window_samples or samples.shape[1] == 0:
+        return {
+            "threshold_dbfs": None,
+            "noise_floor_dbfs": None,
+            "first_activity_ms": None,
+            "activity_ms": 0.0,
+            "activity": np.zeros(0, dtype=bool),
+            "max_rms_dbfs": np.zeros(0, dtype=np.float64),
+            "hop_ms": 5.0,
+        }
+
+    rms_channels = np.vstack([
+        compute_rms_db(samples[:, channel], window_samples, hop_samples)
+        for channel in range(samples.shape[1])
+    ])
+    max_rms = np.max(rms_channels, axis=0)
+    noise_floor = float(np.percentile(max_rms, 10))
+    threshold = float(np.clip(noise_floor + 8.0, -65.0, -30.0))
+    exit_threshold = threshold - 3.0
+
+    activity = np.zeros(len(max_rms), dtype=bool)
+    active = False
+    for index, value in enumerate(max_rms):
+        if active:
+            active = value >= exit_threshold
+        else:
+            active = value >= threshold
+        activity[index] = active
+
+    # Fill short internal holes (<= 40 ms).
+    max_gap_bins = 8
+    index = 0
+    while index < len(activity):
+        if activity[index]:
+            index += 1
+            continue
+        gap_start = index
+        while index < len(activity) and not activity[index]:
+            index += 1
+        if gap_start > 0 and index < len(activity) and index - gap_start <= max_gap_bins:
+            activity[gap_start:index] = True
+
+    # Ignore isolated noise: entry activity must remain connected for 15 ms.
+    minimum_run_bins = 3
+    first_activity_bin = None
+    index = 0
+    while index < len(activity):
+        if not activity[index]:
+            index += 1
+            continue
+        run_start = index
+        while index < len(activity) and activity[index]:
+            index += 1
+        if index - run_start >= minimum_run_bins:
+            if first_activity_bin is None:
+                first_activity_bin = run_start
+        else:
+            activity[run_start:index] = False
+
+    return {
+        "threshold_dbfs": threshold,
+        "noise_floor_dbfs": noise_floor,
+        "first_activity_ms": (
+            float(first_activity_bin * 5.0) if first_activity_bin is not None else None
+        ),
+        "activity_ms": float(np.count_nonzero(activity) * 5.0),
+        "activity": activity,
+        "max_rms_dbfs": max_rms,
+        "hop_ms": 5.0,
+    }
 
 
 def main() -> None:
@@ -156,6 +250,7 @@ def main() -> None:
                 fps_val = 30.0
         else:
             fps_val = 30.0
+    fps = parse_fps_fraction(fps_val)
 
     # Keep the generic two-frame size for the existing clipping-neighborhood
     # check. Tail coverage itself is phase-aware at the final source endpoint.
@@ -205,7 +300,186 @@ def main() -> None:
     tail_rms = max(tail_rms_by_channel, default=-100.0)
     two_frame_tail_ok = tail_coverage_ok and tail_rms < -60.0
 
-    # 5. Speech clipping (saturated samples) near boundaries
+    # 5. Per-range entry/tail evidence. This makes every join auditable from
+    # both sides instead of checking only the beginning/end of the whole WAV.
+    range_entries = []
+    range_reviews_count = 0
+    frame_ms = 1000.0 / float(fps)
+    allowed_acoustic_preroll_ms = frame_ms + 25.0
+    allowed_entry_inactivity_ms = 150.0
+
+    for position, range_map in enumerate(ranges):
+        flags = []
+        warnings = []
+        output_interval = range_map.get("output_cumulative_sample_interval")
+        source_frames = range_map.get("source_frames")
+        source_interval = range_map.get("source_sample_interval")
+        valid_intervals = (
+            isinstance(output_interval, list)
+            and len(output_interval) == 2
+            and all(isinstance(value, int) and not isinstance(value, bool) for value in output_interval)
+            and isinstance(source_frames, list)
+            and len(source_frames) == 2
+            and all(isinstance(value, int) and not isinstance(value, bool) for value in source_frames)
+        )
+        if not valid_intervals:
+            range_entries.append({
+                "range_index": range_map.get("range_index", position),
+                "source": range_map.get("source"),
+                "status": "review",
+                "blocking_flags": ["invalid_range_map"],
+            })
+            range_reviews_count += 1
+            continue
+
+        output_start, output_end = output_interval
+        source_in_frame, source_out_frame = source_frames
+        span_covered = 0 <= output_start < output_end <= actual_samples
+        if not span_covered:
+            flags.append("range_audio_not_fully_covered")
+        segment = channel_samples[
+            max(0, min(actual_samples, output_start)):
+            max(0, min(actual_samples, output_end))
+        ]
+        profile = activity_profile(segment, framerate)
+        first_activity_ms = profile["first_activity_ms"]
+        if first_activity_ms is None:
+            flags.append("missing_connected_activity")
+        entry_activity_is_late = (
+            first_activity_ms is not None
+            and first_activity_ms > allowed_entry_inactivity_ms
+        )
+
+        if (
+            not isinstance(source_interval, list)
+            or len(source_interval) != 2
+            or not all(isinstance(value, int) and not isinstance(value, bool) for value in source_interval)
+        ):
+            source_interval = [
+                frame_to_sample(source_in_frame, fps),
+                frame_to_sample(source_out_frame, fps),
+            ]
+
+        lexical_anchors = range_map.get("lexical_anchors")
+        first_anchor = lexical_anchors.get("first") if isinstance(lexical_anchors, dict) else None
+        acoustic_onset = None
+        if isinstance(first_anchor, dict):
+            acoustic_onset = first_anchor.get("acoustic_onset", first_anchor.get("start"))
+        if not isinstance(acoustic_onset, (int, float)) or isinstance(acoustic_onset, bool):
+            expected_guard_ms = None
+            expected_onset_output_sample = None
+            residual_pre_anchor_activity_ms = None
+            flags.append("missing_lexical_anchor")
+        else:
+            expected_onset_source_sample = int(round(float(acoustic_onset) * framerate))
+            expected_onset_offset = expected_onset_source_sample - source_interval[0]
+            expected_onset_output_sample = output_start + expected_onset_offset
+            expected_guard_ms = max(0.0, expected_onset_offset * 1000.0 / framerate)
+            if expected_guard_ms > allowed_acoustic_preroll_ms:
+                flags.append("excessive_acoustic_preroll")
+
+            # Activity more than one source frame before the selected acoustic
+            # onset indicates a rejected cue/word leaking into the range.
+            residual_cutoff_ms = max(0.0, expected_guard_ms - frame_ms)
+            residual_bins = int(residual_cutoff_ms / profile["hop_ms"])
+            residual_pre_anchor_activity_ms = float(
+                np.count_nonzero(profile["activity"][:residual_bins]) * profile["hop_ms"]
+            )
+            if residual_pre_anchor_activity_ms > 15.0:
+                flags.append("residual_pre_anchor_activity")
+
+        if entry_activity_is_late:
+            if (
+                expected_guard_ms is not None
+                and expected_guard_ms <= allowed_acoustic_preroll_ms
+                and residual_pre_anchor_activity_ms is not None
+                and residual_pre_anchor_activity_ms <= 15.0
+            ):
+                # A quiet first word may sit below this lightweight amplitude
+                # detector. The mandatory timed preview transcript remains the
+                # lexical gate, so record the ambiguity without rejecting an
+                # otherwise tight and cue-free mapped entry.
+                warnings.append("quiet_entry_requires_transcript_confirmation")
+            else:
+                flags.append("excessive_entry_inactivity")
+
+        peak_dbfs_by_channel = []
+        rms_dbfs_by_channel = []
+        for channel in range(channel_samples.shape[1]):
+            channel_segment = segment[:, channel] if len(segment) else np.array([])
+            rms_dbfs_by_channel.append(rms_db(channel_segment))
+            peak = float(np.max(np.abs(channel_segment))) if len(channel_segment) else 0.0
+            peak_dbfs_by_channel.append(
+                float(20.0 * np.log10(peak / 32768.0)) if peak > 0 else -100.0
+            )
+
+        range_tail_size = (
+            two_frame_sample_count(fps, end_frame=source_out_frame)
+            if source_out_frame >= 2
+            else 0
+        )
+        range_tail_coverage_ok = range_tail_size > 0 and len(segment) >= range_tail_size
+        if range_tail_coverage_ok:
+            range_tail = segment[-range_tail_size:]
+            range_tail_rms_by_channel = [
+                rms_db(range_tail[:, channel]) for channel in range(range_tail.shape[1])
+            ]
+        else:
+            range_tail_rms_by_channel = [-100.0] * channel_samples.shape[1]
+        range_tail_rms = max(range_tail_rms_by_channel, default=-100.0)
+        activity_threshold = profile.get("threshold_dbfs")
+        adaptive_tail_threshold = -60.0
+        if isinstance(activity_threshold, (int, float)):
+            adaptive_tail_threshold = max(-60.0, min(-50.0, float(activity_threshold)))
+        left_tail_ok = (
+            range_tail_coverage_ok
+            and range_tail_rms < adaptive_tail_threshold
+        )
+        if not left_tail_ok:
+            flags.append("active_or_uncovered_two_frame_tail")
+
+        boundary_window = min(boundary_window_size, len(segment))
+        boundary_clipping = False
+        if boundary_window > 0:
+            boundary_samples = np.concatenate(
+                [segment[:boundary_window], segment[-boundary_window:]], axis=0
+            )
+            boundary_clipping = bool(np.any(np.abs(boundary_samples) >= 32760))
+        if boundary_clipping:
+            flags.append("range_boundary_clipping")
+
+        range_status = "review" if flags else "pass"
+        if flags:
+            range_reviews_count += 1
+        range_entries.append({
+            "range_index": range_map.get("range_index", position),
+            "source": range_map.get("source"),
+            "beat_id": range_map.get("beat_id"),
+            "output_sample_interval": output_interval,
+            "first_activity_ms": first_activity_ms,
+            "allowed_entry_inactivity_ms": allowed_entry_inactivity_ms,
+            "activity_threshold_dbfs": profile["threshold_dbfs"],
+            "activity_noise_floor_dbfs": profile["noise_floor_dbfs"],
+            "activity_ms": profile["activity_ms"],
+            "expected_acoustic_onset_output_sample": expected_onset_output_sample,
+            "expected_acoustic_preroll_ms": expected_guard_ms,
+            "allowed_acoustic_preroll_ms": allowed_acoustic_preroll_ms,
+            "residual_pre_anchor_activity_ms": residual_pre_anchor_activity_ms,
+            "peak_dbfs_by_channel": peak_dbfs_by_channel,
+            "rms_dbfs_by_channel": rms_dbfs_by_channel,
+            "two_frame_tail_required_samples": range_tail_size,
+            "two_frame_tail_coverage_ok": range_tail_coverage_ok,
+            "two_frame_tail_rms_db": range_tail_rms,
+            "two_frame_tail_rms_db_by_channel": range_tail_rms_by_channel,
+            "two_frame_tail_threshold_dbfs": adaptive_tail_threshold,
+            "left_tail_ok": left_tail_ok,
+            "boundary_clipping_detected": boundary_clipping,
+            "status": range_status,
+            "blocking_flags": flags,
+            "warnings": warnings,
+        })
+
+    # 6. Speech clipping (saturated samples) near boundaries
     # Saturated sample is where abs(val) >= 32760
     saturated_indices = np.where(frame_peak >= 32760)[0]
     clipping_events_count = len(saturated_indices)
@@ -227,7 +501,7 @@ def main() -> None:
 
     speech_clipping_ok = not boundary_clipping_detected
 
-    # 6. Join discontinuities
+    # 7. Join discontinuities
     severe_pops_count = 0
     warning_pops_count = 0
     joins_analysis = []
@@ -321,7 +595,12 @@ def main() -> None:
     global_status = "pass"
     if not wav_format_ok or not sample_count_parity_ok or not tail_coverage_ok:
         global_status = "fail"
-    elif not two_frame_tail_ok or not speech_clipping_ok or severe_pops_count > 0:
+    elif (
+        not two_frame_tail_ok
+        or not speech_clipping_ok
+        or severe_pops_count > 0
+        or range_reviews_count > 0
+    ):
         global_status = "review"
     elif warning_pops_count > 0:
         global_status = "warning"
@@ -349,13 +628,14 @@ def main() -> None:
         "boundary_clipping_detected": boundary_clipping_detected,
         "severe_pops_count": severe_pops_count,
         "warning_pops_count": warning_pops_count,
+        "range_review_count": range_reviews_count,
+        "range_entries": range_entries,
         "joins": joins_analysis,
         "status": global_status
     }
 
     # Save the QC report
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(qc_report, indent=2), encoding="utf-8")
+    write_atomic_json(out_path, qc_report)
     print(f"QC Report written to {out_path} with status: {global_status}")
 
 

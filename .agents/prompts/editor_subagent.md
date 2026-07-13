@@ -20,7 +20,7 @@ INPUTS:
 
 RULES:
   - Start/end times must fall on word boundaries from the transcript.
-  - If cutting inside a phrase, inspect the raw Scribe JSON and snap to exact word timestamps.
+  - If cutting inside a phrase, inspect canonical WhisperX JSON and snap to exact forced-alignment timestamps.
   - Pad cut boundaries within the 30-200ms working window.
   - Prefer silences >= 400ms as cut targets.
   - 150-400ms phrase boundaries are usable with care and visual/audio inspection.

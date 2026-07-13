@@ -3,15 +3,26 @@
 ## v0.4.0 - 2026-07-11
 
 ### Added
+- Added a shared, pinned Python 3.12 CUDA transcription runtime with WhisperX 3.8.6, faster-whisper `large-v3`, Pyannote Community-1, runtime doctor, and installer command.
+- Added a canonical hash-bound transcript schema requiring 100% forced-aligned word timing and Community-1 speaker IDs.
 - Added `verify_edit_ready.py` gate validation prior to XML timeline export in Step 09.
 - Added non-blocking QC verification warning when executing `edl_to_fcpxml.py` manually.
 - Support for `source_in_frame` / `source_out_frame` in XML conversion, matching preview frames exactly.
 - Added opt-in private regression testing using `ALANOCUT_LESSON08_DIR` environment variable.
+- Added join identity/evidence to preview artifacts and join-centric audio/transcript validation.
+- Added mandatory `required_beats` alternatives and `beat_id` coverage checks.
 
 ### Changed
-- Shifted the workflow to be audio-only, using `preview.wav` and `preview_timeline.json` instead of `preview.mp4`.
+- Made local CUDA WhisperX the normative source and preview provider; ElevenLabs and whisper.cpp remain explicit compatibility/diagnostic paths with no silent fallback.
+- Shifted the workflow from the legacy video preview to audio-only `preview.wav` and `preview_timeline.json` artifacts.
+- Made the gate order mandatory: refine -> render -> audio QC -> semantic QC -> persisted preview transcript/hash -> join transcript QC -> readiness exit 0 -> XML.
+- Kept global transcript similarity/recall as supplemental evidence and removed project-specific domain assumptions from generic QC.
 - Marked `timeline_view.py` as legacy, slated for removal in v0.5.0.
 - Updated README, installation instructions, and modular steps.
+
+### Fixed
+- Prevented legacy, unrefined, untimed, incomplete-join, or stale artifact sets from being treated as ready for agent-driven XML export.
+- Prevented long CTC blank spans from swallowing omitted recording cues; windowed two-pass consensus now recovers cues and re-aligns them against raw/RNNoise activity without trusting ordinary secondary-ASR text.
 
 ## v0.3.0 - 2026-07-10
 

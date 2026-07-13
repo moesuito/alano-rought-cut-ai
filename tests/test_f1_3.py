@@ -20,6 +20,12 @@ from helpers.preview_transcript_qc import (
     main as preview_transcript_main,
 )
 import helpers.preview_transcript_qc as preview_transcript_qc
+from helpers.transcription_contract import (
+    EXPECTED_RNNOISE_MODEL_HASH,
+    WhisperXConfig,
+    analyze_alignment_quality,
+    convert_whisperx_result,
+)
 from helpers.verify_edit_ready import main as verify_ready_main
 
 
@@ -40,6 +46,99 @@ def create_synthetic_wav(path: Path, duration_s: float = 0.5) -> None:
         w.writeframes(samples.tobytes())
 
 
+def canonical_source_transcript(words: list[dict], source_sha256: str) -> dict:
+    """Build a production-valid WhisperX transcript fixture."""
+    config = WhisperXConfig()
+    aligned_words = [
+        {
+            "word": word["text"],
+            "start": word["start"],
+            "end": word["end"],
+            "score": 0.99,
+            "speaker": "SPEAKER_00",
+        }
+        for word in words
+    ]
+    transcript = convert_whisperx_result(
+        {
+            "language": "pt",
+            "segments": [{
+                "start": aligned_words[0]["start"],
+                "end": aligned_words[-1]["end"],
+                "text": " ".join(word["text"] for word in words),
+                "words": aligned_words,
+            }],
+        },
+        [{
+            "start": 0.0,
+            "end": aligned_words[-1]["end"],
+            "speaker": "SPEAKER_00",
+        }],
+        config=config,
+        source_sha256=source_sha256,
+    )
+    metadata = transcript["_alano_cut"]
+    metadata.update({
+        "models": {
+            "asr": config.model,
+            "semantic_verifier": config.semantic_verifier_model,
+            "alignment": config.align_model,
+            "diarization": config.diarization_model,
+        },
+        "model_revisions": {
+            "asr": config.model_revision,
+            "semantic_verifier": config.semantic_verifier_revision,
+            "alignment": config.align_model_revision,
+            "diarization": config.diarization_model_revision,
+        },
+        "runtime": {
+            "whisperx": config.whisperx_version,
+            "faster_whisper": config.faster_whisper_version,
+            "pyannote_audio": config.pyannote_audio_version,
+            "torch": "2.8.0+cu128",
+            "cuda": "12.8",
+            "gpu": "test-gpu",
+            "device": "cuda",
+            "compute_type": config.compute_type,
+            "batch_size": config.batch_size,
+        },
+        "semantic_verification": {
+            "status": "pass",
+            "mode": config.semantic_fusion_mode,
+            "revision": config.semantic_fusion_revision,
+            "asr_mode": config.vad_method,
+            "coverage_asr_mode": "windowed_no_vad",
+            "semantic_source": "semantic_verifier",
+            "contextual_token_count": len(words),
+            "coverage_token_count": len(words),
+            "cue_words": sorted(config.recording_cues.split(",")),
+            "recoveries": [],
+        },
+        "acoustic_timing": {
+            "status": "pass",
+            "blocking_outlier_count": 0,
+            "blocking_outliers": [],
+            "source_sha256": source_sha256,
+            "rnnoise_model_sha256": EXPECTED_RNNOISE_MODEL_HASH,
+            "parameters": {"hop_seconds": 0.005},
+            "evidence": [],
+            "semantic_recovery_evidence": [],
+        },
+        "alignment": {
+            "model": config.align_model,
+            "timed_word_coverage": 1.0,
+            **analyze_alignment_quality(transcript),
+        },
+        "diarization_status": {
+            "status": "pass",
+            "model": config.diarization_model,
+            "exclusive": True,
+            "turn_count": len(transcript["diarization"]),
+        },
+    })
+    return transcript
+
+
 @pytest.fixture
 def temp_workspace(tmp_path):
     """Setup a standard workspace structure with mock inputs."""
@@ -51,15 +150,18 @@ def temp_workspace(tmp_path):
     # Create dummy source files
     create_synthetic_wav(edit_dir / "source1.wav")
 
-    # Create source transcript
-    transcript1 = {
-        "words": [
-            {"text": "welcome", "start": 0.1, "end": 0.4, "type": "word"},
-            {"text": "to", "start": 0.4, "end": 0.6, "type": "word"},
-            {"text": "the", "start": 0.6, "end": 0.8, "type": "word"},
-            {"text": "lesson", "start": 0.8, "end": 1.2, "type": "word"},
-        ]
-    }
+    # Source transcript fixtures must satisfy the same canonical contract as
+    # the readiness gate's production inputs.
+    source_wav = edit_dir / "source1.wav"
+    transcript1 = canonical_source_transcript(
+        [
+            {"text": "welcome", "start": 0.1, "end": 0.4},
+            {"text": "to", "start": 0.4, "end": 0.6},
+            {"text": "the", "start": 0.6, "end": 0.8},
+            {"text": "lesson", "start": 0.8, "end": 1.2},
+        ],
+        hashlib.sha256(source_wav.read_bytes()).hexdigest(),
+    )
     (transcripts_dir / "source1.json").write_text(json.dumps(transcript1), encoding="utf-8")
 
     return {
@@ -160,7 +262,31 @@ def test_semantic_qc_valid_evidence_satisfied(temp_workspace):
     report = run_semantic_qc(edl_path, temp_workspace["transcripts"])
     assert report["status"] == "pass"
     assert report["beats"][0]["satisfied"] is True
-    assert report["beats"][0]["matched_evidence"] == "welcome"
+    assert report["beats"][0]["matched_evidence"] == ["welcome"]
+
+
+def test_semantic_qc_nested_evidence_requires_every_phrase(temp_workspace):
+    edl = {
+        "version": 1,
+        "sources": {"source1": "source1.wav"},
+        "ranges": [
+            {"source": "source1", "start": 0.0, "end": 1.5, "beat_id": "b1"}
+        ],
+        "metadata": {
+            "required_beats": [{
+                "id": "b1",
+                "description": "Opening promise",
+                "evidence_any_of": [["welcome", "lesson"], ["fallback", "phrase"]],
+            }]
+        },
+    }
+    edl_path = temp_workspace["edit"] / "edl.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+
+    report = run_semantic_qc(edl_path, temp_workspace["transcripts"])
+
+    assert report["status"] == "pass"
+    assert report["beats"][0]["matched_evidence"] == ["welcome", "lesson"]
 
 
 def test_semantic_qc_missing_beat_evidence(temp_workspace):
@@ -389,6 +515,10 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "speech_clipping_ok": True,
         "boundary_clipping_detected": False,
         "clipping_events_count": 0,
+        "range_review_count": 0,
+        "range_entries": [
+            {"range_index": 0, "source": "source1", "status": "pass", "blocking_flags": []}
+        ],
         "total_samples": 24000,
         "expected_samples": 24000,
         "severe_pops_count": 0,
@@ -409,16 +539,43 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
     edit_dir.joinpath("edl_semantic_qc.json").write_text(json.dumps(semantic_qc_data), encoding="utf-8")
 
     transcript_qc = {
+        "schema_version": 2,
+        "mode": "range_aware",
+        "status": "pass",
         "transcript": "generated",
+        "edl_hash": edl_hash,
+        "timeline_map_hash": map_hash,
         "preview_wav_hash": wav_hash,
         "transcript_hash": "some_hash",
+        "source_transcript_hashes": {"source1": trans_hash},
         "summary": {
             "status": "pass",
             "word_count": 10,
             "timed_word_count": 10,
             "timing_coverage": 1.0,
+            "range_count": 1,
+            "range_pass_count": 1,
+            "range_review_count": 0,
+            "join_count": 0,
+            "join_pass_count": 0,
+            "join_review_count": 0,
             "blocking_flags": []
         },
+        "timing_validation": {
+            "untimed_words": [],
+            "invalid_words": [],
+            "out_of_bounds_words": [],
+        },
+        "ranges": [{
+            "range_index": 0,
+            "source": "source1",
+            "expected_words": [],
+            "actual_words": [],
+            "alignment": [],
+            "status": "pass",
+            "blocking_flags": [],
+        }],
+        "joins": [],
         "words_evidence": [
             {"text": f"word{i}", "type": "word", "start": float(i), "end": float(i) + 0.5}
             for i in range(10)
@@ -533,8 +690,12 @@ def test_preview_transcript_qc_cli_mockable_provider(temp_workspace, monkeypatch
     ]
     monkeypatch.setattr(sys, "argv", test_argv)
 
-    preview_transcript_main()
+    with pytest.raises(SystemExit) as excinfo:
+        preview_transcript_main()
+    assert excinfo.value.code == 2
     assert output_path.exists()
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["text"] == "welcome to the test mock"
     assert report["preview_wav_hash"] != ""
+    persisted = json.loads((edit_dir / "transcripts" / "preview.json").read_text(encoding="utf-8"))
+    assert persisted["_alano_cut"]["preview_wav_sha256"] == report["preview_wav_hash"]

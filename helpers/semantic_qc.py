@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,20 @@ def compute_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def write_atomic_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def load_words(transcripts_dir: Path | None, source_id: str) -> list[dict[str, Any]]:
     if transcripts_dir is None:
         return []
@@ -91,8 +106,14 @@ def validate_beat_schema(beat: Any, idx: int) -> tuple[bool, str]:
         return False, f"Beat at index {idx} is missing list 'evidence_any_of'."
     if not beat["evidence_any_of"]:
         return False, f"Beat at index {idx} has an empty 'evidence_any_of' list."
-    for ev_idx, ev in enumerate(beat["evidence_any_of"]):
-        if not isinstance(ev, str) or not ev.strip():
+    for ev_idx, alternative in enumerate(beat["evidence_any_of"]):
+        # v0.4 alternatives are conjunctions: every phrase inside one nested
+        # list must be present. A string remains accepted as a one-phrase
+        # alternative so existing hand-authored EDLs upgrade safely.
+        phrases = [alternative] if isinstance(alternative, str) else alternative
+        if not isinstance(phrases, list) or not phrases:
+            return False, f"Beat at index {idx} has invalid evidence alternative at index {ev_idx}."
+        if not all(isinstance(phrase, str) and phrase.strip() for phrase in phrases):
             return False, f"Beat at index {idx} has empty or non-string evidence at index {ev_idx}."
     return True, ""
 
@@ -213,9 +234,10 @@ def run_semantic_qc(edl_path: Path, transcripts_dir: Path) -> dict[str, Any]:
 
         # Check evidence
         matched_evidence = None
-        for ev in evidence_any_of:
-            if is_phrase_in_text(ev, reconstructed_text):
-                matched_evidence = ev
+        for alternative in evidence_any_of:
+            phrases = [alternative] if isinstance(alternative, str) else alternative
+            if all(is_phrase_in_text(phrase, reconstructed_text) for phrase in phrases):
+                matched_evidence = phrases
                 break
 
         satisfied = matched_evidence is not None
@@ -264,8 +286,7 @@ def main() -> None:
         sys.exit(f"Error executing semantic QC: {e}")
 
     # Write report
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_atomic_json(output_path, report)
     print(f"wrote semantic QC -> {output_path}")
 
     # Check exit status for pipeline usage (1 on fatal failure)

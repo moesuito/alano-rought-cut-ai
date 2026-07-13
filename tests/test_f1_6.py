@@ -410,8 +410,8 @@ def test_protect_endings(setup_dirs, monkeypatch):
     assert evidence["final_times"]["end"] == 0.6
 
 
-def test_early_silence_trim(setup_dirs, monkeypatch):
-    """Test early silence is trimmed using refined VAD onset."""
+def test_apparent_early_silence_cannot_override_lexical_onset(setup_dirs, monkeypatch):
+    """Detector silence alone cannot prove that an ASR lexical onset is expendable."""
     edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
     mock_setup(monkeypatch)
 
@@ -428,8 +428,9 @@ def test_early_silence_trim(setup_dirs, monkeypatch):
     write_dummy_cache(analysis_dir, fingerprint, source_path)
 
     # VAD starts at 0.35s (index 70)
-    # Raw energy is genuinely at the local floor before the selected onset;
-    # this distinguishes removable ASR lead-in from a weak lexical attack.
+    # Raw energy is at the local floor before the selected onset.  That still
+    # cannot prove that the transcript's lexical attack is expendable: both
+    # detectors may have missed the same weak consonant.
     dummy_rms = np.full(200, -50.0)
     dummy_rms[70:] = -10.0
     dummy_rms[70::2] = -9.0
@@ -467,9 +468,10 @@ def test_early_silence_trim(setup_dirs, monkeypatch):
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     evidence = report["boundary_evidence"][0]
-    # Start should be refined to frame 10 (0.333333s) with high confidence
-    assert evidence["confidence"]["start"] == "high"
-    assert abs(evidence["final_times"]["start"] - 0.333333) < 1e-4
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["final_frames"]["in"] == 4
+    assert evidence["start_side"]["proposed_cuts_first_word_attack"] is True
+    assert "cuts_first_word_attack" in evidence["start_side"]["rejection_reasons"]
 
 
 def test_quiet_lexical_fallback_acceptance(setup_dirs, monkeypatch):
@@ -1779,6 +1781,90 @@ def test_stable_vad_inside_first_word_is_rejected_when_raw_attack_precedes_it(
 
     updated = json.loads(edl_path.read_text(encoding="utf-8"))
     assert updated["ranges"][0]["source_in_frame"] == 4
+
+
+def test_stable_late_vad_cannot_cut_transcript_lexical_attack(
+    setup_dirs, monkeypatch
+):
+    """Bilateral VAD at 0.300 cannot approve frame 9 for a word starting at 0.200."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "plosiva", "start": 0.2, "end": 0.4, "type": "word"},
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    # Raw and RNNoise agree perfectly on a stable component beginning at
+    # 0.300.  There is deliberately no measurable pre-onset activity, which
+    # reproduces the path that previously promoted frame 9 to high confidence.
+    dummy_nf = np.full(200, -50.0)
+    dummy_rms = np.full(200, -50.0)
+    dummy_rms[60:100] = -10.0
+    dummy_rms[60:100:2] = -9.0
+
+    def activity(*args, **kwargs):
+        act = np.zeros(200, dtype=bool)
+        act[60:100] = True
+        return act
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        act = activity()
+        return act, act.copy(), 0, dummy_rms, dummy_rms.copy(), dummy_nf, dummy_nf.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr("helpers.refine_edl_boundaries.run_vad_hysteresis", activity)
+
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": {"test_source": "test_source.wav"},
+            "ranges": [{"source": "test_source", "start": 0.15, "end": 0.55}],
+        }),
+        encoding="utf-8",
+    )
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        refine_main()
+    assert exc.value.code == 2
+
+    evidence = json.loads(report_path.read_text(encoding="utf-8"))["boundary_evidence"][0]
+    assert evidence["start_side"]["selected_component"]["start"] == 0.3
+    assert evidence["start_side"]["pre_onset_attack_risk"] is False
+    assert evidence["start_side"]["proposed_cuts_first_word_attack"] is True
+    assert "cuts_first_word_attack" in evidence["start_side"]["rejection_reasons"]
+    assert evidence["confidence"]["start"] == "low"
+    assert evidence["final_frames"]["in"] == 4
 
 
 def test_subframe_non_cue_neighbor_quantizes_safely_after_previous_word(

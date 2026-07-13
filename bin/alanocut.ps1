@@ -8,6 +8,8 @@ function Show-Help {
     Write-Host "Usage:" -ForegroundColor White
     Write-Host "  alanocut init        Initialize current directory as a video rough-cut workspace" -ForegroundColor White
     Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
+    Write-Host "  alanocut setup-transcription   Install/update the shared CUDA WhisperX runtime" -ForegroundColor White
+    Write-Host "  alanocut transcription-doctor  Verify CUDA, versions, imports, and GPU" -ForegroundColor White
     Write-Host "  alanocut --help      Show this help message" -ForegroundColor White
     Write-Host ""
 }
@@ -227,7 +229,7 @@ if ($SubCommand -eq "init") {
         }
     } else {
         $LocalEnvContent = Get-Content $EnvFile
-        if ($LocalEnvContent -match "ELEVENLABS_API_KEY=.+") {
+        if ($LocalEnvContent -match "HF_TOKEN=.+") {
             $EnvConfigured = $true
         }
     }
@@ -278,7 +280,7 @@ if ($SubCommand -eq "init") {
     if ($EnvConfigured) {
         Write-Host "   2. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     } else {
-        Write-Host "   2. Configure your ELEVENLABS_API_KEY in the '.env' file" -ForegroundColor White
+        Write-Host "   2. Configure HF_TOKEN in '.env' for Community-1 diarization" -ForegroundColor White
         Write-Host "   3. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     }
     Write-Host "============================================================" -ForegroundColor Green
@@ -286,6 +288,18 @@ if ($SubCommand -eq "init") {
 }
 elseif ($SubCommand -eq "update") {
     $Updated = Update-System -Silent $false
+}
+elseif ($SubCommand -eq "setup-transcription" -or $SubCommand -eq "transcription-doctor") {
+    $RuntimeHelper = Join-Path $InstallRoot "helpers\whisperx_runtime.py"
+    if (!(Test-Path $RuntimeHelper)) {
+        Write-Error "WhisperX runtime helper is missing: $RuntimeHelper"
+        exit 1
+    }
+    $PythonPath = Join-Path $InstallRoot ".venv\Scripts\python.exe"
+    if (!(Test-Path $PythonPath)) { $PythonPath = "python" }
+    $RuntimeCommand = if ($SubCommand -eq "setup-transcription") { "setup" } else { "doctor" }
+    & $PythonPath $RuntimeHelper $RuntimeCommand
+    exit $LASTEXITCODE
 }
 elseif ($SubCommand -eq "-h" -or $SubCommand -eq "--help" -or $SubCommand -eq "help" -or [string]::IsNullOrEmpty($SubCommand)) {
     Show-Help

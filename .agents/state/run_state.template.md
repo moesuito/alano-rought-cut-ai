@@ -54,8 +54,22 @@ Selected ranges:
 Known compromises:
 
 ## QC
-Preview generated:
-Boundaries checked:
+Transcription provider/schema:
+ASR/alignment/diarization models:
+Runtime versions/GPU:
+Source/config transcript hashes:
+Forced-aligned word coverage:
+Community-1 exclusive diarization status:
+Boundary refiner report/status/hash:
+Refined EDL hash:
+Preview WAV hash:
+Preview timeline-map hash:
+Preview audio QC status:
+Semantic QC status:
+Persisted preview transcript path/WAV hash:
+Preview transcript join QC status:
+Join coverage (audio/transcript/expected):
+Readiness exit code:
 Issues found:
 Fixes applied:
 

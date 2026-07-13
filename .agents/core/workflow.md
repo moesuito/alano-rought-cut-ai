@@ -31,10 +31,12 @@ Read:
 
 Inputs:
 - source media files
-- `ELEVENLABS_API_KEY`
+- passing `alanocut transcription-doctor`
+- `HF_TOKEN` for the accepted Community-1 model
 
 Outputs:
 - `edit/transcripts/<source>.json`
+- 100% forced-aligned words with Community-1 speaker IDs
 - updated `edit/run_state.md`
 
 Next:
@@ -104,6 +106,8 @@ Outputs:
 - `edit/edl.json`
 - updated `edit/run_state.md`
 - `metadata.timeline_name` inside `edit/edl.json`
+- rational `metadata.sequence_fps` and mandatory `metadata.required_beats` inside `edit/edl.json`
+- `ranges[].beat_id` references for every declared editorial beat
 
 Next:
 - Step 07 runtime revision
@@ -116,9 +120,13 @@ Read:
 Inputs:
 - `edit/edl.json`
 - `edit/run_state.md`
+- `edit/transcripts/*.json`
+- source media and the bundled RNNoise model
 
 Outputs:
-- revised `edit/edl.json`, if needed
+- runtime-revised and boundary-refined `edit/edl.json`
+- exact `source_in_frame` / `source_out_frame` values on every range
+- `edit/edl_boundary_qc.json` from `refine_edl_boundaries.py`
 - updated `edit/run_state.md`
 
 Next:
@@ -130,14 +138,18 @@ Read:
 - `.agents/steps/08_preview_qc.md`
 
 Inputs:
-- `edit/edl.json`
+- refined `edit/edl.json`
+- `edit/edl_boundary_qc.json`
+- `edit/transcripts/*.json`
 - source media
 
 Outputs:
 - `edit/preview.wav`
 - `edit/preview_timeline.json`
-- `edit/edl_boundary_qc.json`
-- `edit/preview_transcript_qc.json`, if preview audio is transcribed
+- `edit/preview_audio_qc.json`
+- `edit/edl_semantic_qc.json`
+- forced, persisted `edit/transcripts/preview.json` bound to the preview WAV hash
+- `edit/preview_transcript_qc.json` with evidence for every join
 - verification notes in `edit/run_state.md`
 - EDL fixes, if needed
 
@@ -152,6 +164,8 @@ Read:
 Inputs:
 - `edit/edl.json`
 - source media paths
+- every Step 07/08 artifact and QC report
+- a successful `verify_edit_ready.py` result with exit code 0
 
 Outputs:
 - `edit/timeline.xml`
@@ -183,10 +197,12 @@ These criteria apply identically to Protocol A and Protocol B. Finish only when:
 
 - every intended source is inventoried and accounted for;
 - every editorially relevant source has a readable transcript or a documented exclusion reason;
-- the EDL is coherent, duration-checked, structurally valid, and uses valid word-boundary ranges;
-- suspicious joins were investigated with transcript, waveform, preview, or visual evidence as required;
-- no unresolved `high_risk` boundary remains;
-- material EDL revisions were re-checked with boundary QC, preview rendering, and relevant transcript QC;
+- every included source and preview transcript uses the canonical WhisperX schema, matching hashes/configuration, 100% forced-aligned word timing, and Community-1 diarization;
+- the EDL is coherent, duration-checked, structurally valid, declares `sequence_fps` and `required_beats`, and uses refined exact-frame ranges;
+- every join is represented in both preview audio QC and timed preview transcript QC;
+- no unresolved boundary review, excessive entry silence, tight first-word attack, orphan cue/token, crossed join, missing beat, or stale hash remains;
+- material EDL revisions restarted the mandatory chain at boundary refinement;
+- `verify_edit_ready.py` returned exit code 0 for the exact EDL, WAV, map, transcripts, and reports being exported;
 - `edit/timeline.xml` exists, has the intended sequence name, and references original media;
 - `edit/run_state.md` and `edit/project.md` preserve the result for recovery and future sessions;
 - the final handoff reports the XML path and any outstanding human-review items.

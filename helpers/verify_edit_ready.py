@@ -24,6 +24,10 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helpers.timing import frame_to_sample, parse_fps_fraction
+from helpers.transcription_contract import (
+    TranscriptContractError,
+    validate_normative_transcript,
+)
 
 
 def compute_sha256(path: Path) -> str:
@@ -143,7 +147,10 @@ def validate_boundary_report(
     return errors
 
 
-def validate_audio_report(audio_data: object) -> list[str]:
+def validate_audio_report(
+    audio_data: object,
+    map_ranges: list[dict[str, object]] | None = None,
+) -> list[str]:
     """Return structural/consistency errors for mandatory preview audio gates."""
     errors: list[str] = []
     if not isinstance(audio_data, dict):
@@ -169,6 +176,7 @@ def validate_audio_report(audio_data: object) -> list[str]:
         "sample_width",
         "two_frame_tail_required_samples",
         "clipping_events_count",
+        "range_review_count",
         "severe_pops_count",
         "warning_pops_count",
     ):
@@ -189,6 +197,8 @@ def validate_audio_report(audio_data: object) -> list[str]:
         errors.append("joins is missing or not a list")
         joins = []
     else:
+        if map_ranges is not None and len(joins) != max(0, len(map_ranges) - 1):
+            errors.append("join count does not match timeline map")
         severe_count = 0
         warning_count = 0
         for index, join in enumerate(joins):
@@ -202,10 +212,55 @@ def validate_audio_report(audio_data: object) -> list[str]:
                 warning_count += 1
             elif join_status != "pass":
                 errors.append(f"joins[{index}] has unknown status")
+            if map_ranges is not None and index < len(map_ranges) - 1:
+                expected_sample = map_ranges[index].get("output_cumulative_sample_interval")
+                expected_sample = expected_sample[1] if isinstance(expected_sample, list) and len(expected_sample) == 2 else None
+                if join.get("join_index") != index or join.get("sample_index") != expected_sample:
+                    errors.append(f"joins[{index}] identity does not match timeline map")
         if audio_data.get("severe_pops_count") != severe_count:
             errors.append("severe_pops_count does not match join evidence")
         if audio_data.get("warning_pops_count") != warning_count:
             errors.append("warning_pops_count does not match join evidence")
+
+    range_entries = audio_data.get("range_entries")
+    if not isinstance(range_entries, list):
+        errors.append("range_entries is missing or not a list")
+        range_entries = []
+    else:
+        if map_ranges is not None and len(range_entries) != len(map_ranges):
+            errors.append("range_entries count does not match timeline map")
+        observed_range_reviews = 0
+        seen_range_indices: set[int] = set()
+        for position, entry in enumerate(range_entries):
+            if not isinstance(entry, dict):
+                errors.append(f"range_entries[{position}] is not an object")
+                continue
+            range_index = entry.get("range_index")
+            if (
+                not isinstance(range_index, int)
+                or isinstance(range_index, bool)
+                or range_index < 0
+                or range_index in seen_range_indices
+            ):
+                errors.append(f"range_entries[{position}] has invalid/duplicate range_index")
+            else:
+                seen_range_indices.add(range_index)
+                if map_ranges is not None and position < len(map_ranges):
+                    expected_range = map_ranges[position]
+                    if range_index != position or entry.get("source") != expected_range.get("source"):
+                        errors.append(f"range_entries[{position}] identity does not match timeline map")
+            entry_status = entry.get("status")
+            flags = entry.get("blocking_flags")
+            if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+                errors.append(f"range_entries[{position}] blocking_flags is invalid")
+                flags = []
+            expected_entry_status = "review" if flags else "pass"
+            if entry_status != expected_entry_status:
+                errors.append(f"range_entries[{position}] status contradicts blocking_flags")
+            if entry_status == "review":
+                observed_range_reviews += 1
+        if audio_data.get("range_review_count") != observed_range_reviews:
+            errors.append("range_review_count does not match range entry evidence")
 
     total_samples = audio_data.get("total_samples")
     expected_samples = audio_data.get("expected_samples")
@@ -283,6 +338,7 @@ def validate_audio_report(audio_data: object) -> list[str]:
         or audio_data.get("speech_clipping_ok") is False
         or audio_data.get("boundary_clipping_detected") is True
         or (isinstance(audio_data.get("severe_pops_count"), int) and audio_data.get("severe_pops_count", 0) > 0)
+        or (isinstance(audio_data.get("range_review_count"), int) and audio_data.get("range_review_count", 0) > 0)
     )
     warning_present = (
         isinstance(audio_data.get("warning_pops_count"), int)
@@ -301,27 +357,160 @@ def validate_audio_report(audio_data: object) -> list[str]:
     return errors
 
 
+def validate_transcript_report(
+    transcript_data: object,
+    edl_ranges: list[dict[str, object]],
+    map_ranges: list[dict[str, object]],
+) -> list[str]:
+    """Recompute the mandatory range/join status from report evidence."""
+    errors: list[str] = []
+    if not isinstance(transcript_data, dict):
+        return ["report is not a JSON object"]
+    if transcript_data.get("schema_version") != 2:
+        errors.append("schema_version must be 2")
+    if transcript_data.get("mode") != "range_aware":
+        errors.append("mode must be range_aware")
+
+    ranges = transcript_data.get("ranges")
+    joins = transcript_data.get("joins")
+    summary = transcript_data.get("summary")
+    timing = transcript_data.get("timing_validation")
+    if not isinstance(ranges, list):
+        errors.append("ranges is missing or not a list")
+        ranges = []
+    if not isinstance(joins, list):
+        errors.append("joins is missing or not a list")
+        joins = []
+    if not isinstance(summary, dict):
+        errors.append("summary is missing or not an object")
+        summary = {}
+    if not isinstance(timing, dict):
+        errors.append("timing_validation is missing or not an object")
+        timing = {}
+
+    if len(ranges) != len(edl_ranges):
+        errors.append("range count does not match EDL")
+    expected_join_count = max(0, len(edl_ranges) - 1)
+    if len(joins) != expected_join_count:
+        errors.append("join count does not equal range count minus one")
+
+    range_review_count = 0
+    join_review_count = 0
+    evidence_flags: list[str] = []
+    for position, result in enumerate(ranges):
+        if not isinstance(result, dict):
+            errors.append(f"ranges[{position}] is not an object")
+            continue
+        flags = result.get("blocking_flags")
+        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+            errors.append(f"ranges[{position}] blocking_flags is invalid")
+            flags = []
+        expected_status = "review" if flags else "pass"
+        if result.get("status") != expected_status:
+            errors.append(f"ranges[{position}] status contradicts blocking_flags")
+        if expected_status == "review":
+            range_review_count += 1
+        evidence_flags.extend(flags)
+        if position < len(edl_ranges):
+            if (
+                result.get("range_index") != position
+                or result.get("source") != edl_ranges[position].get("source")
+                or result.get("source") != map_ranges[position].get("source")
+            ):
+                errors.append(f"ranges[{position}] identity does not match EDL/timeline map")
+        for key in ("expected_words", "actual_words", "alignment"):
+            if not isinstance(result.get(key), list):
+                errors.append(f"ranges[{position}] {key} is invalid")
+
+    for position, result in enumerate(joins):
+        if not isinstance(result, dict):
+            errors.append(f"joins[{position}] is not an object")
+            continue
+        flags = result.get("blocking_flags")
+        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+            errors.append(f"joins[{position}] blocking_flags is invalid")
+            flags = []
+        expected_status = "review" if flags else "pass"
+        if result.get("status") != expected_status:
+            errors.append(f"joins[{position}] status contradicts blocking_flags")
+        if expected_status == "review":
+            join_review_count += 1
+        evidence_flags.extend(flags)
+        if position < expected_join_count:
+            interval = map_ranges[position].get("output_cumulative_sample_interval")
+            expected_sample = interval[1] if isinstance(interval, list) and len(interval) == 2 else None
+            if (
+                result.get("join_index") != position
+                or result.get("left_range_index") != position
+                or result.get("right_range_index") != position + 1
+                or result.get("timeline_sample") != expected_sample
+            ):
+                errors.append(f"joins[{position}] identity does not match timeline map")
+
+    timing_flag_map = {
+        "untimed_words": {"incomplete_word_timestamps", "missing_timed_words"},
+        "invalid_words": {"invalid_preview_word_timestamps"},
+        "out_of_bounds_words": {"preview_words_out_of_bounds"},
+    }
+    timing_required_flags: list[set[str]] = []
+    for key, report_flags in timing_flag_map.items():
+        if not isinstance(timing.get(key), list):
+            errors.append(f"timing_validation.{key} is invalid")
+        elif timing.get(key):
+            timing_required_flags.append(report_flags)
+
+    expected_summary = {
+        "range_count": len(ranges),
+        "range_pass_count": len(ranges) - range_review_count,
+        "range_review_count": range_review_count,
+        "join_count": len(joins),
+        "join_pass_count": len(joins) - join_review_count,
+        "join_review_count": join_review_count,
+    }
+    for key, value in expected_summary.items():
+        if summary.get(key) != value:
+            errors.append(f"summary.{key} does not match report evidence")
+
+    summary_flags = summary.get("blocking_flags")
+    if not isinstance(summary_flags, list) or not all(isinstance(flag, str) for flag in summary_flags):
+        errors.append("summary.blocking_flags is invalid")
+        summary_flags = []
+    for allowed_flags in timing_required_flags:
+        if not allowed_flags.intersection(summary_flags):
+            errors.append("summary.blocking_flags omits timing evidence")
+    missing_evidence_flags = set(evidence_flags) - set(summary_flags)
+    if missing_evidence_flags:
+        errors.append("summary.blocking_flags omits range/join/timing evidence")
+    expected_status = "review" if summary_flags else "pass"
+    if summary.get("status") != expected_status:
+        errors.append("summary.status contradicts blocking_flags")
+    if transcript_data.get("status") != expected_status:
+        errors.append("top-level status contradicts summary evidence")
+    return errors
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Verify if edit is ready for XML export")
     ap.add_argument("edl", type=Path, nargs="?", default=Path("edit/edl.json"), help="Path to edl.json")
-    ap.add_argument("--transcripts", type=Path, default=Path("edit/transcripts"), help="Path to transcripts directory")
-    ap.add_argument("--boundary-report", type=Path, default=Path("edit/edl_boundary_qc.json"), help="Path to edl_boundary_qc.json")
-    ap.add_argument("--audio-report", type=Path, default=Path("edit/preview_audio_qc.json"), help="Path to preview_audio_qc.json")
-    ap.add_argument("--semantic-report", type=Path, default=Path("edit/edl_semantic_qc.json"), help="Path to edl_semantic_qc.json")
-    ap.add_argument("--transcript-report", type=Path, default=Path("edit/preview_transcript_qc.json"), help="Path to preview_transcript_qc.json")
-    ap.add_argument("--audio", type=Path, default=Path("edit/preview.wav"), help="Path to preview.wav")
-    ap.add_argument("--timeline-map", type=Path, default=Path("edit/preview_timeline.json"), help="Path to preview_timeline.json")
+    ap.add_argument("--transcripts", type=Path, default=None, help="Path to transcripts directory")
+    ap.add_argument("--boundary-report", type=Path, default=None, help="Path to edl_boundary_qc.json")
+    ap.add_argument("--audio-report", type=Path, default=None, help="Path to preview_audio_qc.json")
+    ap.add_argument("--semantic-report", type=Path, default=None, help="Path to edl_semantic_qc.json")
+    ap.add_argument("--transcript-report", type=Path, default=None, help="Path to preview_transcript_qc.json")
+    ap.add_argument("--audio", type=Path, default=None, help="Path to preview.wav")
+    ap.add_argument("--timeline-map", type=Path, default=None, help="Path to preview_timeline.json")
 
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
-    transcripts_dir = args.transcripts.resolve()
-    boundary_path = args.boundary_report.resolve()
-    audio_path = args.audio_report.resolve()
-    semantic_path = args.semantic_report.resolve()
-    transcript_path = args.transcript_report.resolve()
-    wav_path = args.audio.resolve()
-    map_path = args.timeline_map.resolve()
+    edit_dir = edl_path.parent
+    transcripts_dir = args.transcripts.resolve() if args.transcripts else edit_dir / "transcripts"
+    boundary_path = args.boundary_report.resolve() if args.boundary_report else edit_dir / "edl_boundary_qc.json"
+    audio_path = args.audio_report.resolve() if args.audio_report else edit_dir / "preview_audio_qc.json"
+    semantic_path = args.semantic_report.resolve() if args.semantic_report else edit_dir / "edl_semantic_qc.json"
+    transcript_path = args.transcript_report.resolve() if args.transcript_report else edit_dir / "preview_transcript_qc.json"
+    wav_path = args.audio.resolve() if args.audio else edit_dir / "preview.wav"
+    map_path = args.timeline_map.resolve() if args.timeline_map else edit_dir / "preview_timeline.json"
 
     print("=== Alano Cut Edit Readiness Gate ===")
 
@@ -538,7 +727,7 @@ def main() -> None:
     if audio_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Audio QC report preview WAV hash mismatch. Re-run audio QC.")
         stale = True
-    audio_errors = validate_audio_report(audio_data)
+    audio_errors = validate_audio_report(audio_data, map_ranges)
     if audio_errors:
         for error in audio_errors:
             print(f"FATAL: Audio QC schema/consistency error: {error}.")
@@ -580,6 +769,15 @@ def main() -> None:
 
     for source_id in sources:
         t_path = transcripts_dir / f"{source_id}.json"
+        try:
+            source_transcript = json.loads(t_path.read_text(encoding="utf-8"))
+            validate_normative_transcript(source_transcript)
+        except (OSError, json.JSONDecodeError, TranscriptContractError) as error:
+            print(
+                f"FATAL: Source transcript {source_id} is not a canonical, "
+                f"forced-aligned, diarized WhisperX transcript: {error}"
+            )
+            stale = True
         current_t_hash = compute_sha256(t_path)
         stored_t_hash = stored_transcript_hashes.get(source_id)
         if current_t_hash != stored_t_hash:
@@ -587,9 +785,31 @@ def main() -> None:
             stale = True
 
     # D. Preview Transcript QC
+    if transcript_data.get("edl_hash") != current_edl_hash:
+        print("STALE: Preview transcript QC report EDL hash mismatch. Re-run preview transcript QC.")
+        stale = True
+    if transcript_data.get("timeline_map_hash") != current_map_hash:
+        print("STALE: Preview transcript QC report timeline map hash mismatch. Re-run preview transcript QC.")
+        stale = True
     if transcript_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Preview transcript QC report WAV hash mismatch. Re-run preview transcript QC.")
         stale = True
+    transcript_errors = validate_transcript_report(transcript_data, edl_ranges, map_ranges)
+    if transcript_errors:
+        for error in transcript_errors:
+            print(f"FATAL: Preview transcript QC schema/consistency error: {error}.")
+        stale = True
+
+    preview_source_hashes = transcript_data.get("source_transcript_hashes")
+    if not isinstance(preview_source_hashes, dict):
+        print("FATAL: Preview transcript QC source_transcript_hashes is invalid.")
+        stale = True
+    else:
+        for source_id in sources:
+            current_source_hash = compute_sha256(transcripts_dir / f"{source_id}.json")
+            if preview_source_hashes.get(source_id) != current_source_hash:
+                print(f"STALE: Preview transcript QC source transcript hash mismatch for {source_id}.")
+                stale = True
 
     # Recalculate word coverage to verify declared counts
     t_file_val = transcript_data.get("transcript")
@@ -610,6 +830,21 @@ def main() -> None:
             stale = True
         try:
             sidecar_data = json.loads(t_file_path.read_text(encoding="utf-8"))
+            binding = sidecar_data.get("_alano_cut")
+            if not isinstance(binding, dict) or binding.get("preview_wav_sha256") != current_wav_hash:
+                print("STALE: Preview transcript sidecar is not bound to the current WAV.")
+                stale = True
+            try:
+                validate_normative_transcript(sidecar_data)
+            except TranscriptContractError as error:
+                print(
+                    "FATAL: Preview sidecar is not a canonical, forced-aligned, "
+                    f"diarized WhisperX transcript: {error}"
+                )
+                stale = True
+            if not isinstance(binding, dict) or binding.get("source_sha256") != current_wav_hash:
+                print("STALE: Preview transcript source hash does not match current WAV.")
+                stale = True
             words_list = [w for w in sidecar_data.get("words", []) if w.get("type") == "word"]
             recalc_word_count = len(words_list)
 

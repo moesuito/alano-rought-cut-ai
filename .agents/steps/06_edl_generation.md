@@ -25,10 +25,10 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Preserve natural cadence.
 - Do not over-tighten.
 - Use word boundaries for all cut edges.
-- Use raw Scribe JSON for exact word timestamps when trimming inside packed phrases.
-- Pad cut boundaries within the 30-200ms working window to absorb ASR timestamp drift.
+- Use canonical WhisperX JSON for exact forced-aligned word timestamps when trimming inside packed phrases.
+- Do not add a global fixed trim or pre-roll. Select the intended lexical span; Step 07 will resolve its exact frame boundaries from lexical and acoustic evidence.
 - Prefer silences >= 400ms as cut targets.
-- Treat 150-400ms phrase boundaries as usable with care and visual/audio inspection.
+- Treat 150-400ms phrase boundaries as usable with care and audio evidence.
 - Treat gaps < 150ms as unsafe unless there is a strong editorial reason.
 - Give speaker handoffs enough air when needed; 400-600ms is a common range for natural turns.
 
@@ -37,8 +37,8 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Build the edit by intended beat, not by source clip order.
 - When resolving repeated takes, note which take wins each beat and why.
 - If a correction requires stitching a short phrase from a rejected take into an otherwise good take, keep the stitched ranges separate in `edl.json`.
-- In the stitched range `reason`, document the semantic repair explicitly, for example: "uses correct pessoa juridica phrase from alternate take; surrounding take had cleaner delivery."
-- After any stitched repair, Step 08 must validate the join with both waveform boundary QC and preview transcript QC.
+- In the stitched range `reason`, document the semantic repair explicitly, for example: "uses the corrected qualifier from an alternate take; the surrounding take had cleaner delivery."
+- After any stitched repair, Step 07 must refine both edges and Step 08 must validate the mapped join in both preview audio QC and timed preview transcript QC.
 
 ## EDL Format
 
@@ -51,7 +51,18 @@ Write `edit/edl.json` using the current Alano format:
     "timeline_name": "reels 35_cadastro_alano-cut",
     "video_type": "reels",
     "content_number": "35",
-    "content_slug": "cadastro"
+    "content_slug": "cadastro",
+    "sequence_fps": "30000/1001",
+    "required_beats": [
+      {
+        "id": "SECRET_KEY_ONCE",
+        "description": "Explain that the secret key is shown only once",
+        "evidence_any_of": [
+          ["secret key", "only once"],
+          ["download", "copy immediately"]
+        ]
+      }
+    ]
   },
   "sources": {
     "C0103": "/abs/path/C0103.MP4"
@@ -61,7 +72,7 @@ Write `edit/edl.json` using the current Alano format:
       "source": "C0103",
       "start": 2.42,
       "end": 6.85,
-      "beat": "HOOK",
+      "beat_id": "SECRET_KEY_ONCE",
       "quote": "...",
       "reason": "..."
     }
@@ -69,6 +80,8 @@ Write `edit/edl.json` using the current Alano format:
   "total_duration_s": 4.43
 }
 ```
+
+`metadata.required_beats` is mandatory and may be an empty list when the edit has no required editorial beat. Each `evidence_any_of` entry is an alternative group; every phrase inside one group must be supported by the selected source transcript. Use product/project language only in the project EDL, never as a generic QC rule.
 
 ## Timeline Naming
 
@@ -86,10 +99,10 @@ Write `edit/edl.json` using the current Alano format:
 3. Resolve repeated takes and alternate versions.
 4. Mark any semantic repair candidates where a short phrase from a rejected take should replace a wrong phrase in the cleaner take.
 5. Select ranges with word-boundary start/end times.
-6. Add appropriate 30-200ms edge padding without cutting into neighboring words or unwanted filler.
-7. Use raw JSON word timestamps for exact inside-phrase cuts.
+6. Do not invent fixed padding; preserve the intended lexical attack and leave exact acoustic/frame snapping to Step 07.
+7. Use raw JSON word timestamps for exact inside-phrase selections.
 8. Calculate `total_duration_s`.
-9. Write `edit/edl.json` with `metadata.timeline_name`.
+9. Write `edit/edl.json` with `metadata.timeline_name`, rational `metadata.sequence_fps`, mandatory `metadata.required_beats`, and `ranges[].beat_id` references.
 10. Update `edit/run_state.md` with selected range summary, timeline name, stitched repairs, and known compromises.
 
 ## EDL Integrity Gate
@@ -102,6 +115,8 @@ Before runtime revision, verify:
 - every cut edge follows the word-boundary rules above;
 - `total_duration_s` matches the sum of all range durations within normal rounding tolerance;
 - `metadata.timeline_name` follows the naming rules above.
+- `metadata.sequence_fps` is a valid rational rate shared by all CFR sources;
+- `metadata.required_beats` is present, and every non-empty beat referenced by a range uses `beat_id`.
 
 ## Output
 

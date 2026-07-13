@@ -1,118 +1,177 @@
-"""Batch-transcribe every video in a directory with 4 parallel workers.
-
-Walks <videos_dir> for common video extensions, runs ElevenLabs Scribe on
-each, writes transcripts to <videos_dir>/edit/transcripts/<name>.json.
-
-Cached per-file: any source that already has a transcript is skipped.
-
-Usage:
-    python helpers/transcribe_batch.py <videos_dir>
-    python helpers/transcribe_batch.py <videos_dir> --workers 4
-    python helpers/transcribe_batch.py <videos_dir> --num-speakers 2
-    python helpers/transcribe_batch.py <videos_dir> --edit-dir /custom/edit
-"""
+"""Sequential CUDA transcription for every media source in a directory."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from transcribe import load_api_key, transcribe_one
-
-
-VIDEO_EXTS = {".mp4", ".MP4", ".mov", ".MOV", ".mkv", ".MKV", ".avi", ".AVI", ".m4v"}
-
-
-def find_videos(videos_dir: Path) -> list[Path]:
-    videos = sorted(
-        p for p in videos_dir.iterdir()
-        if p.is_file() and p.suffix in VIDEO_EXTS
+try:
+    from helpers.transcribe import transcribe_one
+    from helpers.transcription_contract import (
+        DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_PORTUGUESE_ALIGN_MODEL,
+        DEFAULT_PORTUGUESE_HOTWORDS,
+        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        WhisperXConfig,
     )
-    return videos
+except ModuleNotFoundError as exc:
+    if exc.name != "helpers":
+        raise
+    from transcribe import transcribe_one  # type: ignore[no-redef]
+    from transcription_contract import (  # type: ignore[no-redef]
+        DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_PORTUGUESE_ALIGN_MODEL,
+        DEFAULT_PORTUGUESE_HOTWORDS,
+        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        WhisperXConfig,
+    )
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Parallel batch transcription of a videos directory")
-    ap.add_argument("videos_dir", type=Path, help="Directory containing source videos")
-    ap.add_argument(
-        "--edit-dir",
-        type=Path,
-        default=None,
-        help="Edit output directory (default: <videos_dir>/edit)",
+MEDIA_EXTENSIONS = {
+    ".avi",
+    ".flac",
+    ".m4a",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+
+
+def find_sources(directory: Path, *, recursive: bool = False) -> list[Path]:
+    iterator = directory.rglob("*") if recursive else directory.iterdir()
+    sources = sorted(
+        path
+        for path in iterator
+        if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS
     )
-    ap.add_argument("--workers", type=int, default=4, help="Parallel workers (default: 4)")
-    ap.add_argument(
-        "--language",
-        type=str,
-        default=None,
-        help="Optional ISO language code. Omit to auto-detect per file.",
+    by_stem: dict[str, list[Path]] = {}
+    for source in sources:
+        by_stem.setdefault(source.stem.casefold(), []).append(source)
+    collisions = [paths for paths in by_stem.values() if len(paths) > 1]
+    if collisions:
+        descriptions = "; ".join(
+            ", ".join(str(path) for path in paths) for paths in collisions
+        )
+        raise ValueError(
+            "multiple sources would overwrite the same transcript stem: " + descriptions
+        )
+    return sources
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Transcribe a media directory with one sequential CUDA worker"
     )
-    ap.add_argument(
-        "--num-speakers",
+    parser.add_argument("sources_dir", type=Path)
+    parser.add_argument("--edit-dir", type=Path, default=None)
+    parser.add_argument(
+        "--provider", choices=("whisperx", "elevenlabs"), default="whisperx"
+    )
+    parser.add_argument("--language", default="pt")
+    parser.add_argument("--model", default="large-v3")
+    parser.add_argument("--align-model", default=DEFAULT_PORTUGUESE_ALIGN_MODEL)
+    parser.add_argument(
+        "--diarization-model",
+        default=DEFAULT_DIARIZATION_MODEL,
+        choices=(DEFAULT_DIARIZATION_MODEL,),
+    )
+    parser.add_argument(
+        "--batch-size",
         type=int,
-        default=None,
-        help="Optional number of speakers. Improves diarization when known.",
+        default=2,
+        help="WhisperX GPU batch size (default: 2 for 6 GB VRAM)",
     )
-    args = ap.parse_args()
+    parser.add_argument("--beam-size", type=int, default=5)
+    parser.add_argument("--initial-prompt", default=DEFAULT_PORTUGUESE_INITIAL_PROMPT)
+    parser.add_argument("--hotwords", default=DEFAULT_PORTUGUESE_HOTWORDS)
+    parser.add_argument(
+        "--compute-type", choices=("float16", "int8_float16"), default="float16"
+    )
+    speaker_group = parser.add_mutually_exclusive_group()
+    speaker_group.add_argument("--num-speakers", type=int, default=None)
+    speaker_group.add_argument("--speaker-range", nargs=2, type=int, metavar=("MIN", "MAX"))
+    parser.add_argument("--runtime-python", type=Path, default=None)
+    parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    return parser
 
-    videos_dir = args.videos_dir.resolve()
-    if not videos_dir.is_dir():
-        sys.exit(f"not a directory: {videos_dir}")
 
-    edit_dir = (args.edit_dir or (videos_dir / "edit")).resolve()
-    (edit_dir / "transcripts").mkdir(parents=True, exist_ok=True)
+def main() -> int:
+    args = build_parser().parse_args()
+    sources_dir = args.sources_dir.resolve()
+    if not sources_dir.is_dir():
+        print(f"not a directory: {sources_dir}", file=sys.stderr)
+        return 1
+    try:
+        sources = find_sources(sources_dir, recursive=args.recursive)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    if not sources:
+        print(f"no supported media found in {sources_dir}", file=sys.stderr)
+        return 1
 
-    videos = find_videos(videos_dir)
-    if not videos:
-        sys.exit(f"no videos found in {videos_dir}")
+    language = None if str(args.language).lower() == "auto" else args.language
+    min_speakers = args.speaker_range[0] if args.speaker_range else None
+    max_speakers = args.speaker_range[1] if args.speaker_range else None
+    try:
+        config = WhisperXConfig(
+            model=args.model,
+            language=language,
+            compute_type=args.compute_type,
+            batch_size=args.batch_size,
+            beam_size=args.beam_size,
+            initial_prompt=args.initial_prompt if language == "pt" else None,
+            hotwords=args.hotwords if language == "pt" else None,
+            align_model=args.align_model if language == "pt" else None,
+            diarization_model=args.diarization_model,
+            num_speakers=args.num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+    except Exception as error:
+        print(f"invalid transcription configuration: {error}", file=sys.stderr)
+        return 1
 
-    already_cached = [v for v in videos if (edit_dir / "transcripts" / f"{v.stem}.json").exists()]
-    pending = [v for v in videos if v not in already_cached]
-
-    print(f"found {len(videos)} videos ({len(already_cached)} cached, {len(pending)} to transcribe)")
-    if not pending:
-        print("nothing to do")
-        return
-
-    api_key = load_api_key()
-
-    print(f"transcribing {len(pending)} files with {args.workers} parallel workers")
-    t0 = time.time()
-
-    errors: list[tuple[Path, str]] = []
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(
-                transcribe_one,
-                video=v,
-                edit_dir=edit_dir,
-                api_key=api_key,
-                language=args.language,
+    edit_dir = (args.edit_dir or sources_dir / "edit").resolve()
+    print(
+        f"found {len(sources)} source(s); provider={args.provider}; "
+        "GPU concurrency=1",
+        flush=True,
+    )
+    started = time.perf_counter()
+    failures: list[tuple[Path, str]] = []
+    for index, source in enumerate(sources, 1):
+        print(f"[{index}/{len(sources)}] {source.name}", flush=True)
+        try:
+            transcribe_one(
+                source,
+                edit_dir,
+                language=language,
                 num_speakers=args.num_speakers,
-                verbose=False,
-            ): v
-            for v in pending
-        }
-        for fut in as_completed(futures):
-            v = futures[fut]
-            try:
-                out = fut.result()
-                print(f"  + {v.stem}  ->  {out.name}")
-            except Exception as e:
-                errors.append((v, str(e)))
-                print(f"  x {v.stem}  FAILED: {e}")
+                force=args.force,
+                provider=args.provider,
+                config=config,
+                runtime_python=args.runtime_python,
+            )
+        except Exception as error:
+            failures.append((source, f"{type(error).__name__}: {error}"))
+            print(f"  failed: {type(error).__name__}: {error}", file=sys.stderr)
 
-    dt = time.time() - t0
-    print(f"\ndone in {dt:.1f}s")
-    if errors:
-        print(f"{len(errors)} failures:")
-        for v, msg in errors:
-            print(f"  {v.name}: {msg}")
-        sys.exit(1)
+    elapsed = time.perf_counter() - started
+    print(f"completed in {elapsed:.1f}s; failures={len(failures)}", flush=True)
+    if failures:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -176,7 +176,12 @@ def test_render_and_qc_integration(tmp_path, monkeypatch):
                 "start": 0.5,
                 "end": 1.5,
                 "source_in_frame": 15,
-                "source_out_frame": 45
+                "source_out_frame": 45,
+                "beat_id": "intro",
+                "lexical_anchors": {
+                    "first": {"word_index": 0, "text": "hello", "start": 0.5, "end": 0.7, "acoustic_onset": 0.51},
+                    "last": {"word_index": 3, "text": "world", "start": 1.2, "end": 1.4, "acoustic_offset": 1.41}
+                }
             },
             {
                 "source": "stereo",
@@ -234,6 +239,9 @@ def test_render_and_qc_integration(tmp_path, monkeypatch):
     assert t_map["output_format"]["channels"] == 2
     assert t_map["output_format"]["channel_policy"] == "mixed"
     assert len(t_map["ranges"]) == 4
+    assert t_map["ranges"][0]["range_index"] == 0
+    assert t_map["ranges"][0]["beat_id"] == "intro"
+    assert t_map["ranges"][0]["lexical_anchors"]["first"]["text"] == "hello"
 
     # Check mono to stereo conversion
     assert t_map["ranges"][0]["source_channels"] == 1
@@ -316,8 +324,10 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
             "sequence_fps": 30.0
         },
         "ranges": [
-            {
-                "source": "s1",
+                {
+                    "range_index": 0,
+                    "source": "s1",
+                    "lexical_anchors": {"first": {"text": "left", "start": 0.0, "acoustic_onset": 0.0}},
                 "source_frames": [0, 30],
                 "source_sample_interval": [0, 48000],
                 "output_cumulative_sample_interval": [0, 48000],
@@ -325,8 +335,10 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
                 "source_channels": 2,
                 "channel_policy": "stereo_preserve"
             },
-            {
-                "source": "s2",
+                {
+                    "range_index": 1,
+                    "source": "s2",
+                    "lexical_anchors": {"first": {"text": "right", "start": 0.0, "acoustic_onset": 0.0}},
                 "source_frames": [0, 30],
                 "source_sample_interval": [0, 48000],
                 "output_cumulative_sample_interval": [48000, 96000],
@@ -356,12 +368,15 @@ def test_qc_pop_detection(tmp_path, monkeypatch):
     assert qc_data["joins"][0]["status"] == "severe"
 
     # 2. Test warning pop:
-    # Delta of 2000 (e.g. left constant 1000, right constant -1000).
+    # Delta of 2000 from a silent protected left tail into right value 2000.
     # Discontinuity delta = 2000.
     # 2000 is < 3276.8 (severe threshold) but >= 1638.4 (warning threshold).
     # So this should be a warning!
     samples_left_w = np.full(48000, 1000, dtype=np.int16)
-    samples_right_w = np.full(48000, -1000, dtype=np.int16)
+    samples_left_w[:4000] = 0
+    samples_left_w[-3200:] = 0
+    samples_right_w = np.full(48000, 2000, dtype=np.int16)
+    samples_right_w[10000:15000] = 0
     samples_right_w[-3200:] = 0
     samples_all_w = np.concatenate([samples_left_w, samples_right_w])
     samples_stereo_w = np.column_stack((samples_all_w, samples_all_w))

@@ -8,7 +8,7 @@ Use the capability router in `AGENTS.md`. Protocol A is the default; Protocol B 
 - Retain the end-to-end pipeline model so upstream editorial decisions account for downstream runtime, QC, and XML constraints.
 - Load only the selected archetype after content-type inference; do not preload every archetype.
 - Use `edit/run_state.md` as a checkpoint, audit record, and recovery surface, not as a substitute for understanding the complete workflow.
-- Read raw source artifacts on demand: `takes_packed.md` for overview, Scribe JSON for exact word boundaries, and `timeline_view.py` output for visual ambiguity.
+- Read source artifacts on demand: `takes_packed.md` for overview, canonical WhisperX JSON for exact forced-aligned word boundaries/speakers, and audio QC/join reports for boundary evidence. The normative agent path does not inspect video frames.
 
 ## Protocol B - Progressive Context
 
@@ -21,8 +21,10 @@ Use the capability router in `AGENTS.md`. Protocol A is the default; Protocol B 
 - When context feels crowded, summarize current decisions into `edit/run_state.md`, then continue from the next step.
 - Prefer reading source artifacts on demand:
   - `takes_packed.md` for transcript overview;
-  - raw Scribe JSON only when exact word timestamps are needed;
-  - `timeline_view.py` only for visual ambiguity or cut-boundary QC.
+  - canonical WhisperX JSON only when exact word timestamps or speakers are needed;
+  - `preview_timeline.json`, audio QC, and timed preview transcript evidence for cut-boundary QA.
+
+`timeline_view.py` is a legacy manual diagnostic outside both protocols and is scheduled for removal in v0.5.0.
 
 ## Shared Rule
 

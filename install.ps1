@@ -2,6 +2,28 @@
 
 $ErrorActionPreference = "Stop"
 
+function Set-EnvEntry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    $Lines = @()
+    if (Test-Path $Path) { $Lines = @(Get-Content $Path) }
+    $Pattern = "^\s*" + [regex]::Escape($Name) + "\s*="
+    $Found = $false
+    $Updated = foreach ($Line in $Lines) {
+        if ($Line -match $Pattern) {
+            if (!$Found) { "$Name=$Value" }
+            $Found = $true
+        } else {
+            $Line
+        }
+    }
+    if (!$Found) { $Updated += "$Name=$Value" }
+    $Updated | Set-Content -Path $Path -Encoding utf8
+}
+
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "         Installing Alano Rough Cut AI Assistant...       " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
@@ -125,12 +147,12 @@ $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
 Write-Host "Installing dependencies..." -ForegroundColor Cyan
 & $PipPath install -e $InstallDir
 
-# 4. Prompt for ElevenLabs API Key
+# 4. Configure the gated Community-1 model credential
 $EnvPath = Join-Path $InstallDir ".env"
 $HasKey = $false
 if (Test-Path $EnvPath) {
     $EnvContent = Get-Content $EnvPath
-    if ($EnvContent -match "ELEVENLABS_API_KEY=.+") {
+    if ($EnvContent -match "HF_TOKEN=.+") {
         $HasKey = $true
     }
 }
@@ -138,25 +160,43 @@ if (Test-Path $EnvPath) {
 if (!$HasKey) {
     Write-Host ""
     Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host "   Configurando a API Key do ElevenLabs (Transcricao)    " -ForegroundColor Yellow
+    Write-Host " Configurando Hugging Face para Pyannote Community-1    " -ForegroundColor Yellow
     Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host "Você pode encontrar ou gerar suas chaves em:" -ForegroundColor Gray
-    Write-Host "  https://elevenlabs.io/app/settings/api-keys" -ForegroundColor Gray
+    Write-Host "Aceite os termos do modelo e gere um token de leitura em:" -ForegroundColor Gray
+    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-community-1" -ForegroundColor Gray
     Write-Host ""
-    $ApiKey = Read-Host "Cole a sua ElevenLabs API Key aqui"
-    if (![string]::IsNullOrEmpty($ApiKey)) {
-        "ELEVENLABS_API_KEY=$ApiKey" | Out-File -FilePath $EnvPath -Encoding utf8 -Force
-        Write-Host "  -> Chave salva com sucesso em $EnvPath!" -ForegroundColor Green
-    } else {
+    $SecureToken = Read-Host "Cole o Hugging Face access token" -AsSecureString
+    $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken)
+    try { $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr) }
+    if (![string]::IsNullOrEmpty($Token)) {
+        Set-EnvEntry -Path $EnvPath -Name "HF_TOKEN" -Value $Token
+        $Token = $null
+        Write-Host "  -> Credencial salva no .env ignorado pelo Git." -ForegroundColor Green
+        $HasKey = $true
+    }
+    else {
         Write-Host "Nenhuma chave inserida. Voce podera configurar o arquivo .env manualmente depois." -ForegroundColor Red
     }
     Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
     Write-Host ""
 } else {
-    Write-Host "Chave API do ElevenLabs já configurada em $EnvPath." -ForegroundColor Green
+    Write-Host "Hugging Face token já configurado em $EnvPath." -ForegroundColor Green
 }
 
-# 5. Expose CLI to PATH
+# 5. Install the shared CUDA transcription runtime once per Windows user.
+$PythonPath = Join-Path $VenvDir "Scripts\python.exe"
+$RuntimeHelper = Join-Path $InstallDir "helpers\whisperx_runtime.py"
+if (Test-Path $RuntimeHelper) {
+    Write-Host "Setting up shared WhisperX CUDA runtime (this can take several minutes)..." -ForegroundColor Cyan
+    & $PythonPath $RuntimeHelper setup
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "WhisperX CUDA runtime setup failed. Run 'alanocut setup-transcription' to retry."
+        exit 1
+    }
+}
+
+# 6. Expose CLI to PATH
 $BinDir = Join-Path $InstallDir "bin"
 Write-Host "Adding $BinDir to PATH..." -ForegroundColor Cyan
 
@@ -172,7 +212,7 @@ if ($PathList -notcontains $BinDir) {
     Write-Host "Path is already configured." -ForegroundColor Gray
 }
 
-# 6. Done
+# 7. Done
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "          Installation Completed Successfully!            " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green

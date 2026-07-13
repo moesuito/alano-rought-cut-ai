@@ -1,17 +1,12 @@
-"""Transcribe a video with ElevenLabs Scribe.
+"""Transcribe one source with the local CUDA WhisperX stack.
 
-Extracts mono 16kHz audio via ffmpeg, uploads to Scribe with verbatim +
-diarize + audio events + word-level timestamps, writes the full response
-to <edit_dir>/transcripts/<video_stem>.json.
+The normative path is:
 
-Cached: if the output file already exists, the upload is skipped.
+``faster-whisper large-v3 -> WhisperX forced alignment -> Community-1 diarization``
 
-Usage:
-    python helpers/transcribe.py <video_path>
-    python helpers/transcribe.py <video_path> --edit-dir /custom/edit
-    python helpers/transcribe.py <video_path> --language en
-    python helpers/transcribe.py <video_path> --num-speakers 2
-    python helpers/transcribe.py raw_video/edit/preview.mp4 --edit-dir raw_video/edit --force
+ElevenLabs remains an explicit compatibility provider, but it is never an
+automatic fallback: losing forced alignment or local diarization must be a
+visible operator decision.
 """
 
 from __future__ import annotations
@@ -24,54 +19,81 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
+
+try:
+    from helpers.transcription_contract import (
+        DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_PORTUGUESE_ALIGN_MODEL,
+        DEFAULT_PORTUGUESE_HOTWORDS,
+        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        WhisperXConfig,
+        is_cache_valid,
+        sha256_file,
+        write_json_atomic,
+    )
+    from helpers.transcription_providers import (
+        WhisperXProvider,
+        ensure_no_secret_fields,
+        load_env_value,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "helpers":
+        raise
+    from transcription_contract import (  # type: ignore[no-redef]
+        DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_PORTUGUESE_ALIGN_MODEL,
+        DEFAULT_PORTUGUESE_HOTWORDS,
+        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        WhisperXConfig,
+        is_cache_valid,
+        sha256_file,
+        write_json_atomic,
+    )
+    from transcription_providers import (  # type: ignore[no-redef]
+        WhisperXProvider,
+        ensure_no_secret_fields,
+        load_env_value,
+    )
 
 
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
-def load_api_key() -> str:
-    # 1. Check OS environment variable first
-    v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if v:
-        return v
-        
-    # 2. Check upwards from the current working directory for a .env file
-    current = Path.cwd()
-    for parent in [current] + list(current.parents):
-        candidate = parent / ".env"
-        if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8-sig").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                if k.strip() == "ELEVENLABS_API_KEY":
-                    return v.strip().strip('"').strip("'")
-                    
-    # 3. Check the global installation directory .env (where transcribe.py lives)
-    global_env = Path(__file__).resolve().parent.parent / ".env"
-    if global_env.exists():
-        for line in global_env.read_text(encoding="utf-8-sig").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            if k.strip() == "ELEVENLABS_API_KEY":
-                return v.strip().strip('"').strip("'")
-                
-    sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
+class TranscriptionReviewRequired(RuntimeError):
+    """The transcript was persisted for audit but is unsafe for editing."""
 
+
+def load_api_key() -> str:
+    value = load_env_value("ELEVENLABS_API_KEY")
+    if not value:
+        raise RuntimeError("ELEVENLABS_API_KEY not found in .env or environment")
+    return value
 
 
 def extract_audio(video_path: Path, dest: Path) -> None:
-    cmd = [
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
         str(dest),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffmpeg audio extraction failed: {completed.stderr.strip()}")
 
 
 def call_scribe(
@@ -79,7 +101,8 @@ def call_scribe(
     api_key: str,
     language: str | None = None,
     num_speakers: int | None = None,
-) -> dict:
+) -> dict[str, Any]:
+    """Compatibility adapter for explicit ElevenLabs use."""
     data: dict[str, str] = {
         "model_id": "scribe_v1",
         "diarize": "true",
@@ -90,114 +113,242 @@ def call_scribe(
         data["language_code"] = language
     if num_speakers:
         data["num_speakers"] = str(num_speakers)
-
-    with open(audio_path, "rb") as f:
-        resp = requests.post(
+    with audio_path.open("rb") as handle:
+        response = requests.post(
             SCRIBE_URL,
             headers={"xi-api-key": api_key},
-            files={"file": (audio_path.name, f, "audio/wav")},
+            files={"file": (audio_path.name, handle, "audio/wav")},
             data=data,
             timeout=1800,
         )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Scribe returned HTTP {response.status_code}; response body omitted"
+        )
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Scribe returned a non-object response")
+    return payload
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"Scribe returned {resp.status_code}: {resp.text[:500]}")
 
-    return resp.json()
+def _scribe_transcript(
+    source: Path,
+    *,
+    api_key: str,
+    language: str | None,
+    num_speakers: int | None,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="alano_cut_scribe_") as temp_dir:
+        audio = Path(temp_dir) / f"{source.stem}.wav"
+        extract_audio(source, audio)
+        payload = call_scribe(audio, api_key, language, num_speakers)
+    binding = payload.get("_alano_cut")
+    if not isinstance(binding, dict):
+        binding = {}
+        payload["_alano_cut"] = binding
+    binding.update(
+        {
+            "schema_version": 0,
+            "transcription_provider": "elevenlabs_scribe_compatibility",
+            "source_sha256": sha256_file(source),
+        }
+    )
+    return payload
 
 
 def transcribe_one(
     video: Path,
     edit_dir: Path,
-    api_key: str,
-    language: str | None = None,
+    api_key: str | None = None,
+    language: str | None = "pt",
     num_speakers: int | None = None,
     verbose: bool = True,
     force: bool = False,
+    *,
+    provider: str = "whisperx",
+    config: WhisperXConfig | None = None,
+    runtime_python: Path | None = None,
 ) -> Path:
-    """Transcribe a single video. Returns path to transcript JSON.
-
-    Cached: returns existing path immediately if the transcript already exists.
-    """
-    transcripts_dir = edit_dir / "transcripts"
+    """Transcribe a source and return its canonical transcript path."""
+    source = video.resolve(strict=True)
+    transcripts_dir = edit_dir.resolve() / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
-    out_path = transcripts_dir / f"{video.stem}.json"
+    output = transcripts_dir / f"{source.stem}.json"
+    source_hash = sha256_file(source)
 
-    if out_path.exists() and not force:
-        if verbose:
-            print(f"cached: {out_path.name}")
-        return out_path
+    if provider == "whisperx":
+        effective_config = config or WhisperXConfig(
+            language=language,
+            num_speakers=num_speakers,
+        )
+        if output.exists() and not force and is_cache_valid(
+            output, source_sha256=source_hash, config=effective_config
+        ):
+            if verbose:
+                print(f"cached: {output.name} (source + WhisperX config match)")
+            return output
+    elif provider == "elevenlabs":
+        effective_config = None
+        if output.exists() and not force:
+            try:
+                existing = json.loads(output.read_text(encoding="utf-8"))
+                metadata = existing.get("_alano_cut", {})
+                if (
+                    metadata.get("transcription_provider")
+                    == "elevenlabs_scribe_compatibility"
+                    and metadata.get("source_sha256") == source_hash
+                ):
+                    if verbose:
+                        print(f"cached: {output.name} (ElevenLabs compatibility)")
+                    return output
+            except (OSError, json.JSONDecodeError, AttributeError):
+                pass
+    else:
+        raise ValueError(f"unsupported transcription provider: {provider}")
 
     if verbose:
-        if out_path.exists() and force:
-            print(f"  re-transcribing {video.name} (--force)", flush=True)
-        print(f"  extracting audio from {video.name}", flush=True)
+        replacement = " replacing stale/legacy cache" if output.exists() else ""
+        print(f"transcribing {source.name} with {provider}{replacement}", flush=True)
+    started = time.perf_counter()
+    if provider == "whisperx":
+        payload = WhisperXProvider(
+            effective_config,
+            runtime_python=runtime_python,
+            analysis_dir=edit_dir.resolve() / "audio_analysis",
+        ).transcribe(source)
+    else:
+        payload = _scribe_transcript(
+            source,
+            api_key=api_key or load_api_key(),
+            language=language,
+            num_speakers=num_speakers,
+        )
+    ensure_no_secret_fields(payload)
+    write_json_atomic(output, payload)
 
-    t0 = time.time()
-    with tempfile.TemporaryDirectory() as tmp:
-        audio = Path(tmp) / f"{video.stem}.wav"
-        extract_audio(video, audio)
-        size_mb = audio.stat().st_size / (1024 * 1024)
-        if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
-
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    dt = time.time() - t0
+    alignment = payload.get("_alano_cut", {}).get("alignment", {})
+    acoustic = payload.get("_alano_cut", {}).get("acoustic_timing", {})
+    if provider == "whisperx" and (
+        alignment.get("status") != "pass" or acoustic.get("status") != "pass"
+    ):
+        count = (
+            int(alignment.get("blocking_outlier_count") or 0)
+            + int(acoustic.get("blocking_outlier_count") or 0)
+        )
+        raise TranscriptionReviewRequired(
+            f"transcription timing gate requires review ({count} blocking outlier(s)); "
+            f"audit transcript saved at {output}"
+        )
 
     if verbose:
-        kb = out_path.stat().st_size / 1024
-        print(f"  saved: {out_path.name} ({kb:.1f} KB) in {dt:.1f}s")
-        if isinstance(payload, dict) and "words" in payload:
-            print(f"    words: {len(payload['words'])}")
+        elapsed = time.perf_counter() - started
+        word_count = len(payload.get("words", []))
+        speakers = {
+            word.get("speaker_id")
+            for word in payload.get("words", [])
+            if isinstance(word, dict) and word.get("speaker_id") is not None
+        }
+        print(
+            f"saved: {output.name} ({word_count} words, {len(speakers)} speakers) "
+            f"in {elapsed:.1f}s",
+            flush=True,
+        )
+    return output
 
-    return out_path
 
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Transcribe a video with ElevenLabs Scribe")
-    ap.add_argument("video", type=Path, help="Path to video file")
-    ap.add_argument(
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio/video with CUDA WhisperX and Community-1"
+    )
+    parser.add_argument("source", type=Path, help="Audio or video source")
+    parser.add_argument(
         "--edit-dir",
         type=Path,
         default=None,
-        help="Edit output directory (default: <video_parent>/edit)",
+        help="Edit output directory (default: <source_parent>/edit)",
     )
-    ap.add_argument(
-        "--language",
-        type=str,
-        default=None,
-        help="Optional ISO language code (e.g., 'en'). Omit to auto-detect.",
+    parser.add_argument(
+        "--provider",
+        choices=("whisperx", "elevenlabs"),
+        default="whisperx",
+        help="Normative local provider or explicit compatibility provider",
     )
-    ap.add_argument(
-        "--num-speakers",
+    parser.add_argument("--language", default="pt", help="Language code (default: pt)")
+    parser.add_argument("--model", default="large-v3", help="faster-whisper model")
+    parser.add_argument(
+        "--align-model",
+        default=DEFAULT_PORTUGUESE_ALIGN_MODEL,
+        help="Forced-alignment model (default: Portuguese XLSR-53)",
+    )
+    parser.add_argument(
+        "--diarization-model",
+        default=DEFAULT_DIARIZATION_MODEL,
+        choices=(DEFAULT_DIARIZATION_MODEL,),
+    )
+    parser.add_argument(
+        "--batch-size",
         type=int,
-        default=None,
-        help="Optional number of speakers when known. Improves diarization accuracy.",
+        default=2,
+        help="WhisperX GPU batch size (default: 2 for 6 GB VRAM)",
     )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-transcribe even when <edit_dir>/transcripts/<video_stem>.json already exists.",
+    parser.add_argument("--beam-size", type=int, default=5)
+    parser.add_argument("--initial-prompt", default=DEFAULT_PORTUGUESE_INITIAL_PROMPT)
+    parser.add_argument("--hotwords", default=DEFAULT_PORTUGUESE_HOTWORDS)
+    parser.add_argument(
+        "--compute-type", choices=("float16", "int8_float16"), default="float16"
     )
-    args = ap.parse_args()
+    speaker_group = parser.add_mutually_exclusive_group()
+    speaker_group.add_argument("--num-speakers", type=int, default=None)
+    speaker_group.add_argument("--speaker-range", nargs=2, type=int, metavar=("MIN", "MAX"))
+    parser.add_argument("--runtime-python", type=Path, default=None)
+    parser.add_argument("--force", action="store_true")
+    return parser
 
-    video = args.video.resolve()
-    if not video.exists():
-        sys.exit(f"video not found: {video}")
 
-    edit_dir = (args.edit_dir or (video.parent / "edit")).resolve()
-    api_key = load_api_key()
-
-    transcribe_one(
-        video=video,
-        edit_dir=edit_dir,
-        api_key=api_key,
-        language=args.language,
-        num_speakers=args.num_speakers,
-        force=args.force,
-    )
+def main() -> int:
+    args = build_parser().parse_args()
+    source = args.source.resolve()
+    if not source.is_file():
+        print(f"source not found: {source}", file=sys.stderr)
+        return 1
+    language = None if str(args.language).lower() == "auto" else args.language
+    min_speakers = args.speaker_range[0] if args.speaker_range else None
+    max_speakers = args.speaker_range[1] if args.speaker_range else None
+    try:
+        config = WhisperXConfig(
+            model=args.model,
+            language=language,
+            compute_type=args.compute_type,
+            batch_size=args.batch_size,
+            beam_size=args.beam_size,
+            initial_prompt=args.initial_prompt if language == "pt" else None,
+            hotwords=args.hotwords if language == "pt" else None,
+            align_model=args.align_model if language == "pt" else None,
+            diarization_model=args.diarization_model,
+            num_speakers=args.num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        transcribe_one(
+            source,
+            (args.edit_dir or source.parent / "edit").resolve(),
+            language=language,
+            num_speakers=args.num_speakers,
+            force=args.force,
+            provider=args.provider,
+            config=config,
+            runtime_python=args.runtime_python,
+        )
+    except TranscriptionReviewRequired as error:
+        print(f"transcription review required: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:
+        # Provider errors are designed not to contain credentials.  Avoid a
+        # traceback here so third-party request objects cannot dump headers.
+        print(f"transcription failed ({type(error).__name__}): {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

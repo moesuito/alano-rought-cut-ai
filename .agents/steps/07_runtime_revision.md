@@ -1,6 +1,6 @@
 # Step 07 - Runtime Revision
 
-Goal: revise the EDL against the target runtime without damaging meaning.
+Goal: finish editorial/runtime revision, then deterministically refine every boundary to exact source frames.
 
 ## Load
 
@@ -23,7 +23,16 @@ Goal: revise the EDL against the target runtime without damaging meaning.
    - preserve the strongest hook, result, and CTA/end moments.
 4. If the target duration is unsuitable for content clarity, document the compromise instead of destroying meaning.
 5. Update `edit/edl.json` if revised.
-6. Update `edit/run_state.md` with total duration and revision rationale.
+6. Once editorial ranges are stable, run the mandatory boundary refiner:
+
+```powershell
+.venv\Scripts\python.exe helpers\refine_edl_boundaries.py <edit_dir>\edl.json --transcripts <edit_dir>\transcripts --report <edit_dir>\edl_boundary_qc.json
+```
+
+7. Require exit code 0. Exit code 2 means review is still required; exit code 1 is a structural/runtime failure. Do not render a preview after either non-zero result.
+8. Confirm every range now has integer `source_in_frame` / `source_out_frame`, `review_required: false`, and matching evidence in `edl_boundary_qc.json`.
+9. If an editorial change is made after refinement, restart from this refiner command; downstream artifacts are stale.
+10. Update `edit/run_state.md` with total duration, revision rationale, EDL/report hashes, and boundary-refiner status.
 
 ## Rough Defaults When No Target Exists
 
@@ -37,5 +46,7 @@ These are guidance, not hard rules.
 
 ## Output
 
-- revised `edit/edl.json`, if needed
+- runtime-revised and boundary-refined `edit/edl.json`
+- `edit/edl_boundary_qc.json`
+- exact source frames and `review_required: false` on every range
 - updated `edit/run_state.md`

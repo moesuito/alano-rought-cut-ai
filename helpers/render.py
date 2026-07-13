@@ -267,7 +267,11 @@ def main() -> None:
                 segment_files.append(temp_wav)
 
                 ranges_map.append({
+                    "range_index": i,
                     "source": source_id,
+                    "beat_id": r.get("beat_id") or r.get("beat"),
+                    "lexical_anchors": r.get("lexical_anchors"),
+                    "boundary_constraints": r.get("boundary_constraints", {}),
                     "source_frames": [int(F_in), int(F_out)],
                     "source_sample_interval": [start_sample, end_sample],
                     "output_cumulative_sample_interval": [cum_start, cum_start + duration_samples],

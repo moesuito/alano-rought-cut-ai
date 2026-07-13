@@ -13,11 +13,12 @@ The agent instructions use a capability-routed dual protocol. Capable agents rea
 
 - **Identifies and cuts out filler words** (`umm`, `uh`, false starts) and dead space between takes.
 - **Infers the video type and rough-cut structure** from the transcript before editing, instead of assuming a fixed format.
+- **Transcribes locally on NVIDIA CUDA** with faster-whisper `large-v3`, WhisperX forced word alignment, and Pyannote Community-1 exclusive speaker diarization.
 - **Compares repeated takes by meaning and delivery**, choosing the best version of each narrative beat.
 - **Snaps cuts to word boundaries** and silence gaps using sub-second ASR timestamps.
 - **Validates tight cuts against waveform energy**, so ASR timestamp drift does not become the only boundary signal.
 - **Uses lightweight preview renders for QA**, including render-level cut checks before exporting XML.
-- **Transcribes preview audio for content QC**, catching repeated lines, clipped phrases, leftover direction words, and semantic mismatches.
+- **Always persists a timed preview-audio transcript bound to the WAV hash**, then validates every join for repeated, clipped, orphaned, crossed, or semantically wrong content.
 - **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro 2026**.
 - **Names the Premiere XML sequence from context**, using names like `reels 35_cadastro_alano-cut` instead of a generic fixed timeline name.
 - **Round-trips corrected Premiere XML back to EDL JSON** for comparison against the agent cut.
@@ -68,33 +69,34 @@ This will:
 
 After running `init`:
 1. Drop your raw video files inside `raw_video/`.
-2. Configure your `ELEVENLABS_API_KEY` in the generated `.env` file.
+2. Accept the Community-1 terms on Hugging Face and configure `HF_TOKEN` in the generated `.env` file. The token is never placed in argv, transcripts, reports, or Git.
 3. Optionally add editing context in `raw_video/edit/USER_BRIEF.md` (target duration, audience, must keep/cut, pacing).
 4. Open your AI agent (like Claude Code or Gemini), read `AGENTS.md`, and say: *"edit these clips"* or *"make a rough cut"*.
 
 
 ## How it works
 
-The AI reads the video through two layers that give it word-boundary precision:
+The agent uses an audio-only evidence stack for word-boundary precision:
 
-<p align="center">
-  <img src="static/timeline-view.svg" alt="timeline_view composite" width="100%">
-</p>
+1. **Source transcripts**: a shared Python 3.12 runtime runs faster-whisper `large-v3` on CUDA, WhisperX forced alignment, and `pyannote/speaker-diarization-community-1`. A pinned, windowed `small` verifier may recover recording cues only after two-window consensus; ordinary verifier text is never copied. Canonical schema-v1 transcripts require a positive aligned interval and speaker on every word. Packed takes remain the model's primary editorial reading view.
+2. **Exact boundary refinement**: `refine_edl_boundaries.py` combines lexical anchors, raw max-per-channel waveform evidence, and RNNoise to write exact `source_in_frame` / `source_out_frame` values and a hash-bound report.
+3. **Dry preview and audio QC**: `render.py` creates PCM16/48 kHz stereo `preview.wav` plus `preview_timeline.json`; `preview_audio_qc.py` validates every entry/join for inactivity, attack/tail safety, residual activity, clipping, and pops.
+4. **Content coverage**: `semantic_qc.py` validates `metadata.required_beats` against words actually selected from source transcripts.
+5. **Join transcript QC**: the preview is always re-transcribed by the same local aligned/diarized stack and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join and uses global similarity/recall only as supplemental evidence.
+6. **Readiness and XML**: `verify_edit_ready.py` must return exit code 0 for the exact current artifacts before the agent calls `edl_to_fcpxml.py`.
 
-1. **Audio Transcript (Layer 1)**: One ElevenLabs Scribe call per source gives word-level timestamps, speaker diarization, and audio events (`(laughter)`, `(sigh)`). All takes pack into a single ~12KB `takes_packed.md` — the LLM's primary reading view.
-2. **Waveform Boundary QC (Layer 2)**: `validate_edl_boundaries.py` checks every EDL cut against both raw word timestamps and local waveform energy. Transcript-only flags are review signals; high-risk flags require both word and waveform evidence, or media-analysis failure.
-3. **Visual Composite (Layer 3)**: `timeline_view.py` produces a filmstrip + waveform + word labels PNG for any time range. It is called at decision points like ambiguous pauses or cut-point sanity checks.
-4. **Preview Transcript QC (Layer 4)**: `preview_transcript_qc.py` reviews the rendered preview transcript for duplicated content, leftover direction words, audio-event artifacts, and obvious semantic mismatches.
+`timeline_view.py` and `validate_edl_boundaries.py` are legacy manual diagnostics outside the agent workflow and are scheduled for removal in v0.5.0.
 
 ## Pipeline
 
 ```
-Transcribe ──> Pack ──> LLM Reasons ──> EDL ──> Boundary QC ──> Preview Render ──> Preview Transcript QC ──> FCP 7 XML Export
-                                                           │                              │
-                                                           └─ issue? fix + re-run QC/render
+Local CUDA WhisperX -> Pack -> Editorial EDL -> Refine exact frames -> WAV/map -> Audio QC -> Semantic QC
+                                      ^                                      |
+                                      |                                      v
+                                      +-- EDL change <- Persist preview transcript/hash -> Join transcript QC -> Readiness(0) -> XML
 ```
 
-The self-eval loop runs boundary QC on every cut, uses `timeline_view` only on suspicious points, and can transcribe the preview to catch content-level problems before exporting `timeline.xml` for Premiere.
+Any EDL change invalidates downstream artifacts and restarts the chain at boundary refinement. The normative agent path uses no fades, video frames, or visual inspection.
 
 ## Agent protocols
 
@@ -110,6 +112,7 @@ The protocols differ only in context strategy. Core invariants, workflow, step m
 - Added a strict quality gate script (`verify_edit_ready.py`) run before XML export.
 - Support for `source_in_frame` / `source_out_frame` mapping inside EDL ranges and XML conversion for precise cut alignment.
 - Switched workflow to be audio-only (`preview.wav` and `preview_timeline.json`), rejecting `.mp4` visual renders.
+- Made boundary refinement, audio QC, required-beat QC, persisted preview transcription, and join-centric transcript QC mandatory and hash-bound.
 - Marked `timeline_view.py` as legacy, scheduled for removal in v0.5.0.
 
 ## What shipped in v0.3.0
@@ -121,11 +124,15 @@ The protocols differ only in context strategy. Core invariants, workflow, step m
 ## QA helper commands
 
 ```powershell
-.venv\Scripts\python.exe helpers\validate_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts -o raw_video\edit\edl_boundary_qc.json
+alanocut setup-transcription
+alanocut transcription-doctor
+.venv\Scripts\python.exe helpers\transcribe_batch.py raw_video --provider whisperx --language pt --model large-v3 --batch-size 2
+.venv\Scripts\python.exe helpers\refine_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --report raw_video\edit\edl_boundary_qc.json
 .venv\Scripts\python.exe helpers\render.py raw_video\edit\edl.json -o raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
-.venv\Scripts\python.exe helpers\transcribe.py raw_video\edit\preview.wav --edit-dir raw_video\edit --force
-.venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\transcripts\preview.json -o raw_video\edit\preview_transcript_qc.json
-.venv\Scripts\python.exe helpers\verify_edit_ready.py raw_video\edit\edl.json
+.venv\Scripts\python.exe helpers\preview_audio_qc.py raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json --edl raw_video\edit\edl.json --output raw_video\edit\preview_audio_qc.json
+.venv\Scripts\python.exe helpers\semantic_qc.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --output raw_video\edit\edl_semantic_qc.json
+.venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\preview.wav --provider whisperx --audio raw_video\edit\preview.wav --edl raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --timeline-map raw_video\edit\preview_timeline.json --transcript-output raw_video\edit\transcripts\preview.json --output raw_video\edit\preview_transcript_qc.json
+.venv\Scripts\python.exe helpers\verify_edit_ready.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --boundary-report raw_video\edit\edl_boundary_qc.json --audio-report raw_video\edit\preview_audio_qc.json --semantic-report raw_video\edit\edl_semantic_qc.json --transcript-report raw_video\edit\preview_transcript_qc.json --audio raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
 .venv\Scripts\python.exe helpers\edl_to_fcpxml.py raw_video\edit\edl.json -o raw_video\edit\timeline.xml --timeline-name "reels 35_cadastro_alano-cut"
 .venv\Scripts\python.exe helpers\fcpxml_to_edl.py raw_video\edit\timeline_fix.xml -o raw_video\edit\timeline_fix_from_xml.edl.json --media-root raw_video
 ```

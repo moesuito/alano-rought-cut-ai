@@ -14,10 +14,10 @@ Goal: create the Premiere-compatible XML timeline.
 1. Run the readiness gate validation:
 
 ```powershell
-.venv\Scripts\python.exe helpers\verify_edit_ready.py <edit_dir>\edl.json --transcripts <edit_dir>\transcripts
+.venv\Scripts\python.exe helpers\verify_edit_ready.py <edit_dir>\edl.json --transcripts <edit_dir>\transcripts --boundary-report <edit_dir>\edl_boundary_qc.json --audio-report <edit_dir>\preview_audio_qc.json --semantic-report <edit_dir>\edl_semantic_qc.json --transcript-report <edit_dir>\preview_transcript_qc.json --audio <edit_dir>\preview.wav --timeline-map <edit_dir>\preview_timeline.json
 ```
 
-Ensure the gate passes (exit code 0). If it flags reviews or errors, resolve them before proceeding.
+Ensure the gate passes with exit code 0 for the exact current EDL, source transcripts, preview WAV, timeline map, persisted preview transcript, and reports. Exit code 2 requires review; exit code 1 is fatal. Resolve either result and restart from the earliest invalidated gate before proceeding.
 
 2. Run:
 
@@ -46,6 +46,8 @@ Ensure the gate passes (exit code 0). If it flags reviews or errors, resolve the
 
 11. Update `edit/run_state.md` with XML path, timeline name, export status, and any round-trip comparison notes.
 12. Record meaningful human corrections in `edit/project.md` during Step 10. The round-trip helper enables comparison; do not claim it learns automatically.
+
+`edl_to_fcpxml.py` remains manually callable and may only warn about missing/stale QC for expert recovery. That manual behavior never authorizes the agent workflow to bypass the successful readiness command above.
 
 ## Output
 

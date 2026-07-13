@@ -90,7 +90,7 @@ def write_atomic(dest_path: Path, content: str) -> None:
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = dest_path.with_suffix(dest_path.suffix + f".{os.getpid()}.tmp")
     try:
-        with open(temp_path, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
@@ -337,6 +337,37 @@ def get_scored_refined_bound(
     return best_cand["start"], best_cand["end"], True, candidates
 
 
+def find_prelexical_transient_bridge(
+    candidates: list[dict[str, Any]],
+    word_start: float,
+    prev_end: float | None,
+    max_gap_s: float = 0.060,
+) -> dict[str, Any] | None:
+    """Return a raw transient that plausibly carries the selected attack.
+
+    A plosive can finish just before the ASR word timestamp and therefore be
+    rejected by the ordinary lexical-overlap scorer.  The detector contract
+    explicitly protects a transient followed by speech within 60 ms.  It may
+    be used only when it starts after the preceding transcript word.
+    """
+    bridged = []
+    for candidate in candidates:
+        start = float(candidate["start"])
+        end = float(candidate["end"])
+        gap = word_start - end
+        if (
+            start < word_start
+            and end <= word_start
+            and 0.0 <= gap <= max_gap_s
+            and 0.010 <= end - start <= 0.120
+            and (prev_end is None or start >= prev_end)
+        ):
+            bridged.append((gap, start, candidate))
+    if not bridged:
+        return None
+    return min(bridged, key=lambda item: (item[0], item[1]))[2]
+
+
 
 
 def main() -> None:
@@ -354,8 +385,9 @@ def main() -> None:
 
     try:
         # Read the raw contents of EDL before loading to calculate exact input hash
-        input_raw_content = edl_path.read_text(encoding="utf-8")
-        input_hash = calculate_sha256_of_string(input_raw_content)
+        input_raw_bytes = edl_path.read_bytes()
+        input_raw_content = input_raw_bytes.decode("utf-8")
+        input_hash = hashlib.sha256(input_raw_bytes).hexdigest()
         edl = json.loads(input_raw_content)
     except Exception as e:
         print(f"Fatal Error: Cannot load EDL JSON: {e}", file=sys.stderr)
@@ -554,6 +586,7 @@ def main() -> None:
                 "end": final_end_s,
                 "source_in_frame": final_in_frame,
                 "source_out_frame": final_out_frame,
+                "lexical_anchors": None,
                 "review_status": review_status,
                 "review_required": review_required
             })
@@ -652,6 +685,11 @@ def main() -> None:
         comp_start_rnn, comp_end_rnn, has_start_rnn, start_rnn_candidates = get_scored_refined_bound(
             activity_rnn, float(first_word["start"]), float(first_word["end"]), prev_end, next_start
         )
+        transient_bridge = find_prelexical_transient_bridge(
+            start_raw_candidates,
+            float(first_word["start"]),
+            prev_end,
+        )
 
         t_onset_raw = comp_start_raw if has_start_raw else float(first_word["start"])
         t_onset_rnn = comp_start_rnn if has_start_rnn else float(first_word["start"])
@@ -667,6 +705,30 @@ def main() -> None:
             t_onset = t_onset_rnn
         else:
             t_onset = float(first_word["start"])
+
+        # Establish that this range really contains later bilateral speech.
+        # This is stronger than trusting an isolated quiet ASR word and lets
+        # the mandatory post-render transcript QC safely close the loop.
+        has_later_speech = False
+        if len(anchors) > 1:
+            for later_word in anchors[1:]:
+                _, _, later_raw, _ = get_scored_refined_bound(
+                    activity_raw,
+                    float(later_word["start"]),
+                    float(later_word["end"]),
+                    None,
+                    None,
+                )
+                _, _, later_rnn, _ = get_scored_refined_bound(
+                    activity_rnn,
+                    float(later_word["start"]),
+                    float(later_word["end"]),
+                    None,
+                    None,
+                )
+                if later_raw and later_rnn:
+                    has_later_speech = True
+                    break
 
         # Determine start boundary collisions and guards
         has_start_collision = False
@@ -734,18 +796,8 @@ def main() -> None:
 
         # Check lexical fallback for start if VAD missed it (quiet first word)
         is_lexical_fallback_start = False
+        is_preview_guarded_start_fallback = False
         if not has_start_raw or not has_start_rnn:
-            # Check if later speech is present
-            _, _, has_end_raw_check, _ = get_scored_refined_bound(activity_raw, float(last_word["start"]), float(last_word["end"]), prev_end, next_start)
-            _, _, has_end_rnn_check, _ = get_scored_refined_bound(activity_rnn, float(last_word["start"]), float(last_word["end"]), prev_end, next_start)
-            has_distinct_later_word = (
-                last_word is not first_word
-                and float(last_word["start"]) >= float(first_word["end"])
-            )
-            has_later_speech = has_distinct_later_word and (
-                has_end_raw_check and has_end_rnn_check
-            )
-
             # Use local start metrics!
             local_metrics_ok = (start_snr is not None and start_corr is not None and start_snr >= 8.0 and start_corr >= 0.8)
             no_prev_collision = (prev_word is None or prev_end <= float(first_word["start"]))
@@ -760,6 +812,34 @@ def main() -> None:
                     is_lexical_fallback_start = False
                     is_clamped_start = True
                     start_rejection_reasons.append("frame_clamp_collision")
+
+            # Conservative lexical fallback for real-world quiet attacks.
+            # It never starts later than the ASR word and is accepted only
+            # when later words have bilateral detector support. The mandatory
+            # preview re-transcription then verifies the actual first token.
+            if (
+                not is_lexical_fallback_start
+                and has_later_speech
+                and len(anchors) >= 3
+                and no_prev_collision
+                and not collision_exists
+            ):
+                guarded_onset = (
+                    float(transient_bridge["start"])
+                    if transient_bridge is not None
+                    else float(first_word["start"])
+                )
+                guarded_frame = time_to_frame(guarded_onset, fps, "floor")
+                if prev_word is None or guarded_frame >= F_prev_limit:
+                    t_onset = guarded_onset
+                    F_in = guarded_frame
+                    is_lexical_fallback_start = True
+                    is_preview_guarded_start_fallback = True
+                    start_notes.append(
+                        "raw_transient_bridge"
+                        if transient_bridge is not None
+                        else "preview_transcript_guarded_lexical_fallback"
+                    )
 
         # Find refined end bound (from last word)
         comp_start_raw_end, comp_end_raw, has_end_raw, end_raw_candidates = get_scored_refined_bound(
@@ -790,11 +870,14 @@ def main() -> None:
         has_end_collision = False
         is_clamped_end = False
         end_rejection_reasons = []
+        is_end_overlapping_lexical = (
+            next_word is not None and next_start < float(last_word["end"])
+        )
 
         F_next_limit = time_to_frame(next_start, fps, "floor") if next_start is not None else 999999
 
         # Overlapping lexical intervals check
-        if next_word is not None and next_start < float(last_word["end"]):
+        if is_end_overlapping_lexical:
             t_offset = orig_end
             is_clamped_end = True
             end_rejection_reasons.append("overlapping_lexical_intervals")
@@ -869,6 +952,9 @@ def main() -> None:
 
         # Check if original out-point is medium lexical-safe
         is_lexical_safe_end = False
+        is_preview_guarded_end_fallback = False
+        end_boundary_constraint = None
+        end_notes: list[str] = []
         if vad_invalid:
             metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
             contains_last_word = (orig_end >= float(last_word["end"]))
@@ -891,6 +977,56 @@ def main() -> None:
         else:
             tail_guard_measured_from = "refined_offset"
             tail_guard_base_time = t_offset
+
+        # A multi-word selected span can use a conservative lexical endpoint
+        # even when noisy VAD evidence is unstable. The endpoint is never
+        # before the ASR word end, normally includes two full frames, and can
+        # be shortened only by the exact next-word frame limit. The rendered
+        # transcript remains the final lexical authority.
+        if not is_lexical_safe_end and has_later_speech and len(anchors) >= 3:
+            preview_out_frame = F_evidence + 2
+            available_tail_frames = 2
+            constrained_by_next = False
+            if next_word is not None and preview_out_frame > F_next_limit:
+                preview_out_frame = F_next_limit
+                available_tail_frames = preview_out_frame - F_evidence
+                constrained_by_next = True
+            contains_lexical_end = preview_out_frame >= time_to_frame(
+                float(last_word["end"]), fps, "ceil"
+            )
+            excludes_next = next_word is None or preview_out_frame <= F_next_limit
+            preview_boundary_time = float(Fraction(preview_out_frame, 1) / fps)
+            preview_crossing = (
+                is_connected_crossing(activity_raw, preview_boundary_time)
+                or is_connected_crossing(activity_rnn, preview_boundary_time)
+            )
+            if (
+                contains_lexical_end
+                and excludes_next
+                and not preview_crossing
+                and not has_end_collision
+                and not is_end_overlapping_lexical
+            ):
+                F_out = preview_out_frame
+                t_offset = offset_evidence
+                tail_frames = available_tail_frames
+                has_insufficient_tail = available_tail_frames < 2
+                cuts_last_word = False
+                is_clamped_end = False
+                is_preview_guarded_end_fallback = True
+                tail_guard_measured_from = "offset_evidence"
+                tail_guard_base_time = offset_evidence
+                end_notes.append("preview_transcript_guarded_lexical_fallback")
+                if constrained_by_next:
+                    end_boundary_constraint = {
+                        "reason": "next_word_frame_limit",
+                        "required_tail_frames": 2,
+                        "available_tail_frames": max(0, available_tail_frames),
+                        "next_word_index": last_word_idx + 1,
+                        "next_word_text": next_word["text"],
+                        "next_word_start": float(next_word["start"]),
+                    }
+                    end_notes.append("neighbor_constrained_tail")
 
 
         # Threshold sweep for agreement and stability independently
@@ -1040,16 +1176,24 @@ def main() -> None:
         else:
             pre_onset_attack_evidence["bypassed_by_safe_boundary"] = False
 
+        # Detector agreement is not sufficient evidence to discard the
+        # transcript's lexical attack.  In particular, raw and RNNoise can
+        # agree on the voiced body of a word after both missed its weak onset.
+        # Such a proposal must fail closed instead of being promoted to a
+        # high-confidence destructive trim.
+        cuts_first_word_attack = F_in > F_attack_limit
+
         # Start confidence classification
         start_conf = "low"
         start_metrics_ok = (start_snr is not None and start_corr is not None and start_snr >= 8.0 and start_corr >= 0.8)
 
         if (
-            start_metrics_ok
+            (start_metrics_ok or is_preview_guarded_start_fallback)
             and (has_start_raw or cue_guarded_start or is_lexical_fallback_start)
             and (has_start_rnn or cue_guarded_start or is_lexical_fallback_start)
             and (sweep_start_ok or is_lexical_fallback_start or cue_guarded_start)
             and not pre_onset_attack_risk
+            and not cuts_first_word_attack
         ):
             if is_lexical_fallback_start:
                 start_conf = "medium"
@@ -1067,7 +1211,7 @@ def main() -> None:
                     start_conf = "medium"
 
         # Record start rejection reasons
-        if not start_metrics_ok:
+        if not start_metrics_ok and not is_preview_guarded_start_fallback:
             start_rejection_reasons.append("poor_local_metrics")
         if not (has_start_raw or cue_guarded_start or is_lexical_fallback_start) or not (has_start_rnn or cue_guarded_start or is_lexical_fallback_start):
             start_rejection_reasons.append("vad_missed")
@@ -1075,10 +1219,22 @@ def main() -> None:
             start_rejection_reasons.append("unstable_sweep")
         if pre_onset_attack_risk:
             start_rejection_reasons.append("raw_activity_before_selected_onset")
+        if cuts_first_word_attack:
+            start_rejection_reasons.append("cuts_first_word_attack")
 
         # End confidence classification
+        if (
+            is_preview_guarded_end_fallback
+            and not sweep_end_ok
+            and end_boundary_constraint is None
+        ):
+            # The downstream transcript can resolve a noisy-but-stable
+            # endpoint, not a detector that disappears under threshold sweep.
+            is_preview_guarded_end_fallback = False
+            end_boundary_constraint = None
+            end_notes = []
         end_conf = "low"
-        if is_lexical_safe_end:
+        if is_lexical_safe_end or is_preview_guarded_end_fallback:
             end_conf = "medium"
         else:
             end_metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
@@ -1098,7 +1254,7 @@ def main() -> None:
                     end_conf = "medium"
 
         # Record end rejection reasons
-        if not is_lexical_safe_end:
+        if not is_lexical_safe_end and not is_preview_guarded_end_fallback:
             end_metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
             if not end_metrics_ok:
                 end_rejection_reasons.append("poor_local_metrics")
@@ -1146,6 +1302,11 @@ def main() -> None:
 
         # Copy original range fields and update with refinement info
         r_new = dict(r)
+        boundary_constraints = dict(r.get("boundary_constraints", {})) if isinstance(r.get("boundary_constraints"), dict) else {}
+        if end_boundary_constraint is not None:
+            boundary_constraints["end"] = end_boundary_constraint
+        else:
+            boundary_constraints.pop("end", None)
         r_new.update({
             "original_start": orig_start,
             "original_end": orig_end,
@@ -1153,6 +1314,23 @@ def main() -> None:
             "end": final_end_s,
             "source_in_frame": final_in_frame,
             "source_out_frame": final_out_frame,
+            "lexical_anchors": {
+                "first": {
+                    "word_index": first_word_idx,
+                    "text": first_word["text"],
+                    "start": float(first_word["start"]),
+                    "end": float(first_word["end"]),
+                    "acoustic_onset": t_onset,
+                },
+                "last": {
+                    "word_index": last_word_idx,
+                    "text": last_word["text"],
+                    "start": float(last_word["start"]),
+                    "end": float(last_word["end"]),
+                    "acoustic_offset": offset_evidence,
+                },
+            },
+            "boundary_constraints": boundary_constraints,
             "review_status": review_status,
             "review_required": review_required
         })
@@ -1166,7 +1344,10 @@ def main() -> None:
 
         final_decision_end = "retained_original_low"
         if end_conf in ("high", "medium"):
-            final_decision_end = "lexical_safe" if is_lexical_safe_end else "refined"
+            if is_preview_guarded_end_fallback:
+                final_decision_end = "preview_guarded_lexical"
+            else:
+                final_decision_end = "lexical_safe" if is_lexical_safe_end else "refined"
 
         # Exact pre-roll and attack-cut calculations for the endpoint written.
         onset_frame_floor = time_to_frame(t_onset, fps, "floor")
@@ -1174,7 +1355,7 @@ def main() -> None:
         first_word_start = float(first_word["start"])
         pre_roll_frames = max(0, onset_frame_floor - final_in_frame)
         pre_roll_ms = max(0.0, (first_word_start - final_in_time) * 1000.0)
-        attack_cut_frames = max(0, final_in_frame - onset_frame_floor)
+        attack_cut_frames = max(0, final_in_frame - F_attack_limit)
         attack_cut_ms = max(0.0, (final_in_time - first_word_start) * 1000.0)
         sub_frame_cue_ms = (
             max(0.0, (prev_end - final_in_time) * 1000.0)
@@ -1238,6 +1419,7 @@ def main() -> None:
                 "pre_roll_frames": pre_roll_frames,
                 "attack_cut_ms": attack_cut_ms,
                 "attack_cut_frames": attack_cut_frames,
+                "proposed_cuts_first_word_attack": cuts_first_word_attack,
                 "sub_frame_cue_coexistence_ms": sub_frame_cue_ms,
                 "pre_onset_attack_risk": pre_onset_attack_risk,
                 "pre_onset_attack_evidence": pre_onset_attack_evidence,
@@ -1271,7 +1453,10 @@ def main() -> None:
                 "final_combined_selection": {
                     "end": t_offset
                 },
-                "lexical_fallback": is_lexical_safe_end,
+                "lexical_fallback": is_lexical_safe_end or is_preview_guarded_end_fallback,
+                "preview_guarded_fallback": is_preview_guarded_end_fallback,
+                "boundary_constraint": end_boundary_constraint,
+                "notes": end_notes,
                 "cue_guard": has_end_collision and is_cue_word(next_word["text"]) if next_word else False,
                 "collision": has_end_collision,
                 "is_clamped": is_clamped_end,
@@ -1332,8 +1517,8 @@ def main() -> None:
     # Immutable create-exclusive dedup backup
     if not backup_path.exists():
         try:
-            with open(backup_path, "x", encoding="utf-8") as f:
-                f.write(input_raw_content)
+            with open(backup_path, "xb") as f:
+                f.write(input_raw_bytes)
         except FileExistsError:
             pass
 
@@ -1368,13 +1553,13 @@ def main() -> None:
     # Stage both files (write + flush + fsync)
     try:
         temp_report.parent.mkdir(parents=True, exist_ok=True)
-        with open(temp_report, "w", encoding="utf-8") as f:
+        with open(temp_report, "w", encoding="utf-8", newline="\n") as f:
             f.write(report_output_str)
             f.flush()
             os.fsync(f.fileno())
 
         temp_edl.parent.mkdir(parents=True, exist_ok=True)
-        with open(temp_edl, "w", encoding="utf-8") as f:
+        with open(temp_edl, "w", encoding="utf-8", newline="\n") as f:
             f.write(edl_output_str)
             f.flush()
             os.fsync(f.fileno())
