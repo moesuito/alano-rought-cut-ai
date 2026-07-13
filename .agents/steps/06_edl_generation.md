@@ -27,10 +27,11 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Use word boundaries for all cut edges.
 - Use canonical WhisperX JSON for exact forced-aligned word timestamps when trimming inside packed phrases.
 - Do not add a global fixed trim or pre-roll. Select the intended lexical span; Step 07 will resolve its exact frame boundaries from lexical and acoustic evidence.
-- Prefer silences >= 400ms as cut targets.
-- Treat 150-400ms phrase boundaries as usable with care and audio evidence.
+- Every lexical gap strictly greater than 300ms inside a selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical WhisperX word timestamps.
+- A gap of exactly 300ms remains untouched. There is no warning band.
 - Treat gaps < 150ms as unsafe unless there is a strong editorial reason.
-- Give speaker handoffs enough air when needed; 400-600ms is a common range for natural turns.
+- When a speaker handoff genuinely needs 400-600ms of air, preserve that exact gap through the reasoned per-gap override below.
+- Preserve an intentional gap over 300ms only with a per-gap `boundary_constraints.preserve_internal_silences` entry containing the exact consecutive canonical word indices/text and a non-empty editorial reason. Wildcard range overrides are forbidden.
 
 ## Retake And Semantic Repair
 
@@ -82,6 +83,24 @@ Write `edit/edl.json` using the current Alano format:
 ```
 
 `metadata.required_beats` is mandatory and may be an empty list when the edit has no required editorial beat. Each `evidence_any_of` entry is an alternative group; every phrase inside one group must be supported by the selected source transcript. Use product/project language only in the project EDL, never as a generic QC rule.
+
+An intentional pause above the automatic threshold must be narrow and auditable:
+
+```json
+{
+  "boundary_constraints": {
+    "preserve_internal_silences": [
+      {
+        "left_word_index": 116,
+        "left_word": "Salvar.",
+        "right_word_index": 117,
+        "right_word": "Um",
+        "reason": "Pausa narrativa intencional"
+      }
+    ]
+  }
+}
+```
 
 ## Timeline Naming
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
 from fractions import Fraction
 from pathlib import Path
@@ -12,7 +14,530 @@ import pytest
 
 from helpers.timing import parse_fps_fraction, time_to_frame, frame_to_time
 from helpers.audio_analysis import DEFAULT_VAD_PARAMS, EXPECTED_MODEL_HASH
-from helpers.refine_edl_boundaries import main as refine_main
+from helpers.refine_edl_boundaries import (
+    INTERNAL_SILENCE_SPLIT_POLICY,
+    ensure_immutable_backup,
+    first_disconnected_component_before,
+    has_valid_tail_budget,
+    is_anchor_connected_crossing,
+    is_connected_crossing,
+    is_exact_one_frame_disconnected_tail_constraint,
+    main as refine_main,
+    split_ranges_on_internal_silence,
+)
+from helpers.timeline_view import find_silences
+from helpers.verify_edit_ready import validate_boundary_report
+
+
+@pytest.mark.parametrize(
+    ("right_start", "expected_range_count"),
+    [
+        (1.299999, 1),
+        (1.300000, 1),
+        (1.300001, 2),
+        (1.301000, 2),
+    ],
+)
+def test_internal_silence_split_uses_strict_300ms_threshold(
+    right_start, expected_range_count
+):
+    words = {
+        "source": [
+            {"text": "Salvar.", "start": 0.9, "end": 1.0, "type": "word"},
+            {"text": "Um", "start": right_start, "end": 1.5, "type": "word"},
+        ]
+    }
+    ranges = [{
+        "source": "source",
+        "start": 0.8,
+        "end": 1.6,
+        "beat_id": "STEPS",
+        "quote": "stale parent quote",
+        "unknown_key": "preserved",
+    }]
+
+    expanded, events = split_ranges_on_internal_silence(ranges, words)
+
+    assert len(expanded) == expected_range_count
+    if expected_range_count == 1:
+        assert events == []
+        assert expanded == ranges
+        return
+
+    assert [child["quote"] for child in expanded] == ["Salvar.", "Um"]
+    assert expanded[0]["original_start"] == 0.8
+    assert expanded[0]["original_end"] == pytest.approx((1.0 + right_start) / 2)
+    assert expanded[1]["original_start"] == right_start
+    assert expanded[1]["original_end"] == 1.6
+    assert all(child["beat_id"] == "STEPS" for child in expanded)
+    assert all(child["unknown_key"] == "preserved" for child in expanded)
+    assert all(
+        child["internal_silence_split"]["policy"] == INTERNAL_SILENCE_SPLIT_POLICY
+        for child in expanded
+    )
+    assert events[0]["action"] == "split"
+    assert events[0]["gaps"][0]["gap_ms"] == pytest.approx(
+        (right_start - 1.0) * 1000
+    )
+
+
+def test_legacy_timeline_view_uses_exact_strict_300ms_threshold():
+    exact_words = [
+        {"text": "fim", "start": 0.0, "end": 0.1},
+        {"text": "início", "start": 0.4, "end": 0.5},
+    ]
+    over_words = [
+        exact_words[0],
+        {"text": "início", "start": 0.400001, "end": 0.5},
+    ]
+
+    assert find_silences(exact_words, 0.0, 0.5) == []
+    assert find_silences(over_words, 0.0, 0.5) == [(0.1, 0.400001)]
+
+
+def test_timeline_view_documented_direct_cli_works_outside_repo(tmp_path):
+    script = Path(__file__).parents[1] / "helpers" / "timeline_view.py"
+    result = subprocess.run(
+        [sys.executable, "-B", str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_disconnected_tail_fallback_requires_exactly_one_frame():
+    assert is_exact_one_frame_disconnected_tail_constraint({
+        "reason": "disconnected_post_word_activity",
+        "required_tail_frames": 2,
+        "available_tail_frames": 1,
+    })
+    assert not is_exact_one_frame_disconnected_tail_constraint({
+        "reason": "disconnected_post_word_activity",
+        "required_tail_frames": 2,
+        "available_tail_frames": 0,
+    })
+    assert has_valid_tail_budget(2)
+    assert not has_valid_tail_budget(1)
+    assert has_valid_tail_budget(1, allow_one_frame_exception=True)
+    assert not has_valid_tail_budget(0, allow_one_frame_exception=True)
+
+
+def test_immutable_backup_is_synced_and_existing_bytes_are_verified(tmp_path):
+    payload = b'{"version":1}'
+    payload_hash = hashlib.sha256(payload).hexdigest()
+    backup = tmp_path / f"edl.{payload_hash}.json"
+
+    ensure_immutable_backup(backup, payload, payload_hash)
+    assert backup.read_bytes() == payload
+    ensure_immutable_backup(backup, payload, payload_hash)
+
+    backup.write_bytes(b"corrupt")
+    with pytest.raises(RuntimeError, match="does not match"):
+        ensure_immutable_backup(backup, payload, payload_hash)
+
+
+def test_internal_silence_split_is_multi_gap_and_idempotent():
+    words = {
+        "source": [
+            {"text": "um", "start": 0.1, "end": 0.2, "type": "word"},
+            {"text": "dois", "start": 0.6, "end": 0.7, "type": "word"},
+            {"text": "três", "start": 1.2, "end": 1.3, "type": "word"},
+        ]
+    }
+    ranges = [{"source": "source", "start": 0.0, "end": 1.4}]
+
+    first, events = split_ranges_on_internal_silence(ranges, words)
+    second, second_events = split_ranges_on_internal_silence(first, words)
+
+    assert [child["quote"] for child in first] == ["um", "dois", "três"]
+    assert len(events[0]["gaps"]) == 2
+    assert second == first
+    assert second_events == events
+    assert all(
+        child["internal_silence_split"]["audit_event"] == events[0]
+        for child in first
+    )
+
+
+def test_internal_silence_event_identity_rejects_exact_300ms_and_stale_duration():
+    words = {
+        "source": [
+            {"text": "fim", "start": 0.0, "end": 0.1, "type": "word"},
+            {"text": "segue", "start": 0.400001, "end": 0.5, "type": "word"},
+        ]
+    }
+    ranges, events = split_ranges_on_internal_silence(
+        [{"source": "source", "start": 0.0, "end": 0.5}],
+        words,
+    )
+    report = {
+        "status": "pass",
+        "boundary_evidence": [
+            {
+                "range_index": index,
+                "source": "source",
+                "final_frames": {"in": index * 10, "out": (index + 1) * 10},
+                "confidence": {"start": "high", "end": "high"},
+            }
+            for index in range(len(ranges))
+        ],
+        "confidence_summary": {"high": len(ranges) * 2, "medium": 0, "low": 0},
+        "internal_silence_events": events,
+        "internal_silence_policy": {
+            "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+            "threshold_ms": 300.0,
+            "comparison": "strictly_greater_than",
+            "detected_gap_count": 1,
+            "split_gap_count": 1,
+            "preserved_gap_count": 0,
+        },
+    }
+    for index, range_data in enumerate(ranges):
+        range_data.update({
+            "source_in_frame": index * 10,
+            "source_out_frame": (index + 1) * 10,
+            "review_required": False,
+        })
+
+    exact = json.loads(json.dumps(report))
+    exact_gap = exact["internal_silence_events"][0]["gaps"][0]
+    exact_gap["right_word_start"] = 0.4
+    exact_gap["gap_seconds"] = 0.3
+    exact_gap["gap_ms"] = 300.0
+    for range_data in ranges:
+        range_data["internal_silence_split"]["audit_event"] = exact[
+            "internal_silence_events"
+        ][0]
+    errors = validate_boundary_report(exact, ranges)
+    assert any("not strictly over 300 ms" in error for error in errors)
+
+    stale = json.loads(json.dumps(report))
+    stale["internal_silence_events"][0]["gaps"][0]["gap_ms"] = 999.0
+    for range_data in ranges:
+        range_data["internal_silence_split"]["audit_event"] = stale[
+            "internal_silence_events"
+        ][0]
+    errors = validate_boundary_report(stale, ranges)
+    assert any("derived duration is stale" in error for error in errors)
+
+
+def test_internal_silence_event_duration_accepts_producer_float_projection():
+    words = {
+        "source": [
+            {
+                "text": "fim",
+                "start": 2.0,
+                "end": 2.3796462709189137,
+                "type": "word",
+            },
+            {
+                "text": "segue",
+                "start": 3.2238754962158653,
+                "end": 3.5,
+                "type": "word",
+            },
+        ]
+    }
+
+    expanded, events = split_ranges_on_internal_silence(
+        [{"source": "source", "start": 2.0, "end": 3.5}],
+        words,
+    )
+
+    assert len(expanded) == 2
+    assert len(events) == 1
+    assert events[0]["gaps"][0]["gap_seconds"] == pytest.approx(
+        0.8442292252969515
+    )
+
+
+def test_internal_silence_event_occurrence_survives_duplicate_selections():
+    words = {
+        "source": [
+            {"text": "um", "start": 0.0, "end": 0.1, "type": "word"},
+            {"text": "dois", "start": 0.6, "end": 0.7, "type": "word"},
+        ]
+    }
+    original = {"source": "source", "start": 0.0, "end": 0.8}
+    first, events = split_ranges_on_internal_silence(
+        [dict(original), dict(original)], words
+    )
+    assert len(events) == 2
+    assert [event["occurrence"] for event in events] == [0, 1]
+    assert len({event["event_id"] for event in events}) == 2
+
+    second, second_events = split_ranges_on_internal_silence(first, words)
+    assert second == first
+    assert second_events == events
+
+    third, third_events = split_ranges_on_internal_silence(
+        first + [dict(original)], words
+    )
+    assert len(third) == len(first) + 2
+    assert [event["occurrence"] for event in third_events] == [0, 1, 2]
+    assert len({event["event_id"] for event in third_events}) == 3
+
+
+def test_internal_silence_split_keeps_only_overrides_inside_each_child():
+    words = {
+        "source": [
+            {"text": "um", "start": 0.0, "end": 0.1, "type": "word"},
+            {"text": "dois", "start": 0.5, "end": 0.6, "type": "word"},
+            {"text": "três", "start": 1.0, "end": 1.1, "type": "word"},
+        ]
+    }
+    ranges = [{
+        "source": "source",
+        "start": 0.0,
+        "end": 1.2,
+        "boundary_constraints": {
+            "preserve_internal_silences": [{
+                "left_word_index": 0,
+                "left_word": "um",
+                "right_word_index": 1,
+                "right_word": "dois",
+                "reason": "handoff intencional",
+            }]
+        },
+    }]
+
+    expanded, events = split_ranges_on_internal_silence(ranges, words)
+    rerun, rerun_events = split_ranges_on_internal_silence(expanded, words)
+
+    assert [child["quote"] for child in expanded] == ["um dois", "três"]
+    assert len(expanded[0]["boundary_constraints"]["preserve_internal_silences"]) == 1
+    assert "boundary_constraints" not in expanded[1]
+    assert [gap["preserve_override"] for gap in events[0]["gaps"]] == [True, False]
+    assert rerun == expanded
+    assert rerun_events == events
+    assert all(
+        child["internal_silence_split"]["event_id"] == events[0]["event_id"]
+        and child["internal_silence_split"]["audit_event"] == events[0]
+        for child in expanded
+    )
+
+    changed_reason = json.loads(json.dumps(expanded))
+    changed_reason[0]["boundary_constraints"]["preserve_internal_silences"][0][
+        "reason"
+    ] = "novo motivo"
+    with pytest.raises(ValueError, match="does not match its persisted audit_event"):
+        split_ranges_on_internal_silence(changed_reason, words)
+
+
+def test_boundary_readiness_binds_split_lineage_to_audit_event():
+    words = {
+        "source": [
+            {"text": "um", "start": 0.0, "end": 0.1, "type": "word"},
+            {"text": "dois", "start": 0.6, "end": 0.7, "type": "word"},
+        ]
+    }
+    ranges, events = split_ranges_on_internal_silence(
+        [{"source": "source", "start": 0.0, "end": 0.8}], words
+    )
+    for index, range_data in enumerate(ranges):
+        range_data.update({
+            "source_in_frame": index * 10,
+            "source_out_frame": index * 10 + 5,
+            "lexical_anchors": {
+                "first": {"word_index": index, **words["source"][index]},
+                "last": {"word_index": index, **words["source"][index]},
+            },
+            "review_required": False,
+        })
+    report = {
+        "status": "pass",
+        "boundary_evidence": [
+            {
+                "range_index": index,
+                "source": "source",
+                "final_frames": {
+                    "in": range_data["source_in_frame"],
+                    "out": range_data["source_out_frame"],
+                },
+                "confidence": {"start": "high", "end": "high"},
+            }
+            for index, range_data in enumerate(ranges)
+        ],
+        "confidence_summary": {
+            "high": len(ranges) * 2,
+            "medium": 0,
+            "low": 0,
+        },
+        "internal_silence_events": events,
+        "internal_silence_policy": {
+            "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+            "threshold_ms": 300.0,
+            "comparison": "strictly_greater_than",
+            "detected_gap_count": 1,
+            "split_gap_count": 1,
+            "preserved_gap_count": 0,
+        },
+    }
+    assert validate_boundary_report(report, ranges) == []
+
+    missing_policy = json.loads(json.dumps(report))
+    del missing_policy["internal_silence_policy"]
+    assert any(
+        "internal_silence_policy is required" in error
+        for error in validate_boundary_report(missing_policy, ranges)
+    )
+
+    reordered_ranges = [ranges[1], ranges[0]]
+    reordered_report = json.loads(json.dumps(report))
+    reordered_report["boundary_evidence"] = [
+        {
+            "range_index": index,
+            "source": range_data["source"],
+            "final_frames": {
+                "in": range_data["source_in_frame"],
+                "out": range_data["source_out_frame"],
+            },
+            "confidence": {"start": "high", "end": "high"},
+        }
+        for index, range_data in enumerate(reordered_ranges)
+    ]
+    assert any(
+        "segments are reordered" in error
+        for error in validate_boundary_report(reordered_report, reordered_ranges)
+    )
+
+    forged = json.loads(json.dumps(report))
+    forged["internal_silence_events"][0]["event_id"] = "forged"
+    errors = validate_boundary_report(forged, ranges)
+    assert any("absent from report" in error for error in errors)
+
+
+def test_boundary_readiness_binds_one_frame_tail_to_acoustic_evidence():
+    constraint = {
+        "reason": "disconnected_post_word_activity",
+        "required_tail_frames": 2,
+        "available_tail_frames": 1,
+        "activity_start": 1.0,
+        "activity_end": 1.1,
+        "signals": ["raw"],
+    }
+    ranges = [{
+        "source": "source",
+        "source_in_frame": 0,
+        "source_out_frame": 30,
+        "boundary_constraints": {"end": constraint},
+        "review_required": False,
+    }]
+    report = {
+        "status": "pass",
+        "boundary_evidence": [{
+            "range_index": 0,
+            "source": "source",
+            "final_frames": {"in": 0, "out": 30},
+            "confidence": {"start": "high", "end": "high"},
+            "tail_frames": 1,
+            "end_side": {
+                "tail_guard_frames": 1,
+                "boundary_constraint": constraint,
+            },
+        }],
+        "confidence_summary": {"high": 2, "medium": 0, "low": 0},
+    }
+    assert validate_boundary_report(report, ranges) == []
+
+    forged = json.loads(json.dumps(report))
+    forged["boundary_evidence"][0]["tail_frames"] = 2
+    errors = validate_boundary_report(forged, ranges)
+    assert any("one-frame tail exception" in error for error in errors)
+
+
+def test_internal_silence_split_requires_precise_reasoned_override():
+    words = {
+        "source": [
+            {"text": "respira", "start": 0.1, "end": 0.2, "type": "word"},
+            {"text": "continua", "start": 0.8, "end": 1.0, "type": "word"},
+        ]
+    }
+    preserved = [{
+        "source": "source",
+        "start": 0.0,
+        "end": 1.1,
+        "boundary_constraints": {
+            "preserve_internal_silences": [{
+                "left_word_index": 0,
+                "left_word": "respira",
+                "right_word_index": 1,
+                "right_word": "continua",
+                "reason": "pausa narrativa intencional",
+            }]
+        },
+    }]
+
+    expanded, events = split_ranges_on_internal_silence(preserved, words)
+    rerun, rerun_events = split_ranges_on_internal_silence(expanded, words)
+
+    assert len(expanded) == 1
+    assert expanded[0] != preserved[0]
+    assert expanded[0]["internal_silence_split"]["segment_count"] == 1
+    assert expanded[0]["internal_silence_split"]["audit_event"] == events[0]
+    assert events[0]["action"] == "preserved_by_explicit_overrides"
+    assert events[0]["gaps"][0]["preserve_override"] is True
+    assert rerun == expanded
+    assert rerun_events == events
+
+    audited_range = json.loads(json.dumps(expanded[0]))
+    audited_range.update({
+        "source_in_frame": 0,
+        "source_out_frame": 30,
+        "lexical_anchors": {
+            "first": {"word_index": 0, **words["source"][0]},
+            "last": {"word_index": 1, **words["source"][1]},
+        },
+        "review_required": False,
+    })
+    boundary_report = {
+        "status": "pass",
+        "boundary_evidence": [{
+            "range_index": 0,
+            "source": "source",
+            "final_frames": {"in": 0, "out": 30},
+            "confidence": {"start": "high", "end": "high"},
+        }],
+        "confidence_summary": {"high": 2, "medium": 0, "low": 0},
+        "internal_silence_events": events,
+        "internal_silence_policy": {
+            "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+            "threshold_ms": 300.0,
+            "comparison": "strictly_greater_than",
+            "detected_gap_count": 1,
+            "split_gap_count": 0,
+            "preserved_gap_count": 1,
+        },
+    }
+    assert validate_boundary_report(boundary_report, [audited_range]) == []
+    audited_range["boundary_constraints"]["preserve_internal_silences"][0][
+        "reason"
+    ] = "motivo adulterado"
+    assert any(
+        "preserved overrides are stale" in error
+        for error in validate_boundary_report(boundary_report, [audited_range])
+    )
+
+    invalid = [dict(preserved[0])]
+    invalid[0]["boundary_constraints"] = {"preserve_internal_silence": True}
+    with pytest.raises(ValueError, match="unsafe wildcard"):
+        split_ranges_on_internal_silence(invalid, words)
+
+
+def test_tail_crossing_ignores_disconnected_post_word_breath():
+    activity = np.zeros(200, dtype=bool)
+    activity[40:90] = True   # selected word component: 0.20-0.45s
+    activity[100:120] = True  # disconnected breath: 0.50-0.60s
+
+    assert is_connected_crossing(activity, 0.55) is True
+    assert is_anchor_connected_crossing(activity, 0.55, 0.20, 0.40) is False
+    assert is_anchor_connected_crossing(activity, 0.30, 0.20, 0.40) is True
+    assert first_disconnected_component_before(
+        activity, 0.20, 0.40, 0.55
+    ) == pytest.approx((0.50, 0.60))
 
 
 @pytest.fixture

@@ -43,6 +43,44 @@ def two_frame_sample_count(
     )
 
 
+def tail_requirement_frames(range_map: dict) -> int:
+    """Return the audited tail requirement for one refined range."""
+    constraints = range_map.get("boundary_constraints")
+    end_constraint = constraints.get("end") if isinstance(constraints, dict) else None
+    if (
+        isinstance(end_constraint, dict)
+        and end_constraint.get("reason") == "disconnected_post_word_activity"
+        and type(end_constraint.get("required_tail_frames")) is int
+        and end_constraint.get("required_tail_frames") == 2
+        and type(end_constraint.get("available_tail_frames")) is int
+        and end_constraint.get("available_tail_frames") == 1
+    ):
+        return 1
+    return 2
+
+
+def tail_sample_count(
+    fps_value: object,
+    end_frame: int,
+    frame_count: int,
+    sample_rate: int = 48000,
+) -> int:
+    if (
+        not isinstance(end_frame, int)
+        or isinstance(end_frame, bool)
+        or not isinstance(frame_count, int)
+        or isinstance(frame_count, bool)
+        or frame_count < 1
+        or end_frame < frame_count
+    ):
+        raise ValueError("tail frame interval is invalid")
+    fps = parse_fps_fraction(fps_value)
+    return (
+        frame_to_sample(end_frame, fps, sample_rate)
+        - frame_to_sample(end_frame - frame_count, fps, sample_rate)
+    )
+
+
 def compute_sha256(path: Path) -> str:
     """Compute the SHA-256 hash of a file."""
     if not path.exists():
@@ -259,6 +297,7 @@ def main() -> None:
     tail_window_start = None
     tail_window_end = None
     tail_coverage_ok = False
+    final_tail_requirement_frames = 2
     tail_rms_by_channel = [-100.0] * channel_samples.shape[1]
 
     if ranges:
@@ -275,10 +314,12 @@ def main() -> None:
         ):
             source_in_frame, source_out_frame = source_frames
             output_start, output_end = output_interval
-            if source_out_frame - source_in_frame >= 2:
-                tail_size = two_frame_sample_count(
+            final_tail_requirement_frames = tail_requirement_frames(last_range)
+            if source_out_frame - source_in_frame >= final_tail_requirement_frames:
+                tail_size = tail_sample_count(
                     fps_val,
-                    end_frame=source_out_frame,
+                    source_out_frame,
+                    final_tail_requirement_frames,
                 )
                 tail_window_start = output_end - tail_size
                 tail_window_end = output_end
@@ -295,8 +336,8 @@ def main() -> None:
             for channel_index in range(channel_samples.shape[1])
         ]
 
-    # A tail passes only when the complete two-frame interval is available and
-    # every preserved output channel is below the silence threshold.
+    # A tail passes only when its complete audited frame interval is available
+    # and every preserved output channel is below the silence threshold.
     tail_rms = max(tail_rms_by_channel, default=-100.0)
     two_frame_tail_ok = tail_coverage_ok and tail_rms < -60.0
 
@@ -413,9 +454,10 @@ def main() -> None:
                 float(20.0 * np.log10(peak / 32768.0)) if peak > 0 else -100.0
             )
 
+        required_tail_frames = tail_requirement_frames(range_map)
         range_tail_size = (
-            two_frame_sample_count(fps, end_frame=source_out_frame)
-            if source_out_frame >= 2
+            tail_sample_count(fps, source_out_frame, required_tail_frames)
+            if source_out_frame >= required_tail_frames
             else 0
         )
         range_tail_coverage_ok = range_tail_size > 0 and len(segment) >= range_tail_size
@@ -468,6 +510,7 @@ def main() -> None:
             "peak_dbfs_by_channel": peak_dbfs_by_channel,
             "rms_dbfs_by_channel": rms_dbfs_by_channel,
             "two_frame_tail_required_samples": range_tail_size,
+            "tail_requirement_frames": required_tail_frames,
             "two_frame_tail_coverage_ok": range_tail_coverage_ok,
             "two_frame_tail_rms_db": range_tail_rms,
             "two_frame_tail_rms_db_by_channel": range_tail_rms_by_channel,
@@ -620,6 +663,7 @@ def main() -> None:
         "two_frame_tail_ok": two_frame_tail_ok,
         "two_frame_tail_coverage_ok": tail_coverage_ok,
         "two_frame_tail_required_samples": tail_size,
+        "tail_requirement_frames": final_tail_requirement_frames,
         "two_frame_tail_window": [tail_window_start, tail_window_end],
         "tail_rms_db": tail_rms,
         "tail_rms_db_by_channel": tail_rms_by_channel,

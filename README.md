@@ -15,7 +15,7 @@ The agent instructions use a capability-routed dual protocol. Capable agents rea
 - **Infers the video type and rough-cut structure** from the transcript before editing, instead of assuming a fixed format.
 - **Transcribes locally on NVIDIA CUDA** with faster-whisper `large-v3`, WhisperX forced word alignment, and Pyannote Community-1 exclusive speaker diarization.
 - **Compares repeated takes by meaning and delivery**, choosing the best version of each narrative beat.
-- **Snaps cuts to word boundaries** and silence gaps using sub-second ASR timestamps.
+- **Turns every internal lexical gap strictly above 300ms into a jump cut**, with exact 300ms retention and narrow reasoned overrides for intentional pauses.
 - **Validates tight cuts against waveform energy**, so ASR timestamp drift does not become the only boundary signal.
 - **Uses lightweight preview renders for QA**, including render-level cut checks before exporting XML.
 - **Always persists a timed preview-audio transcript bound to the WAV hash**, then validates every join for repeated, clipped, orphaned, crossed, or semantically wrong content.
@@ -79,10 +79,10 @@ After running `init`:
 The agent uses an audio-only evidence stack for word-boundary precision:
 
 1. **Source transcripts**: a shared Python 3.12 runtime runs faster-whisper `large-v3` on CUDA, WhisperX forced alignment, and `pyannote/speaker-diarization-community-1`. A pinned, windowed `small` verifier may recover recording cues only after two-window consensus; ordinary verifier text is never copied. Canonical schema-v1 transcripts require a positive aligned interval and speaker on every word. A transcript with only auditable unattributed acoustic components is cached provisionally until the EDL interval audit; selected short inter-word residuals must also be cleared by the independent preview transcription. Packed takes remain the model's primary editorial reading view.
-2. **Exact boundary refinement**: `refine_edl_boundaries.py` combines lexical anchors, raw max-per-channel waveform evidence, and RNNoise to write exact `source_in_frame` / `source_out_frame` values and a hash-bound report.
+2. **Exact boundary refinement**: `refine_edl_boundaries.py` first splits every canonical consecutive-word gap strictly above 300ms, then combines lexical anchors, raw max-per-channel waveform evidence, and RNNoise to write exact `source_in_frame` / `source_out_frame` values and a hash-bound report.
 3. **Dry preview and audio QC**: `render.py` creates PCM16/48 kHz stereo `preview.wav` plus `preview_timeline.json`; `preview_audio_qc.py` validates every entry/join for inactivity, attack/tail safety, residual activity, clipping, and pops.
 4. **Content coverage**: `semantic_qc.py` validates `metadata.required_beats` against words actually selected from source transcripts.
-5. **Join transcript QC**: the preview is always re-transcribed by the same local aligned/diarized stack and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join and uses global similarity/recall only as supplemental evidence.
+5. **Join transcript QC**: the preview is always re-transcribed by the same local aligned/diarized stack and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join, audits the fixed internal-silence contract, and uses global similarity/recall only as supplemental evidence.
 6. **Readiness and XML**: `verify_edit_ready.py` must return exit code 0 for the exact current artifacts before the agent calls `edl_to_fcpxml.py`.
 
 `timeline_view.py` and `validate_edl_boundaries.py` are legacy manual diagnostics outside the agent workflow and are scheduled for removal in v0.5.0.
@@ -113,6 +113,7 @@ The protocols differ only in context strategy. Core invariants, workflow, step m
 - Support for `source_in_frame` / `source_out_frame` mapping inside EDL ranges and XML conversion for precise cut alignment.
 - Switched workflow to be audio-only (`preview.wav` and `preview_timeline.json`), rejecting `.mp4` visual renders.
 - Made boundary refinement, audio QC, required-beat QC, persisted preview transcription, and join-centric transcript QC mandatory and hash-bound.
+- Made every internal lexical gap strictly above 300ms an automatic, readiness-enforced jump cut.
 - Marked `timeline_view.py` as legacy, scheduled for removal in v0.5.0.
 
 ## What shipped in v0.3.0

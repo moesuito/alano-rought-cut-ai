@@ -22,8 +22,8 @@ RULES:
   - Start/end times must fall on word boundaries from the transcript.
   - If cutting inside a phrase, inspect canonical WhisperX JSON and snap to exact forced-alignment timestamps.
   - Pad cut boundaries within the 30-200ms working window.
-  - Prefer silences >= 400ms as cut targets.
-  - 150-400ms phrase boundaries are usable with care and visual/audio inspection.
+  - Every lexical gap strictly greater than 300ms inside one selected range will be split automatically into a jump cut. Exactly 300ms is retained; there is no warning band.
+  - If a pause above 300ms is intentionally essential, emit an exact per-gap `boundary_constraints.preserve_internal_silences` entry with both canonical consecutive word indices/text and a non-empty editorial reason. Never use a wildcard override.
   - Gaps <150ms are unsafe unless there is a strong editorial reason.
   - Identify retakes by meaning, not exact wording. Speakers often repeat ideas with different phrasing.
   - The latest take is often, but not always, the best. Compare clarity, confidence, concision, energy, and continuity.

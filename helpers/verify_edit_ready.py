@@ -17,13 +17,32 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helpers.timing import frame_to_sample, parse_fps_fraction
+from helpers.internal_silence import (
+    INTERNAL_SILENCE_SPLIT_POLICY,
+    INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
+    compute_internal_silence_event_id,
+    evaluate_internal_silence_contract,
+)
+from helpers.preview_audio_qc import tail_requirement_frames, tail_sample_count
+from helpers.preview_transcript_qc import (
+    DEFAULT_CUE_TERMS,
+    align_token_records,
+    build_report,
+    duplicate_insertion_spans,
+    duplicate_token_excess,
+    normalize_text,
+    token_ratio,
+    tokenize,
+)
 from helpers.transcription_contract import (
     TranscriptContractError,
     validate_normative_transcript,
@@ -45,12 +64,49 @@ def get_mtime(path: Path) -> float:
     return path.stat().st_mtime
 
 
-import math
-
-
 KNOWN_STATUSES = {"pass", "warning", "review", "fail", "error"}
 STATUS_SEVERITY = {"pass": 0, "warning": 1, "review": 2, "fail": 3, "error": 3}
 BOUNDARY_CONFIDENCES = {"high", "medium", "low"}
+
+
+def _is_plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _mapped_tail_expectation(
+    map_range: dict[str, object],
+    fps_value: object,
+    total_samples: int,
+) -> dict[str, object]:
+    """Derive an exact endpoint-relative tail solely from the timeline map."""
+    source_frames = map_range.get("source_frames")
+    cumulative = map_range.get("output_cumulative_sample_interval")
+    if (
+        not isinstance(source_frames, list)
+        or len(source_frames) != 2
+        or not all(_is_plain_int(value) for value in source_frames)
+        or not isinstance(cumulative, list)
+        or len(cumulative) != 2
+        or not all(_is_plain_int(value) for value in cumulative)
+    ):
+        raise ValueError("timeline map tail intervals are invalid")
+
+    source_in, source_out = source_frames
+    cumulative_in, cumulative_out = cumulative
+    frame_count = tail_requirement_frames(map_range)
+    required_samples = tail_sample_count(fps_value, source_out, frame_count)
+    window = [cumulative_out - required_samples, cumulative_out]
+    coverage = (
+        source_out - source_in >= frame_count
+        and window[0] >= cumulative_in
+        and cumulative_out <= total_samples
+    )
+    return {
+        "frames": frame_count,
+        "samples": required_samples,
+        "window": window,
+        "coverage": coverage,
+    }
 
 
 def validate_boundary_report(
@@ -108,6 +164,35 @@ def validate_boundary_report(
         ):
             errors.append(f"boundary_evidence[{position}] final_frames do not match EDL range {range_index}")
 
+        constraints = edl_range.get("boundary_constraints") or {}
+        end_constraint = constraints.get("end") if isinstance(constraints, dict) else None
+        end_side = item.get("end_side")
+        reported_constraint = (
+            end_side.get("boundary_constraint")
+            if isinstance(end_side, dict)
+            else None
+        )
+        if end_constraint is not None and reported_constraint != end_constraint:
+            errors.append(
+                f"boundary_evidence[{position}] end constraint does not match EDL range {range_index}"
+            )
+        one_frame_exception = (
+            isinstance(end_constraint, dict)
+            and end_constraint.get("reason") == "disconnected_post_word_activity"
+            and type(end_constraint.get("required_tail_frames")) is int
+            and end_constraint.get("required_tail_frames") == 2
+            and type(end_constraint.get("available_tail_frames")) is int
+            and end_constraint.get("available_tail_frames") == 1
+        )
+        if one_frame_exception and (
+            item.get("tail_frames") != 1
+            or not isinstance(end_side, dict)
+            or end_side.get("tail_guard_frames") != 1
+        ):
+            errors.append(
+                f"boundary_evidence[{position}] one-frame tail exception lacks exact acoustic evidence"
+            )
+
         confidence = item.get("confidence")
         if not isinstance(confidence, dict):
             errors.append(f"boundary_evidence[{position}] confidence is invalid")
@@ -136,6 +221,282 @@ def validate_boundary_report(
                 f"confidence_summary.{confidence_name}={reported_count!r}, expected {expected_count}"
             )
 
+    lineages_by_event: dict[str, list[tuple[int, dict[str, object]]]] = {}
+    for range_index, edl_range in enumerate(edl_ranges):
+        lineage = edl_range.get("internal_silence_split")
+        if lineage is None:
+            continue
+        if not isinstance(lineage, dict):
+            errors.append(f"EDL range {range_index} internal_silence_split is invalid")
+            continue
+        event_id = lineage.get("event_id")
+        segment_index = lineage.get("segment_index")
+        segment_count = lineage.get("segment_count")
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or lineage.get("policy") != INTERNAL_SILENCE_SPLIT_POLICY
+            or not _is_plain_int(segment_index)
+            or not _is_plain_int(segment_count)
+            or segment_index < 0
+            or segment_count < 1
+            or segment_index >= segment_count
+        ):
+            errors.append(f"EDL range {range_index} internal-silence lineage is invalid")
+            continue
+        audit_event = lineage.get("audit_event")
+        if not isinstance(audit_event, dict) or audit_event.get("event_id") != event_id:
+            errors.append(
+                f"EDL range {range_index} internal-silence lineage lacks a bound audit snapshot"
+            )
+            continue
+        if audit_event.get("source") != edl_range.get("source"):
+            errors.append(
+                f"EDL range {range_index} internal-silence audit source is stale"
+            )
+        selection = audit_event.get("original_selection")
+        try:
+            selection_start = float(selection["start"])
+            selection_end = float(selection["end"])
+            child_start = float(edl_range.get("original_start", edl_range["start"]))
+            child_end = float(edl_range.get("original_end", edl_range["end"]))
+            if (
+                not all(
+                    math.isfinite(value)
+                    for value in (selection_start, selection_end, child_start, child_end)
+                )
+                or selection_start > child_start + 1e-6
+                or child_end > selection_end + 1e-6
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            errors.append(
+                f"EDL range {range_index} is not contained by its internal-silence selection"
+            )
+        lineages_by_event.setdefault(event_id, []).append((range_index, lineage))
+
+    report_events = boundary_data.get("internal_silence_events")
+    if report_events is None:
+        report_events = []
+    if not isinstance(report_events, list):
+        errors.append("internal_silence_events is not a list")
+        report_events = []
+    events_by_id: dict[str, dict[str, object]] = {}
+    for event_index, event in enumerate(report_events):
+        if not isinstance(event, dict):
+            errors.append(f"internal_silence_events[{event_index}] is invalid")
+            continue
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id or event_id in events_by_id:
+            errors.append(
+                f"internal_silence_events[{event_index}] has invalid/duplicate event_id"
+            )
+            continue
+        if (
+            not isinstance(event.get("source"), str)
+            or event.get("action") not in {"split", "preserved_by_explicit_overrides"}
+            or not isinstance(event.get("gaps"), list)
+            or event.get("threshold_ms") != 300.0
+            or event.get("comparison") != "strictly_greater_than"
+            or not _is_plain_int(event.get("occurrence"))
+        ):
+            errors.append(f"internal_silence_events[{event_index}] is incomplete")
+        else:
+            try:
+                recomputed_id = compute_internal_silence_event_id(
+                    event["source"],
+                    event.get("original_selection"),
+                    event["gaps"],
+                    event["occurrence"],
+                )
+                if recomputed_id != event_id:
+                    errors.append(
+                        f"internal_silence_events[{event_index}] event_id is not reproducible"
+                    )
+            except ValueError as exc:
+                errors.append(
+                    f"internal_silence_events[{event_index}] identity is invalid: {exc}"
+                )
+        events_by_id[event_id] = event
+
+    for event_id, indexed_lineages in lineages_by_event.items():
+        report_event = events_by_id.get(event_id)
+        if report_event is None:
+            errors.append(f"internal-silence lineage event {event_id} is absent from report")
+            continue
+        lineages = [lineage for _, lineage in indexed_lineages]
+        segment_counts = {lineage.get("segment_count") for lineage in lineages}
+        segment_indices = {lineage.get("segment_index") for lineage in lineages}
+        split_gaps = [
+            gap
+            for gap in report_event.get("gaps", [])
+            if isinstance(gap, dict) and gap.get("preserve_override") is not True
+        ]
+        expected_segment_count = len(split_gaps) + 1
+        expected_action = (
+            "split" if split_gaps else "preserved_by_explicit_overrides"
+        )
+        if (
+            len(segment_counts) != 1
+            or next(iter(segment_counts)) != expected_segment_count
+            or len(lineages) != expected_segment_count
+            or segment_indices != set(range(expected_segment_count))
+            or report_event.get("action") != expected_action
+        ):
+            errors.append(f"internal-silence lineage event {event_id} has incomplete segments")
+        ordered_by_edl = sorted(indexed_lineages, key=lambda item: item[0])
+        edl_positions = [range_index for range_index, _ in ordered_by_edl]
+        edl_segment_indices = [
+            lineage.get("segment_index") for _, lineage in ordered_by_edl
+        ]
+        if (
+            edl_positions
+            and (
+                edl_positions != list(
+                    range(edl_positions[0], edl_positions[0] + len(edl_positions))
+                )
+                or edl_segment_indices != list(range(expected_segment_count))
+            )
+        ):
+            errors.append(
+                f"internal-silence lineage event {event_id} segments are reordered in the EDL"
+            )
+        for range_index, lineage in indexed_lineages:
+            audit_event = lineage.get("audit_event")
+            if audit_event != report_event:
+                errors.append(
+                    f"internal-silence lineage event {event_id} audit snapshot is stale"
+                )
+
+        preserved_gaps = [
+            gap
+            for gap in report_event.get("gaps", [])
+            if isinstance(gap, dict) and gap.get("preserve_override") is True
+        ]
+        for range_index, lineage in indexed_lineages:
+            edl_range = edl_ranges[range_index]
+            anchors = edl_range.get("lexical_anchors")
+            first_anchor = anchors.get("first") if isinstance(anchors, dict) else None
+            last_anchor = anchors.get("last") if isinstance(anchors, dict) else None
+            if not isinstance(first_anchor, dict) or not isinstance(last_anchor, dict):
+                if preserved_gaps:
+                    errors.append(
+                        f"internal-silence lineage event {event_id} lacks lexical anchors"
+                    )
+                continue
+            first_word_index = first_anchor.get("word_index")
+            last_word_index = last_anchor.get("word_index")
+            if not _is_plain_int(first_word_index) or not _is_plain_int(last_word_index):
+                errors.append(
+                    f"internal-silence lineage event {event_id} anchor indices are invalid"
+                )
+                continue
+            expected_overrides = [
+                {
+                    "left_word_index": gap["left_word_index"],
+                    "left_word": gap["left_word"],
+                    "right_word_index": gap["right_word_index"],
+                    "right_word": gap["right_word"],
+                    "reason": gap["override_reason"],
+                }
+                for gap in preserved_gaps
+                if first_word_index <= gap.get("left_word_index", -1)
+                and gap.get("right_word_index", -1) <= last_word_index
+            ]
+            constraints = edl_range.get("boundary_constraints") or {}
+            reported_overrides = (
+                constraints.get("preserve_internal_silences", [])
+                if isinstance(constraints, dict)
+                else None
+            )
+            if reported_overrides != expected_overrides:
+                errors.append(
+                    f"internal-silence lineage event {event_id} preserved overrides are stale"
+                )
+
+        if report_event.get("action") == "preserved_by_explicit_overrides":
+            range_index = indexed_lineages[0][0]
+            edl_range = edl_ranges[range_index]
+            selection = report_event.get("original_selection", {})
+            try:
+                if (
+                    abs(float(edl_range.get("original_start", edl_range["start"])) - float(selection["start"])) > 1e-6
+                    or abs(float(edl_range.get("original_end", edl_range["end"])) - float(selection["end"])) > 1e-6
+                ):
+                    errors.append(
+                        f"preserved internal-silence event {event_id} selection is stale"
+                    )
+            except (KeyError, TypeError, ValueError):
+                errors.append(
+                    f"preserved internal-silence event {event_id} selection is invalid"
+                )
+        elif len(indexed_lineages) == expected_segment_count:
+            ordered = sorted(
+                indexed_lineages, key=lambda item: item[1]["segment_index"]
+            )
+            for gap_index, gap in enumerate(split_gaps):
+                left_range = edl_ranges[ordered[gap_index][0]]
+                right_range = edl_ranges[ordered[gap_index + 1][0]]
+                left_anchors = left_range.get("lexical_anchors")
+                right_anchors = right_range.get("lexical_anchors")
+                left_anchor = (
+                    left_anchors.get("last") if isinstance(left_anchors, dict) else None
+                )
+                right_anchor = (
+                    right_anchors.get("first") if isinstance(right_anchors, dict) else None
+                )
+                try:
+                    linked = (
+                        isinstance(left_anchor, dict)
+                        and isinstance(right_anchor, dict)
+                        and left_anchor.get("word_index") == gap.get("left_word_index")
+                        and right_anchor.get("word_index") == gap.get("right_word_index")
+                        and normalize_text(str(left_anchor.get("text") or ""))
+                        == normalize_text(str(gap.get("left_word") or ""))
+                        and normalize_text(str(right_anchor.get("text") or ""))
+                        == normalize_text(str(gap.get("right_word") or ""))
+                        and abs(float(left_anchor["end"]) - float(gap["left_word_end"])) <= 1e-6
+                        and abs(float(right_anchor["start"]) - float(gap["right_word_start"])) <= 1e-6
+                    )
+                except (KeyError, TypeError, ValueError):
+                    linked = False
+                if not linked:
+                    errors.append(
+                        f"internal-silence event {event_id} gap {gap_index} is not linked to EDL anchors"
+                    )
+
+    for event_id, event in events_by_id.items():
+        if event_id not in lineages_by_event:
+            errors.append(f"internal-silence event {event_id} has no EDL lineage")
+
+    policy = boundary_data.get("internal_silence_policy")
+    if events_by_id and policy is None:
+        errors.append("internal_silence_policy is required when events exist")
+    if policy is not None:
+        if not isinstance(policy, dict):
+            errors.append("internal_silence_policy is invalid")
+        else:
+            detected_count = sum(
+                len(event.get("gaps", []))
+                for event in events_by_id.values()
+                if isinstance(event.get("gaps"), list)
+            )
+            split_count = sum(
+                sum(gap.get("preserve_override") is not True for gap in event.get("gaps", []))
+                for event in events_by_id.values()
+                if isinstance(event.get("gaps"), list)
+            )
+            preserved_count = detected_count - split_count
+            if (
+                policy.get("policy") != INTERNAL_SILENCE_SPLIT_POLICY
+                or policy.get("threshold_ms") != 300.0
+                or policy.get("comparison") != "strictly_greater_than"
+                or policy.get("detected_gap_count") != detected_count
+                or policy.get("split_gap_count") != split_count
+                or policy.get("preserved_gap_count") != preserved_count
+            ):
+                errors.append("internal_silence_policy summary contradicts event evidence")
+
     status = boundary_data.get("status")
     if status not in KNOWN_STATUSES:
         errors.append("status is missing or unknown")
@@ -151,6 +512,7 @@ def validate_boundary_report(
 def validate_audio_report(
     audio_data: object,
     map_ranges: list[dict[str, object]] | None = None,
+    fps_value: object | None = None,
 ) -> list[str]:
     """Return structural/consistency errors for mandatory preview audio gates."""
     errors: list[str] = []
@@ -176,6 +538,7 @@ def validate_audio_report(
         "channels",
         "sample_width",
         "two_frame_tail_required_samples",
+        "tail_requirement_frames",
         "clipping_events_count",
         "range_review_count",
         "severe_pops_count",
@@ -192,6 +555,32 @@ def validate_audio_report(
     )
     if audio_data.get("wav_format_ok") is not expected_wav_format_ok:
         errors.append("wav_format_ok contradicts sample_rate/channels/sample_width evidence")
+
+    parsed_fps = None
+    if map_ranges is not None:
+        try:
+            parsed_fps = parse_fps_fraction(fps_value)
+        except Exception as exc:
+            errors.append(f"cannot derive mapped audio tails without valid FPS: {exc}")
+
+    total_samples = audio_data.get("total_samples")
+    expected_samples = audio_data.get("expected_samples")
+    mapped_total_samples = None
+    if map_ranges is not None:
+        if map_ranges:
+            final_interval = map_ranges[-1].get("output_cumulative_sample_interval")
+            if (
+                isinstance(final_interval, list)
+                and len(final_interval) == 2
+                and all(_is_plain_int(value) for value in final_interval)
+            ):
+                mapped_total_samples = final_interval[1]
+            else:
+                errors.append("final timeline map cumulative interval is invalid")
+        else:
+            mapped_total_samples = 0
+        if expected_samples != mapped_total_samples:
+            errors.append("expected_samples does not match the timeline map endpoint")
 
     joins = audio_data.get("joins")
     if not isinstance(joins, list):
@@ -260,11 +649,115 @@ def validate_audio_report(
                 errors.append(f"range_entries[{position}] status contradicts blocking_flags")
             if entry_status == "review":
                 observed_range_reviews += 1
+
+            mapped_expectation = None
+            if (
+                map_ranges is not None
+                and position < len(map_ranges)
+                and parsed_fps is not None
+                and _is_plain_int(total_samples)
+            ):
+                expected_range = map_ranges[position]
+                try:
+                    mapped_expectation = _mapped_tail_expectation(
+                        expected_range, parsed_fps, total_samples
+                    )
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        f"range_entries[{position}] mapped tail cannot be derived: {exc}"
+                    )
+                expected_interval = expected_range.get(
+                    "output_cumulative_sample_interval"
+                )
+                if entry.get("output_sample_interval") != expected_interval:
+                    errors.append(
+                        f"range_entries[{position}] output interval does not match timeline map"
+                    )
+
+            if mapped_expectation is not None:
+                if entry.get("tail_requirement_frames") != mapped_expectation["frames"]:
+                    errors.append(
+                        f"range_entries[{position}] tail frame requirement does not match mapped constraints"
+                    )
+                if (
+                    entry.get("two_frame_tail_required_samples")
+                    != mapped_expectation["samples"]
+                ):
+                    errors.append(
+                        f"range_entries[{position}] tail sample requirement does not match mapped FPS"
+                    )
+                if (
+                    entry.get("two_frame_tail_coverage_ok")
+                    is not mapped_expectation["coverage"]
+                ):
+                    errors.append(
+                        f"range_entries[{position}] tail coverage contradicts mapped evidence"
+                    )
+
+                entry_rms = entry.get("two_frame_tail_rms_db")
+                entry_rms_by_channel = entry.get("two_frame_tail_rms_db_by_channel")
+                entry_threshold = entry.get("two_frame_tail_threshold_dbfs")
+                activity_threshold = entry.get("activity_threshold_dbfs")
+                activity_threshold_valid = (
+                    isinstance(activity_threshold, (int, float))
+                    and not isinstance(activity_threshold, bool)
+                    and math.isfinite(float(activity_threshold))
+                )
+                expected_entry_threshold = (
+                    max(-60.0, min(-50.0, float(activity_threshold)))
+                    if activity_threshold_valid
+                    else None
+                )
+                if (
+                    expected_entry_threshold is None
+                    or entry_threshold != expected_entry_threshold
+                ):
+                    errors.append(
+                        f"range_entries[{position}] tail threshold contradicts activity evidence"
+                    )
+                entry_rms_valid = (
+                    isinstance(entry_rms, (int, float))
+                    and not isinstance(entry_rms, bool)
+                    and math.isfinite(float(entry_rms))
+                    and isinstance(entry_rms_by_channel, list)
+                    and len(entry_rms_by_channel) == audio_data.get("channels")
+                    and len(entry_rms_by_channel) > 0
+                    and all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(float(value))
+                        for value in entry_rms_by_channel
+                    )
+                    and isinstance(entry_threshold, (int, float))
+                    and not isinstance(entry_threshold, bool)
+                    and math.isfinite(float(entry_threshold))
+                    and -60.0 <= float(entry_threshold) <= -50.0
+                )
+                if not entry_rms_valid:
+                    errors.append(f"range_entries[{position}] tail RMS evidence is invalid")
+                else:
+                    worst_entry_rms = max(float(value) for value in entry_rms_by_channel)
+                    if abs(float(entry_rms) - worst_entry_rms) > 1e-6:
+                        errors.append(
+                            f"range_entries[{position}] tail RMS does not equal its worst channel"
+                        )
+                    expected_left_tail_ok = bool(
+                        mapped_expectation["coverage"]
+                        and expected_entry_threshold is not None
+                        and worst_entry_rms < expected_entry_threshold
+                    )
+                    if entry.get("left_tail_ok") is not expected_left_tail_ok:
+                        errors.append(
+                            f"range_entries[{position}] left_tail_ok contradicts mapped/RMS evidence"
+                        )
+                    has_tail_flag = "active_or_uncovered_two_frame_tail" in flags
+                    if has_tail_flag is expected_left_tail_ok:
+                        errors.append(
+                            f"range_entries[{position}] tail blocker contradicts mapped/RMS evidence"
+                        )
         if audio_data.get("range_review_count") != observed_range_reviews:
             errors.append("range_review_count does not match range entry evidence")
 
-    total_samples = audio_data.get("total_samples")
-    expected_samples = audio_data.get("expected_samples")
     if (
         isinstance(total_samples, int)
         and not isinstance(total_samples, bool)
@@ -276,25 +769,31 @@ def validate_audio_report(
         if audio_data.get("sample_count_parity_ok") is not expected_parity_ok:
             errors.append("sample_count_parity_ok contradicts total/expected sample evidence")
 
-    tail_window = audio_data.get("two_frame_tail_window")
-    tail_required = audio_data.get("two_frame_tail_required_samples")
-    tail_window_valid = (
-        isinstance(tail_window, list)
-        and len(tail_window) == 2
-        and all(isinstance(value, int) and not isinstance(value, bool) for value in tail_window)
-        and tail_window[0] >= 0
-        and tail_window[1] > tail_window[0]
-        and isinstance(tail_required, int)
-        and not isinstance(tail_required, bool)
-        and tail_required > 0
-        and tail_window[1] - tail_window[0] == tail_required
-        and isinstance(total_samples, int)
-        and not isinstance(total_samples, bool)
-        and isinstance(expected_samples, int)
-        and not isinstance(expected_samples, bool)
-        and tail_window[1] == expected_samples
-        and tail_window[1] <= total_samples
-    )
+    mapped_final_tail = None
+    if (
+        map_ranges
+        and parsed_fps is not None
+        and _is_plain_int(total_samples)
+    ):
+        try:
+            mapped_final_tail = _mapped_tail_expectation(
+                map_ranges[-1], parsed_fps, total_samples
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"global mapped tail cannot be derived: {exc}")
+
+    tail_window_valid = False
+    if mapped_final_tail is not None:
+        if audio_data.get("tail_requirement_frames") != mapped_final_tail["frames"]:
+            errors.append("tail_requirement_frames does not match mapped constraints")
+        if (
+            audio_data.get("two_frame_tail_required_samples")
+            != mapped_final_tail["samples"]
+        ):
+            errors.append("two_frame_tail_required_samples does not match mapped FPS")
+        if audio_data.get("two_frame_tail_window") != mapped_final_tail["window"]:
+            errors.append("two_frame_tail_window does not match mapped endpoint")
+        tail_window_valid = bool(mapped_final_tail["coverage"])
     if audio_data.get("two_frame_tail_coverage_ok") is not tail_window_valid:
         errors.append("two_frame_tail_coverage_ok contradicts mapped tail window evidence")
 
@@ -358,11 +857,262 @@ def validate_audio_report(
     return errors
 
 
+def _canonical_source_words(
+    transcript: dict[str, object], source_id: str
+) -> list[dict[str, object]]:
+    raw_words = transcript.get("words")
+    if not isinstance(raw_words, list):
+        raise ValueError(f"source transcript {source_id!r} words are invalid")
+    words = [
+        dict(word)
+        for word in raw_words
+        if isinstance(word, dict) and word.get("type") == "word"
+    ]
+    try:
+        words.sort(key=lambda word: (float(word["start"]), float(word["end"])))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"source transcript {source_id!r} has invalid word timing") from exc
+    if not words:
+        raise ValueError(f"source transcript {source_id!r} has no canonical words")
+    return words
+
+
+def _validate_lexical_anchors(
+    range_index: int,
+    edl_range: dict[str, object],
+    map_range: dict[str, object],
+    source_words: list[dict[str, object]],
+) -> tuple[int, int]:
+    edl_anchors = edl_range.get("lexical_anchors")
+    map_anchors = map_range.get("lexical_anchors")
+    if not isinstance(edl_anchors, dict):
+        raise ValueError("EDL lexical_anchors are missing or invalid")
+    if map_anchors != edl_anchors:
+        raise ValueError("timeline map lexical_anchors do not match the EDL")
+    first_anchor = edl_anchors.get("first")
+    last_anchor = edl_anchors.get("last")
+    if not isinstance(first_anchor, dict) or not isinstance(last_anchor, dict):
+        raise ValueError("EDL lexical anchor endpoints are invalid")
+    first_index = first_anchor.get("word_index")
+    last_index = last_anchor.get("word_index")
+    if (
+        not _is_plain_int(first_index)
+        or not _is_plain_int(last_index)
+        or first_index < 0
+        or last_index < first_index
+        or last_index >= len(source_words)
+    ):
+        raise ValueError("EDL lexical anchor indices are invalid")
+    for label, anchor, canonical in (
+        ("first", first_anchor, source_words[first_index]),
+        ("last", last_anchor, source_words[last_index]),
+    ):
+        if normalize_text(str(anchor.get("text") or "")) != normalize_text(
+            str(canonical.get("text") or "")
+        ):
+            raise ValueError(f"{label} anchor text is stale")
+        for timestamp in ("start", "end"):
+            try:
+                anchor_value = float(anchor[timestamp])
+                canonical_value = float(canonical[timestamp])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"{label} anchor {timestamp} is invalid") from exc
+            if not math.isfinite(anchor_value) or abs(anchor_value - canonical_value) > 1e-3:
+                raise ValueError(f"{label} anchor {timestamp} is stale")
+    return first_index, last_index
+
+
+def _project_expected_words(
+    source_words: list[dict[str, object]],
+    first_index: int,
+    last_index: int,
+    map_range: dict[str, object],
+) -> list[dict[str, object]]:
+    source_interval = map_range.get("source_sample_interval")
+    output_interval = map_range.get("output_cumulative_sample_interval")
+    if (
+        not isinstance(source_interval, list)
+        or len(source_interval) != 2
+        or not all(_is_plain_int(value) for value in source_interval)
+        or not isinstance(output_interval, list)
+        or len(output_interval) != 2
+        or not all(_is_plain_int(value) for value in output_interval)
+    ):
+        raise ValueError("timeline map sample intervals are invalid")
+    expected_records: list[dict[str, object]] = []
+    for word_index in range(first_index, last_index + 1):
+        source_word = source_words[word_index]
+        projected_start = (
+            output_interval[0]
+            + int(round(float(source_word["start"]) * 48000))
+            - source_interval[0]
+        )
+        projected_end = (
+            output_interval[0]
+            + int(round(float(source_word["end"]) * 48000))
+            - source_interval[0]
+        )
+        for token_index, normalized_token in enumerate(
+            tokenize(str(source_word.get("text") or ""))
+        ):
+            expected_records.append({
+                "text": source_word.get("text"),
+                "normalized": normalized_token,
+                "source_word_index": word_index,
+                "token_index": token_index,
+                "source_start": float(source_word["start"]),
+                "source_end": float(source_word["end"]),
+                "timeline_start_sample": projected_start,
+                "timeline_end_sample": projected_end,
+            })
+    return expected_records
+
+
+def _assign_preview_words(
+    preview_transcript: dict[str, object],
+    map_ranges: list[dict[str, object]],
+    fps_value: object | None = None,
+) -> dict[str, object]:
+    raw_words = preview_transcript.get("words")
+    if not isinstance(raw_words, list):
+        raise ValueError("preview transcript words are invalid")
+    preview_words = [
+        item
+        for item in raw_words
+        if isinstance(item, dict) and item.get("type") == "word"
+    ]
+    actual_by_range: list[list[dict[str, object]]] = [[] for _ in map_ranges]
+    untimed_words: list[dict[str, object]] = []
+    invalid_words: list[dict[str, object]] = []
+    out_of_bounds_words: list[dict[str, object]] = []
+    spanning_by_join: list[list[dict[str, object]]] = [
+        [] for _ in range(max(0, len(map_ranges) - 1))
+    ]
+    try:
+        resolved_fps = parse_fps_fraction(fps_value)
+    except Exception:
+        resolved_fps = None
+        for map_range in map_ranges:
+            frames = map_range.get("source_frames")
+            samples = map_range.get("source_sample_interval")
+            if (
+                isinstance(frames, list)
+                and len(frames) == 2
+                and all(_is_plain_int(value) for value in frames)
+                and isinstance(samples, list)
+                and len(samples) == 2
+                and all(_is_plain_int(value) for value in samples)
+                and frames[1] > frames[0]
+                and samples[1] > samples[0]
+            ):
+                resolved_fps = Fraction(
+                    (frames[1] - frames[0]) * 48000,
+                    samples[1] - samples[0],
+                ).limit_denominator(1001)
+                break
+        if resolved_fps is None:
+            raise ValueError("preview join FPS cannot be derived")
+    tolerance_samples = frame_to_sample(2, resolved_fps)
+
+    for preview_word_index, item in enumerate(preview_words):
+        start = item.get("start")
+        end = item.get("end")
+        if start is None or end is None:
+            untimed_words.append({
+                "word_index": preview_word_index,
+                "text": item.get("text"),
+            })
+            continue
+        if (
+            not isinstance(start, (int, float))
+            or isinstance(start, bool)
+            or not isinstance(end, (int, float))
+            or isinstance(end, bool)
+            or not math.isfinite(float(start))
+            or not math.isfinite(float(end))
+            or float(start) < 0.0
+            or float(end) <= float(start)
+        ):
+            invalid_words.append({
+                "word_index": preview_word_index,
+                "text": item.get("text"),
+                "start": start,
+                "end": end,
+            })
+            continue
+        start_sample = int(round(float(start) * 48000))
+        end_sample = int(round(float(end) * 48000))
+        midpoint = (start_sample + end_sample) // 2
+        assigned_range = None
+        for range_index, map_range in enumerate(map_ranges):
+            interval = map_range.get("output_cumulative_sample_interval")
+            if (
+                not isinstance(interval, list)
+                or len(interval) != 2
+                or not all(_is_plain_int(value) for value in interval)
+            ):
+                raise ValueError(f"timeline map range {range_index} interval is invalid")
+            if interval[0] <= midpoint < interval[1] or (
+                range_index == len(map_ranges) - 1 and midpoint == interval[1]
+            ):
+                assigned_range = range_index
+                break
+        if assigned_range is None:
+            out_of_bounds_words.append({
+                "word_index": preview_word_index,
+                "text": item.get("text"),
+                "start": start,
+                "end": end,
+            })
+            continue
+        for token_index, normalized_token in enumerate(
+            tokenize(str(item.get("text") or ""))
+        ):
+            actual_by_range[assigned_range].append({
+                "text": item.get("text"),
+                "normalized": normalized_token,
+                "preview_word_index": preview_word_index,
+                "token_index": token_index,
+                "start": float(start),
+                "end": float(end),
+                "start_sample": start_sample,
+                "end_sample": end_sample,
+                "assigned_range": assigned_range,
+            })
+
+        for join_index in range(len(map_ranges) - 1):
+            interval = map_ranges[join_index].get("output_cumulative_sample_interval")
+            join_sample = interval[1]
+            if (
+                start_sample < join_sample - tolerance_samples
+                and end_sample > join_sample + tolerance_samples
+            ):
+                spanning_by_join[join_index].append({
+                    "word_index": preview_word_index,
+                    "text": item.get("text"),
+                    "start": float(start),
+                    "end": float(end),
+                })
+
+    return {
+        "actual_by_range": actual_by_range,
+        "timing_validation": {
+            "untimed_words": untimed_words,
+            "invalid_words": invalid_words,
+            "out_of_bounds_words": out_of_bounds_words,
+        },
+        "spanning_by_join": spanning_by_join,
+        "fps": resolved_fps,
+    }
+
+
 def validate_transcript_report(
     transcript_data: object,
     edl_ranges: list[dict[str, object]],
     map_ranges: list[dict[str, object]],
     source_transcripts: dict[str, dict[str, object]],
+    preview_transcript: dict[str, object] | None = None,
+    fps_value: object | None = None,
 ) -> list[str]:
     """Recompute the mandatory range/join status from report evidence."""
     errors: list[str] = []
@@ -375,6 +1125,7 @@ def validate_transcript_report(
 
     ranges = transcript_data.get("ranges")
     joins = transcript_data.get("joins")
+    internal_silence_checks = transcript_data.get("internal_silence_checks")
     residual_checks = transcript_data.get("interword_residual_checks")
     summary = transcript_data.get("summary")
     timing = transcript_data.get("timing_validation")
@@ -384,6 +1135,9 @@ def validate_transcript_report(
     if not isinstance(joins, list):
         errors.append("joins is missing or not a list")
         joins = []
+    if not isinstance(internal_silence_checks, list):
+        errors.append("internal_silence_checks is missing or not a list")
+        internal_silence_checks = []
     if not isinstance(residual_checks, list):
         errors.append("interword_residual_checks is missing or not a list")
         residual_checks = []
@@ -402,32 +1156,221 @@ def validate_transcript_report(
 
     range_review_count = 0
     join_review_count = 0
+    internal_silence_review_count = 0
     residual_review_count = 0
     evidence_flags: list[str] = []
+
+    if preview_transcript is not None:
+        raw_preview_words = preview_transcript.get("words")
+        if not isinstance(raw_preview_words, list):
+            errors.append("preview sidecar words are invalid")
+        else:
+            canonical_words_evidence = [
+                {
+                    "text": word.get("text"),
+                    "type": word.get("type"),
+                    "start": word.get("start"),
+                    "end": word.get("end"),
+                }
+                for word in raw_preview_words
+                if isinstance(word, dict)
+            ]
+            if transcript_data.get("words_evidence") != canonical_words_evidence:
+                errors.append("words_evidence does not match the bound preview sidecar")
+    if preview_transcript is None:
+        words_evidence = transcript_data.get("words_evidence")
+        preview_transcript = {
+            "words": words_evidence if isinstance(words_evidence, list) else []
+        }
+    preview_evidence: dict[str, object] = {}
+    try:
+        preview_evidence = _assign_preview_words(
+            preview_transcript, map_ranges, fps_value
+        )
+        actual_by_range = preview_evidence["actual_by_range"]
+        recomputed_timing = preview_evidence["timing_validation"]
+        spanning_by_join = preview_evidence["spanning_by_join"]
+        if timing != recomputed_timing:
+            errors.append("timing_validation does not match the bound preview sidecar")
+        timing = recomputed_timing
+    except ValueError as exc:
+        errors.append(f"cannot recompute preview range words: {exc}")
+        actual_by_range = [[] for _ in map_ranges]
+        spanning_by_join = [[] for _ in range(max(0, len(map_ranges) - 1))]
+
+    source_words_by_id: dict[str, list[dict[str, object]]] = {}
+    for source_id, source_transcript in source_transcripts.items():
+        try:
+            source_words_by_id[source_id] = _canonical_source_words(
+                source_transcript, source_id
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    settings = transcript_data.get("settings")
+    cue_terms = settings.get("cue_terms") if isinstance(settings, dict) else None
+    if (
+        not isinstance(cue_terms, list)
+        or not cue_terms
+        or not all(isinstance(term, str) and term.strip() for term in cue_terms)
+    ):
+        errors.append("settings.cue_terms is missing or invalid")
+        declared_cue_terms: list[str] = []
+    else:
+        declared_cue_terms = cue_terms
+    if not set(DEFAULT_CUE_TERMS).issubset(declared_cue_terms):
+        errors.append("settings.cue_terms omits mandatory recording cues")
+    cue_terms = list(dict.fromkeys(list(DEFAULT_CUE_TERMS) + declared_cue_terms))
+    resolved_preview_fps = preview_evidence.get("fps")
+    try:
+        canonical_report = build_report(
+            preview_transcript,
+            None,
+            None,
+            cue_terms,
+            edl_data={"ranges": edl_ranges},
+            timeline_map={
+                "output_format": {
+                    "sample_rate": 48000,
+                    "sequence_fps": str(resolved_preview_fps),
+                },
+                "ranges": map_ranges,
+            },
+            source_transcripts=source_transcripts,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        errors.append(f"cannot recompute canonical preview report: {exc}")
+        canonical_report = None
+    if canonical_report is not None:
+        for key in (
+            "settings",
+            "summary",
+            "words_evidence",
+            "text",
+            "adjacent_repeats",
+            "repeated_ngrams",
+            "cue_hits",
+            "expected_diff",
+            "timing_validation",
+            "ranges",
+            "joins",
+            "internal_silence_checks",
+            "interword_residual_checks",
+            "status",
+        ):
+            if transcript_data.get(key) != canonical_report.get(key):
+                errors.append(
+                    f"{key} does not match canonical EDL/map/sidecar analysis"
+                )
+
+    range_contexts: list[
+        tuple[list[dict[str, object]], int, int, list[dict[str, object]]] | None
+    ] = []
+    for position, (edl_range, map_range) in enumerate(zip(edl_ranges, map_ranges)):
+        source_id = edl_range.get("source")
+        if (
+            not isinstance(source_id, str)
+            or map_range.get("source") != source_id
+            or source_id not in source_words_by_id
+        ):
+            errors.append(f"range {position} source is invalid")
+            range_contexts.append(None)
+            continue
+        edl_constraints = edl_range.get("boundary_constraints") or {}
+        map_constraints = map_range.get("boundary_constraints") or {}
+        if (
+            not isinstance(edl_constraints, dict)
+            or not isinstance(map_constraints, dict)
+            or edl_constraints != map_constraints
+        ):
+            errors.append(f"range {position} timeline map boundary_constraints are stale")
+        source_words = source_words_by_id[source_id]
+        try:
+            first_index, last_index = _validate_lexical_anchors(
+                position, edl_range, map_range, source_words
+            )
+            expected_records = _project_expected_words(
+                source_words, first_index, last_index, map_range
+            )
+        except ValueError as exc:
+            errors.append(f"range {position} lexical contract is invalid: {exc}")
+            range_contexts.append(None)
+            continue
+        range_contexts.append(
+            (source_words, first_index, last_index, expected_records)
+        )
+
     for position, result in enumerate(ranges):
         if not isinstance(result, dict):
             errors.append(f"ranges[{position}] is not an object")
             continue
-        flags = result.get("blocking_flags")
-        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+        reported_flags = result.get("blocking_flags")
+        if not isinstance(reported_flags, list) or not all(
+            isinstance(flag, str) for flag in reported_flags
+        ):
             errors.append(f"ranges[{position}] blocking_flags is invalid")
-            flags = []
-        expected_status = "review" if flags else "pass"
-        if result.get("status") != expected_status:
-            errors.append(f"ranges[{position}] status contradicts blocking_flags")
-        if expected_status == "review":
-            range_review_count += 1
-        evidence_flags.extend(flags)
-        if position < len(edl_ranges):
+            reported_flags = []
+        if position < len(edl_ranges) and position < len(map_ranges):
             if (
                 result.get("range_index") != position
                 or result.get("source") != edl_ranges[position].get("source")
                 or result.get("source") != map_ranges[position].get("source")
             ):
                 errors.append(f"ranges[{position}] identity does not match EDL/timeline map")
-        for key in ("expected_words", "actual_words", "alignment"):
-            if not isinstance(result.get(key), list):
-                errors.append(f"ranges[{position}] {key} is invalid")
+
+        canonical_flags = reported_flags
+        if position < len(range_contexts) and range_contexts[position] is not None:
+            expected_records = range_contexts[position][3]
+            actual_records = (
+                actual_by_range[position] if position < len(actual_by_range) else []
+            )
+            alignment = align_token_records(expected_records, actual_records)
+            matched = sum(
+                operation["op"] in {"equal", "fuzzy"} for operation in alignment
+            )
+            phrase_similarity = round(
+                token_ratio(
+                    " ".join(str(record["normalized"]) for record in expected_records),
+                    " ".join(str(record["normalized"]) for record in actual_records),
+                ),
+                3,
+            )
+            recall = round(
+                matched / len(expected_records) if expected_records else 1.0, 3
+            )
+            duplicate_insertions = duplicate_insertion_spans(alignment)
+            token_excess = duplicate_token_excess(expected_records, actual_records)
+            canonical_flags = []
+            if phrase_similarity < 0.85:
+                canonical_flags.append("range_phrase_mismatch")
+            if recall < 0.90:
+                canonical_flags.append("range_token_recall_low")
+            if duplicate_insertions or token_excess:
+                canonical_flags.append("range_duplicate_content")
+
+            canonical_fields = {
+                "expected_words": expected_records,
+                "actual_words": actual_records,
+                "alignment": alignment,
+                "duplicate_insertions": duplicate_insertions,
+                "duplicate_token_excess": token_excess,
+                "phrase_similarity": phrase_similarity,
+                "token_recall": recall,
+                "blocking_flags": canonical_flags,
+                "status": "review" if canonical_flags else "pass",
+            }
+            for key, expected_value in canonical_fields.items():
+                if result.get(key) != expected_value:
+                    errors.append(
+                        f"ranges[{position}] {key} does not match canonical sidecar evidence"
+                    )
+
+        expected_status = "review" if canonical_flags else "pass"
+        if result.get("status") != expected_status:
+            errors.append(f"ranges[{position}] status contradicts canonical evidence")
+        if expected_status == "review":
+            range_review_count += 1
+        evidence_flags.extend(canonical_flags)
 
     for position, result in enumerate(joins):
         if not isinstance(result, dict):
@@ -453,6 +1396,119 @@ def validate_transcript_report(
                 or result.get("timeline_sample") != expected_sample
             ):
                 errors.append(f"joins[{position}] identity does not match timeline map")
+            expected_spanning = spanning_by_join[position]
+            actual_evidence = result.get("actual")
+            reported_spanning = (
+                actual_evidence.get("spanning_words")
+                if isinstance(actual_evidence, dict)
+                else None
+            )
+            if reported_spanning != expected_spanning:
+                errors.append(
+                    f"joins[{position}] spanning words do not match bound preview sidecar"
+                )
+            has_spanning_flag = "preview_word_spans_join" in flags
+            if has_spanning_flag is not bool(expected_spanning):
+                errors.append(
+                    f"joins[{position}] spanning-word blocker contradicts sidecar evidence"
+                )
+
+    def silence_identity(result: object) -> tuple[object, ...] | None:
+        if not isinstance(result, dict):
+            return None
+        try:
+            range_index = result["range_index"]
+            left_index = result["left_word_index"]
+            right_index = result["right_word_index"]
+            if not all(
+                _is_plain_int(value)
+                for value in (range_index, left_index, right_index)
+            ):
+                return None
+            return (
+                range_index,
+                str(result["source"]),
+                left_index,
+                str(result.get("left_word") or ""),
+                round(float(result["left_word_end"]), 6),
+                right_index,
+                str(result.get("right_word") or ""),
+                round(float(result["right_word_start"]), 6),
+                round(float(result["gap_ms"]), 6),
+                result.get("preserve_override"),
+                result.get("override_reason"),
+                tuple(result.get("blocking_flags", [])),
+                result.get("status"),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    for position, result in enumerate(internal_silence_checks):
+        if not isinstance(result, dict):
+            errors.append(f"internal_silence_checks[{position}] is not an object")
+            continue
+        flags = result.get("blocking_flags")
+        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+            errors.append(f"internal_silence_checks[{position}] blocking_flags is invalid")
+            flags = []
+        preserve_override = result.get("preserve_override")
+        expected_flags = [] if preserve_override is True else ["uncut_internal_silence"]
+        if flags != expected_flags:
+            errors.append(
+                f"internal_silence_checks[{position}] blockers contradict preservation evidence"
+            )
+        expected_status = "review" if flags else "pass"
+        if result.get("status") != expected_status:
+            errors.append(
+                f"internal_silence_checks[{position}] status contradicts blocking_flags"
+            )
+        if result.get("policy") != INTERNAL_SILENCE_SPLIT_POLICY:
+            errors.append(f"internal_silence_checks[{position}] policy is invalid")
+        if result.get("threshold_ms") != 300.0:
+            errors.append(f"internal_silence_checks[{position}] threshold is invalid")
+        if result.get("comparison") != "strictly_greater_than":
+            errors.append(f"internal_silence_checks[{position}] comparison is invalid")
+        if expected_status == "review":
+            internal_silence_review_count += 1
+        evidence_flags.extend(flags)
+
+    expected_internal_silence_checks: list[dict[str, object]] = []
+    for range_index, (edl_range, map_range) in enumerate(zip(edl_ranges, map_ranges)):
+        source_id = edl_range.get("source")
+        context = range_contexts[range_index] if range_index < len(range_contexts) else None
+        if context is None:
+            errors.append(f"cannot recompute internal silence contract for range {range_index}")
+            continue
+        source_words, first_index, last_index, _ = context
+        try:
+            evaluated = evaluate_internal_silence_contract(
+                edl_range, source_words, first_index, last_index
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(
+                f"range {range_index} internal silence contract is invalid: {exc}"
+            )
+            continue
+        for gap in evaluated:
+            flags = [] if gap["preserve_override"] else ["uncut_internal_silence"]
+            expected_internal_silence_checks.append({
+                "range_index": range_index,
+                "source": source_id,
+                **gap,
+                "blocking_flags": flags,
+                "status": "review" if flags else "pass",
+            })
+
+    observed_silence_identities = [
+        silence_identity(result) for result in internal_silence_checks
+    ]
+    expected_silence_identities = [
+        silence_identity(result) for result in expected_internal_silence_checks
+    ]
+    if None in observed_silence_identities:
+        errors.append("internal silence check identity is invalid")
+    if observed_silence_identities != expected_silence_identities:
+        errors.append("internal silence checks do not match canonical source evidence")
 
     for position, result in enumerate(residual_checks):
         if not isinstance(result, dict):
@@ -592,6 +1648,11 @@ def validate_transcript_report(
         "join_count": len(joins),
         "join_pass_count": len(joins) - join_review_count,
         "join_review_count": join_review_count,
+        "internal_silence_count": len(internal_silence_checks),
+        "internal_silence_pass_count": (
+            len(internal_silence_checks) - internal_silence_review_count
+        ),
+        "internal_silence_review_count": internal_silence_review_count,
         "interword_residual_count": len(residual_checks),
         "interword_residual_pass_count": len(residual_checks) - residual_review_count,
         "interword_residual_review_count": residual_review_count,
@@ -721,7 +1782,7 @@ def main() -> None:
         print(f"FATAL: Failed to parse timeline map sequence_fps '{map_fps_val}': {e}")
         sys.exit(1)
 
-    if abs(float(edl_fps) - float(map_fps)) > 1e-6:
+    if edl_fps != map_fps:
         print(f"FATAL: Timeline map sequence_fps ({float(map_fps)}) does not match EDL authority FPS ({float(edl_fps)}).")
         sys.exit(1)
 
@@ -742,6 +1803,17 @@ def main() -> None:
             sys.exit(1)
         if mr.get("source") != r.get("source"):
             print(f"FATAL: Timeline map range {i} source '{mr.get('source')}' does not match EDL range source '{r.get('source')}'.")
+            sys.exit(1)
+        edl_constraints = r.get("boundary_constraints") or {}
+        map_constraints = mr.get("boundary_constraints") or {}
+        if (
+            not isinstance(edl_constraints, dict)
+            or not isinstance(map_constraints, dict)
+            or edl_constraints != map_constraints
+        ):
+            print(
+                f"FATAL: Timeline map range {i} boundary_constraints do not match the EDL."
+            )
             sys.exit(1)
 
         sf = mr.get("source_frames")
@@ -856,7 +1928,7 @@ def main() -> None:
     if audio_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Audio QC report preview WAV hash mismatch. Re-run audio QC.")
         stale = True
-    audio_errors = validate_audio_report(audio_data, map_ranges)
+    audio_errors = validate_audio_report(audio_data, map_ranges, edl_fps)
     if audio_errors:
         for error in audio_errors:
             print(f"FATAL: Audio QC schema/consistency error: {error}.")
@@ -941,17 +2013,6 @@ def main() -> None:
     if transcript_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Preview transcript QC report WAV hash mismatch. Re-run preview transcript QC.")
         stale = True
-    transcript_errors = validate_transcript_report(
-        transcript_data,
-        edl_ranges,
-        map_ranges,
-        source_transcripts_for_qc,
-    )
-    if transcript_errors:
-        for error in transcript_errors:
-            print(f"FATAL: Preview transcript QC schema/consistency error: {error}.")
-        stale = True
-
     preview_source_hashes = transcript_data.get("source_transcript_hashes")
     if not isinstance(preview_source_hashes, dict):
         print("FATAL: Preview transcript QC source_transcript_hashes is invalid.")
@@ -968,6 +2029,7 @@ def main() -> None:
     recalc_word_count = 0
     recalc_timed_count = 0
     recalc_coverage = 0.0
+    preview_transcript_for_qc: dict[str, object] | None = None
 
     if t_file_val and t_file_val != "generated":
         # Exija/carregue um transcript sidecar real
@@ -982,6 +2044,7 @@ def main() -> None:
             stale = True
         try:
             sidecar_data = json.loads(t_file_path.read_text(encoding="utf-8"))
+            preview_transcript_for_qc = sidecar_data
             binding = sidecar_data.get("_alano_cut")
             if not isinstance(binding, dict) or binding.get("preview_wav_sha256") != current_wav_hash:
                 print("STALE: Preview transcript sidecar is not bound to the current WAV.")
@@ -1031,42 +2094,24 @@ def main() -> None:
             print(f"FATAL: Failed to parse preview transcript sidecar JSON: {e}")
             sys.exit(1)
     else:
-        # Relatório com transcript=generated sem evidência verificável deve falhar
-        if "words_evidence" not in transcript_data or not isinstance(transcript_data["words_evidence"], list):
-            print("FATAL: Preview transcript QC report is 'generated' but missing verifiable words_evidence.")
-            sys.exit(1)
-        # Recalcule cobertura
-        words_evidence = transcript_data["words_evidence"]
-        words_list = [w for w in words_evidence if w.get("type") == "word"]
-        recalc_word_count = len(words_list)
+        print(
+            "FATAL: Preview transcript QC must reference a persisted WhisperX "
+            "sidecar; transcript='generated' is not independently verifiable."
+        )
+        sys.exit(1)
 
-        last_start = -1.0
-        for w in words_list:
-            start = w.get("start")
-            end = w.get("end")
-            if start is not None or end is not None:
-                if start is None or end is None:
-                    print("FATAL: Timed word has start or end missing.")
-                    sys.exit(1)
-                if not isinstance(start, (int, float)) or isinstance(start, bool):
-                    print("FATAL: Timed word start is not a numeric type.")
-                    sys.exit(1)
-                if not isinstance(end, (int, float)) or isinstance(end, bool):
-                    print("FATAL: Timed word end is not a numeric type.")
-                    sys.exit(1)
-                if not math.isfinite(start) or not math.isfinite(end):
-                    print("FATAL: Timed word start or end is not finite.")
-                    sys.exit(1)
-                if start < 0.0 or start >= end:
-                    print(f"FATAL: Timed word bounds are invalid: start={start}, end={end}")
-                    sys.exit(1)
-                if start < last_start:
-                    print(f"FATAL: Timed word start={start} violates monotonic order (previous={last_start})")
-                    sys.exit(1)
-
-                last_start = start
-                recalc_timed_count += 1
-        recalc_coverage = (recalc_timed_count / recalc_word_count) if recalc_word_count > 0 else 0.0
+    transcript_errors = validate_transcript_report(
+        transcript_data,
+        edl_ranges,
+        map_ranges,
+        source_transcripts_for_qc,
+        preview_transcript_for_qc,
+        edl_fps,
+    )
+    if transcript_errors:
+        for error in transcript_errors:
+            print(f"FATAL: Preview transcript QC schema/consistency error: {error}.")
+        stale = True
 
     # Verify that the declared word count and coverage match the recalculated ones
     t_summary = transcript_data.get("summary", {})

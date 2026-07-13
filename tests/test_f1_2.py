@@ -14,8 +14,43 @@ import pytest
 
 from helpers.timing import parse_fps_fraction, time_to_frame
 from helpers.render import main as render_main, frame_to_sample
-from helpers.preview_audio_qc import main as qc_main, two_frame_sample_count
+from helpers.preview_audio_qc import (
+    main as qc_main,
+    tail_requirement_frames,
+    two_frame_sample_count,
+)
 from helpers.verify_edit_ready import frame_to_sample as readiness_frame_to_sample
+
+
+def test_disconnected_activity_constraint_narrows_tail_to_one_frame_only():
+    assert tail_requirement_frames({}) == 2
+    assert tail_requirement_frames({
+        "boundary_constraints": {
+            "end": {
+                "reason": "disconnected_post_word_activity",
+                "required_tail_frames": 2,
+                "available_tail_frames": 1,
+            }
+        }
+    }) == 1
+    assert tail_requirement_frames({
+        "boundary_constraints": {
+            "end": {
+                "reason": "disconnected_post_word_activity",
+                "required_tail_frames": 2,
+                "available_tail_frames": 0,
+            }
+        }
+    }) == 2
+    assert tail_requirement_frames({
+        "boundary_constraints": {
+            "end": {
+                "reason": "disconnected_post_word_activity",
+                "required_tail_frames": 2,
+                "available_tail_frames": True,
+            }
+        }
+    }) == 2
 
 
 def create_synthetic_wav(

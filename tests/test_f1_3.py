@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import pytest
 
 from helpers.semantic_qc import run_semantic_qc, main as semantic_main
 from helpers.preview_transcript_qc import (
+    DEFAULT_CUE_TERMS,
     build_report,
     compare_expected,
     MockTranscriptProvider,
@@ -26,7 +28,158 @@ from helpers.transcription_contract import (
     analyze_alignment_quality,
     convert_whisperx_result,
 )
-from helpers.verify_edit_ready import main as verify_ready_main
+from helpers.verify_edit_ready import (
+    main as verify_ready_main,
+    validate_audio_report,
+)
+
+
+def _passing_mapped_audio_report(
+    *,
+    constraints: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    map_range = {
+        "range_index": 0,
+        "source": "source1",
+        "source_frames": [0, 6],
+        "source_sample_interval": [0, 9610],
+        "output_cumulative_sample_interval": [0, 9610],
+        "boundary_constraints": constraints or {},
+    }
+    end_constraint = constraints.get("end") if isinstance(constraints, dict) else None
+    frames = 1 if (
+        isinstance(end_constraint, dict)
+        and end_constraint.get("reason") == "disconnected_post_word_activity"
+        and type(end_constraint.get("required_tail_frames")) is int
+        and end_constraint.get("required_tail_frames") == 2
+        and type(end_constraint.get("available_tail_frames")) is int
+        and end_constraint.get("available_tail_frames") == 1
+    ) else 2
+    required_samples = 1602 if frames == 1 else 3204
+    report = {
+        "wav_format_ok": True,
+        "sample_count_parity_ok": True,
+        "two_frame_tail_ok": True,
+        "two_frame_tail_coverage_ok": True,
+        "speech_clipping_ok": True,
+        "boundary_clipping_detected": False,
+        "total_samples": 9610,
+        "expected_samples": 9610,
+        "sample_rate": 48000,
+        "channels": 2,
+        "sample_width": 16,
+        "two_frame_tail_required_samples": required_samples,
+        "tail_requirement_frames": frames,
+        "two_frame_tail_window": [9610 - required_samples, 9610],
+        "tail_rms_db": -100.0,
+        "tail_rms_db_by_channel": [-100.0, -100.0],
+        "clipping_events_count": 0,
+        "range_review_count": 0,
+        "severe_pops_count": 0,
+        "warning_pops_count": 0,
+        "joins": [],
+        "range_entries": [{
+            "range_index": 0,
+            "source": "source1",
+            "output_sample_interval": [0, 9610],
+            "tail_requirement_frames": frames,
+            "two_frame_tail_required_samples": required_samples,
+            "two_frame_tail_coverage_ok": True,
+            "two_frame_tail_rms_db": -100.0,
+            "two_frame_tail_rms_db_by_channel": [-100.0, -100.0],
+            "activity_threshold_dbfs": -60.0,
+            "two_frame_tail_threshold_dbfs": -60.0,
+            "left_tail_ok": True,
+            "status": "pass",
+            "blocking_flags": [],
+        }],
+        "status": "pass",
+    }
+    return report, [map_range]
+
+
+def test_readiness_derives_exact_tail_from_rational_fps_and_map():
+    report, map_ranges = _passing_mapped_audio_report()
+    assert validate_audio_report(report, map_ranges, "30000/1001") == []
+
+    forged_global = copy.deepcopy(report)
+    forged_global.update({
+        "tail_requirement_frames": 1,
+        "two_frame_tail_required_samples": 1,
+        "two_frame_tail_window": [9609, 9610],
+    })
+    assert any(
+        "two_frame_tail_required_samples does not match mapped FPS" in error
+        for error in validate_audio_report(forged_global, map_ranges, "30000/1001")
+    )
+
+    forged_range = copy.deepcopy(report)
+    forged_range["range_entries"][0].update({
+        "tail_requirement_frames": 1,
+        "two_frame_tail_required_samples": 1,
+    })
+    assert any(
+        "tail sample requirement does not match mapped FPS" in error
+        for error in validate_audio_report(forged_range, map_ranges, "30000/1001")
+    )
+
+    forged_total = copy.deepcopy(report)
+    forged_total.update({
+        "total_samples": 1,
+        "expected_samples": 1,
+        "two_frame_tail_required_samples": 1,
+        "two_frame_tail_window": [0, 1],
+    })
+    assert any(
+        "expected_samples does not match" in error
+        for error in validate_audio_report(forged_total, map_ranges, "30000/1001")
+    )
+
+    off_by_one = copy.deepcopy(report)
+    off_by_one["two_frame_tail_required_samples"] = 3203
+    assert any(
+        "two_frame_tail_required_samples does not match mapped FPS" in error
+        for error in validate_audio_report(off_by_one, map_ranges, "30000/1001")
+    )
+
+    forged_threshold = copy.deepcopy(report)
+    forged_threshold["range_entries"][0].update({
+        "two_frame_tail_rms_db": 0.0,
+        "two_frame_tail_rms_db_by_channel": [0.0, 0.0],
+        "activity_threshold_dbfs": 100.0,
+        "two_frame_tail_threshold_dbfs": 100.0,
+        "left_tail_ok": True,
+    })
+    assert any(
+        "tail threshold contradicts activity evidence" in error
+        for error in validate_audio_report(
+            forged_threshold, map_ranges, "30000/1001"
+        )
+    )
+
+
+def test_readiness_allows_one_frame_tail_only_for_exact_audited_constraint():
+    exact_constraint = {
+        "end": {
+            "reason": "disconnected_post_word_activity",
+            "required_tail_frames": 2,
+            "available_tail_frames": 1,
+        }
+    }
+    report, map_ranges = _passing_mapped_audio_report(
+        constraints=exact_constraint
+    )
+    assert validate_audio_report(report, map_ranges, "30000/1001") == []
+
+    for invalid_available in (5, True):
+        forged_map = copy.deepcopy(map_ranges)
+        forged_map[0]["boundary_constraints"]["end"][
+            "available_tail_frames"
+        ] = invalid_available
+        assert any(
+            "tail frame requirement does not match" in error
+            for error in validate_audio_report(report, forged_map, "30000/1001")
+        )
 
 
 def create_synthetic_wav(path: Path, duration_s: float = 0.5) -> None:
@@ -436,9 +589,23 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
                 "source": "source1",
                 "start": 0.0,
                 "end": 0.5,
-                "source_in_frame": 0,
-                "source_out_frame": 12,
-                "review_required": False
+                    "source_in_frame": 0,
+                    "source_out_frame": 12,
+                    "lexical_anchors": {
+                        "first": {
+                            "word_index": 0,
+                            "text": "welcome",
+                            "start": 0.1,
+                            "end": 0.4,
+                        },
+                        "last": {
+                            "word_index": 0,
+                            "text": "welcome",
+                            "start": 0.1,
+                            "end": 0.4,
+                        },
+                    },
+                    "review_required": False
             }
         ],
         "metadata": {
@@ -461,14 +628,29 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
             "sequence_fps": 24.0
         },
         "ranges": [
-            {
-                "source": "source1",
+                {
+                    "range_index": 0,
+                    "source": "source1",
                 "source_frames": [0, 12],
                 "source_sample_interval": [0, 24000],
                 "output_cumulative_sample_interval": [0, 24000],
                 "seconds": 0.5,
                 "source_channels": 2,
-                "channel_policy": "stereo_preserve"
+                "channel_policy": "stereo_preserve",
+                "lexical_anchors": {
+                    "first": {
+                        "word_index": 0,
+                        "text": "welcome",
+                        "start": 0.1,
+                        "end": 0.4,
+                    },
+                    "last": {
+                        "word_index": 0,
+                        "text": "welcome",
+                        "start": 0.1,
+                        "end": 0.4,
+                    },
+                },
             }
         ]
     }
@@ -510,6 +692,7 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "two_frame_tail_ok": True,
         "two_frame_tail_coverage_ok": True,
         "two_frame_tail_required_samples": 4000,
+        "tail_requirement_frames": 2,
         "two_frame_tail_window": [20000, 24000],
         "tail_rms_db": -100.0,
         "tail_rms_db_by_channel": [-100.0, -100.0],
@@ -518,7 +701,21 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
         "clipping_events_count": 0,
         "range_review_count": 0,
         "range_entries": [
-            {"range_index": 0, "source": "source1", "status": "pass", "blocking_flags": []}
+            {
+                "range_index": 0,
+                "source": "source1",
+                "output_sample_interval": [0, 24000],
+                "two_frame_tail_required_samples": 4000,
+                "tail_requirement_frames": 2,
+                "two_frame_tail_coverage_ok": True,
+                "two_frame_tail_rms_db": -100.0,
+                "two_frame_tail_rms_db_by_channel": [-100.0, -100.0],
+                "activity_threshold_dbfs": -60.0,
+                "two_frame_tail_threshold_dbfs": -60.0,
+                "left_tail_ok": True,
+                "status": "pass",
+                "blocking_flags": [],
+            }
         ],
         "total_samples": 24000,
         "expected_samples": 24000,
@@ -539,53 +736,28 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
     }
     edit_dir.joinpath("edl_semantic_qc.json").write_text(json.dumps(semantic_qc_data), encoding="utf-8")
 
-    transcript_qc = {
-        "schema_version": 2,
-        "mode": "range_aware",
-        "status": "pass",
-        "transcript": "generated",
-        "edl_hash": edl_hash,
-        "timeline_map_hash": map_hash,
-        "preview_wav_hash": wav_hash,
-        "transcript_hash": "some_hash",
-        "source_transcript_hashes": {"source1": trans_hash},
-        "summary": {
-            "status": "pass",
-            "word_count": 10,
-            "timed_word_count": 10,
-            "timing_coverage": 1.0,
-            "range_count": 1,
-            "range_pass_count": 1,
-            "range_review_count": 0,
-            "join_count": 0,
-            "join_pass_count": 0,
-            "join_review_count": 0,
-            "interword_residual_count": 0,
-            "interword_residual_pass_count": 0,
-            "interword_residual_review_count": 0,
-            "blocking_flags": []
+    preview_transcript = canonical_source_transcript(
+        [{"text": "welcome", "start": 0.1, "end": 0.4}],
+        wav_hash,
+    )
+    preview_transcript["_alano_cut"]["preview_wav_sha256"] = wav_hash
+    preview_sidecar = temp_workspace["transcripts"] / "preview.json"
+    preview_sidecar.write_text(json.dumps(preview_transcript), encoding="utf-8")
+    transcript_qc = build_report(
+        preview_transcript,
+        preview_sidecar,
+        None,
+        DEFAULT_CUE_TERMS,
+        wav_path=preview_wav,
+        edl_data=edl,
+        timeline_map=valid_map,
+        source_transcripts={
+            "source1": json.loads(temp_workspace["source_json"].read_text(encoding="utf-8"))
         },
-        "timing_validation": {
-            "untimed_words": [],
-            "invalid_words": [],
-            "out_of_bounds_words": [],
-        },
-        "ranges": [{
-            "range_index": 0,
-            "source": "source1",
-            "expected_words": [],
-            "actual_words": [],
-            "alignment": [],
-            "status": "pass",
-            "blocking_flags": [],
-        }],
-        "joins": [],
-        "interword_residual_checks": [],
-        "words_evidence": [
-            {"text": f"word{i}", "type": "word", "start": float(i), "end": float(i) + 0.5}
-            for i in range(10)
-        ]
-    }
+        edl_hash=edl_hash,
+        timeline_map_hash=map_hash,
+        source_transcript_hashes={"source1": trans_hash},
+    )
     edit_dir.joinpath("preview_transcript_qc.json").write_text(json.dumps(transcript_qc), encoding="utf-8")
 
     # Verify pass case: status=0
@@ -605,6 +777,21 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         verify_ready_main()
     assert excinfo.value.code == 0
+
+    # Embedded words are not independent evidence: the persisted, bound,
+    # normative WhisperX sidecar is mandatory.
+    generated_qc = copy.deepcopy(transcript_qc)
+    generated_qc["transcript"] = "generated"
+    generated_qc["transcript_hash"] = None
+    edit_dir.joinpath("preview_transcript_qc.json").write_text(
+        json.dumps(generated_qc), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        verify_ready_main()
+    assert excinfo.value.code == 1
+    edit_dir.joinpath("preview_transcript_qc.json").write_text(
+        json.dumps(transcript_qc), encoding="utf-8"
+    )
 
     # A non-empty EDL cannot be approved by an empty boundary evidence shell.
     valid_boundary_evidence = boundary_qc["boundary_evidence"]

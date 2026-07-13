@@ -29,6 +29,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from helpers.internal_silence import (
+    INTERNAL_SILENCE_SPLIT_POLICY,
+    INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
+    evaluate_internal_silence_contract,
+)
+
 
 DEFAULT_CUE_TERMS = [
     "corta",
@@ -141,6 +150,27 @@ def repeated_ngrams(tokens: list[str], min_n: int = 4, max_n: int = 8) -> list[d
         if found:
             break
     return found[:20]
+
+
+def merge_unique_findings(
+    *finding_groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge detector evidence without trusting one transcript representation."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in finding_groups:
+        for finding in group:
+            identity = json.dumps(
+                finding,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(finding)
+    return merged
 
 
 def cue_hits(normalized_text: str, terms: list[str]) -> list[dict[str, Any]]:
@@ -523,6 +553,90 @@ def align_token_records(
     return operations
 
 
+def duplicate_insertion_spans(
+    alignment: list[dict[str, Any]],
+    fuzzy_min: float = 0.90,
+) -> list[dict[str, Any]]:
+    """Find short content duplicated by ASR insertions beside aligned text."""
+    findings: list[dict[str, Any]] = []
+    position = 0
+    while position < len(alignment):
+        if alignment[position].get("op") != "insert":
+            position += 1
+            continue
+        run_start = position
+        while position < len(alignment) and alignment[position].get("op") == "insert":
+            position += 1
+        run_end = position
+        inserted = [
+            operation["actual"]
+            for operation in alignment[run_start:run_end]
+            if isinstance(operation.get("actual"), dict)
+        ]
+        if not inserted:
+            continue
+        run_length = len(inserted)
+        before = [
+            operation["actual"]
+            for operation in alignment[:run_start]
+            if isinstance(operation.get("actual"), dict)
+        ]
+        after = [
+            operation["actual"]
+            for operation in alignment[run_end:]
+            if isinstance(operation.get("actual"), dict)
+        ]
+        candidates = []
+        if len(before) >= run_length:
+            candidates.append(("before", before[-run_length:]))
+        if len(after) >= run_length:
+            candidates.append(("after", after[:run_length]))
+        for side, neighbor in candidates:
+            similarities = [
+                token_similarity(
+                    str(inserted_record.get("normalized") or ""),
+                    str(neighbor_record.get("normalized") or ""),
+                )
+                for inserted_record, neighbor_record in zip(inserted, neighbor)
+            ]
+            if similarities and all(value >= fuzzy_min for value in similarities):
+                findings.append({
+                    "operation_interval": [run_start, run_end],
+                    "actual_indices": [
+                        record.get("actual_index")
+                        for record in alignment[run_start:run_end]
+                    ],
+                    "tokens": [record.get("normalized") for record in inserted],
+                    "duplicates_side": side,
+                    "similarities": [round(value, 3) for value in similarities],
+                })
+                break
+    return findings
+
+
+def duplicate_token_excess(
+    expected: list[dict[str, Any]],
+    actual: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return excess occurrences of tokens already selected in the source."""
+    expected_counts = Counter(
+        str(record.get("normalized") or "") for record in expected
+    )
+    actual_counts = Counter(str(record.get("normalized") or "") for record in actual)
+    return [
+        {
+            "token": token,
+            "expected_count": expected_counts[token],
+            "actual_count": actual_counts[token],
+            "extra_count": actual_counts[token] - expected_counts[token],
+        }
+        for token in sorted(actual_counts)
+        if token
+        and expected_counts[token] > 0
+        and actual_counts[token] > expected_counts[token]
+    ]
+
+
 def _source_words(data: dict[str, Any], source_id: str) -> list[dict[str, Any]]:
     words = []
     for item in data.get("words", []):
@@ -745,6 +859,7 @@ def build_join_analysis(
     range_results: list[dict[str, Any]] = []
     expected_by_range: list[list[dict[str, Any]]] = []
     source_intervals: list[list[int]] = []
+    internal_silence_checks: list[dict[str, Any]] = []
 
     for position, (edl_range, map_range) in enumerate(zip(edl_ranges, map_ranges)):
         if map_range.get("range_index") != position:
@@ -780,6 +895,29 @@ def build_join_analysis(
                 raise ValueError(f"timeline map range {position} {label} anchor identity is stale")
             if abs(float(anchor.get("start", -1.0)) - float(expected_word["start"])) > 1e-3:
                 raise ValueError(f"timeline map range {position} {label} anchor timestamp is stale")
+
+        edl_constraints = edl_range.get("boundary_constraints") or {}
+        map_constraints = map_range.get("boundary_constraints") or {}
+        if not isinstance(edl_constraints, dict) or not isinstance(map_constraints, dict):
+            raise ValueError(f"range {position} boundary_constraints must be objects")
+        if map_constraints != edl_constraints:
+            raise ValueError(f"timeline map range {position} boundary_constraints are stale")
+        for gap in evaluate_internal_silence_contract(
+            edl_range, source_words, first_index, last_index
+        ):
+            flags = [] if gap["preserve_override"] else ["uncut_internal_silence"]
+            internal_silence_checks.append({
+                "range_index": position,
+                "source": source_id,
+                "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+                "threshold_ms": float(
+                    INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000
+                ),
+                "comparison": "strictly_greater_than",
+                **gap,
+                "blocking_flags": flags,
+                "status": "review" if flags else "pass",
+            })
 
         source_interval = map_range.get("source_sample_interval")
         output_interval = map_range.get("output_cumulative_sample_interval")
@@ -823,6 +961,8 @@ def build_join_analysis(
             "expected_words": expected_records,
             "actual_words": [],
             "alignment": [],
+            "duplicate_insertions": [],
+            "duplicate_token_excess": [],
             "phrase_similarity": 0.0,
             "token_recall": 0.0,
             "status": "review",
@@ -902,14 +1042,20 @@ def build_join_analysis(
             " ".join(record["normalized"] for record in actual_records),
         )
         recall = matched / len(expected_records) if expected_records else 1.0
+        duplicate_insertions = duplicate_insertion_spans(alignment)
+        token_excess = duplicate_token_excess(expected_records, actual_records)
         flags = []
         if phrase_similarity < 0.85:
             flags.append("range_phrase_mismatch")
         if recall < 0.90:
             flags.append("range_token_recall_low")
+        if duplicate_insertions or token_excess:
+            flags.append("range_duplicate_content")
         result.update({
             "actual_words": actual_records,
             "alignment": alignment,
+            "duplicate_insertions": duplicate_insertions,
+            "duplicate_token_excess": token_excess,
             "phrase_similarity": round(phrase_similarity, 3),
             "token_recall": round(recall, 3),
             "status": "review" if flags else "pass",
@@ -1133,6 +1279,7 @@ def build_join_analysis(
     return {
         "ranges": range_results,
         "joins": join_results,
+        "internal_silence_checks": internal_silence_checks,
         "interword_residual_checks": residual_checks,
         "expected_text": expected_text,
         "timing_validation": {
@@ -1157,14 +1304,42 @@ def build_report(
     timeline_map_hash: str = "",
     source_transcript_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    cue_terms = list(dict.fromkeys(cue_terms))
     text = transcript_text(transcript_data)
+    raw_words = transcript_data.get("words", [])
+    if not isinstance(raw_words, list):
+        raise ValueError("preview transcript words must be a list")
+    words_list = [
+        word
+        for word in raw_words
+        if isinstance(word, dict) and word.get("type") == "word"
+    ]
+    word_text = " ".join(str(word.get("text") or "") for word in words_list)
     normalized = normalize_text(text)
     tokens = tokenize(text)
     sentences = split_sentences(text)
 
-    repeats = adjacent_repeats(sentences)
-    ngrams = repeated_ngrams(tokens)
-    cues = cue_hits(normalized, cue_terms)
+    # The provider's top-level text is convenient but is not authoritative:
+    # some providers can omit a cue or duplicate while retaining it in the
+    # timed word stream.  Both representations therefore participate in every
+    # content detector used by the readiness gate.
+    repeats = merge_unique_findings(
+        adjacent_repeats(sentences),
+        adjacent_repeats(split_sentences(word_text)),
+    )
+    ngrams = merge_unique_findings(
+        repeated_ngrams(tokens),
+        repeated_ngrams(tokenize(word_text)),
+    )
+    cue_candidates = cue_hits(normalized, cue_terms) + cue_hits(
+        normalize_text(word_text), cue_terms
+    )
+    cues_by_term: dict[str, dict[str, Any]] = {}
+    for hit in cue_candidates:
+        current = cues_by_term.get(hit["term"])
+        if current is None or hit["count"] > current["count"]:
+            cues_by_term[hit["term"]] = hit
+    cues = [cues_by_term[term] for term in cue_terms if term in cues_by_term]
     join_analysis = None
     if edl_data is not None or timeline_map is not None or source_transcripts is not None:
         if edl_data is None or timeline_map is None or source_transcripts is None:
@@ -1185,10 +1360,6 @@ def build_report(
         else None
     )
 
-    raw_words = transcript_data.get("words", [])
-    if not isinstance(raw_words, list):
-        raise ValueError("preview transcript words must be a list")
-    words_list = [w for w in raw_words if isinstance(w, dict) and w.get("type") == "word"]
     word_count = len(words_list) if "words" in transcript_data else len(tokens)
     timed_word_count = sum(
         1
@@ -1228,6 +1399,9 @@ def build_report(
 
     range_results = join_analysis["ranges"] if join_analysis else []
     join_results = join_analysis["joins"] if join_analysis else []
+    internal_silence_checks = (
+        join_analysis["internal_silence_checks"] if join_analysis else []
+    )
     residual_checks = join_analysis["interword_residual_checks"] if join_analysis else []
     timing_validation = join_analysis["timing_validation"] if join_analysis else {
         "untimed_words": [],
@@ -1235,13 +1409,14 @@ def build_report(
         "out_of_bounds_words": [],
     }
     if join_analysis:
-        word_text = " ".join(str(word.get("text") or "") for word in words_list)
         words_text_similarity = token_ratio(text, word_text)
         if words_text_similarity < 0.85:
             blocking_flags.append("transcript_text_words_mismatch")
         for result in range_results:
             blocking_flags.extend(result.get("blocking_flags", []))
         for result in join_results:
+            blocking_flags.extend(result.get("blocking_flags", []))
+        for result in internal_silence_checks:
             blocking_flags.extend(result.get("blocking_flags", []))
         for result in residual_checks:
             blocking_flags.extend(result.get("blocking_flags", []))
@@ -1278,11 +1453,14 @@ def build_report(
         "transcript_hash": transcript_hash,
         "source_transcript_hashes": source_transcript_hashes or {},
         "settings": {
+            "cue_terms": list(cue_terms),
             "join_context_words": 3,
             "anchor_similarity_min": 0.90,
             "phrase_similarity_min": 0.85,
             "expected_token_recall_min": 0.90,
             "cross_tolerance_frames": 2,
+            "internal_silence_cut_threshold_ms": 300,
+            "internal_silence_comparison": "strictly_greater_than",
             "interword_residual_tolerance_ms": 5,
         },
         "summary": {
@@ -1304,6 +1482,13 @@ def build_report(
             "join_count": len(join_results),
             "join_pass_count": sum(result.get("status") == "pass" for result in join_results),
             "join_review_count": sum(result.get("status") == "review" for result in join_results),
+            "internal_silence_count": len(internal_silence_checks),
+            "internal_silence_pass_count": sum(
+                result.get("status") == "pass" for result in internal_silence_checks
+            ),
+            "internal_silence_review_count": sum(
+                result.get("status") == "review" for result in internal_silence_checks
+            ),
             "interword_residual_count": len(residual_checks),
             "interword_residual_pass_count": sum(result.get("status") == "pass" for result in residual_checks),
             "interword_residual_review_count": sum(result.get("status") == "review" for result in residual_checks),
@@ -1320,6 +1505,7 @@ def build_report(
         "timing_validation": timing_validation,
         "ranges": range_results,
         "joins": join_results,
+        "internal_silence_checks": internal_silence_checks,
         "interword_residual_checks": residual_checks,
     }
     return report

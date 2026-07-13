@@ -21,6 +21,8 @@
 - Updated README, installation instructions, and modular steps.
 
 ### Fixed
+- Made every selected canonical word gap strictly above 300ms an automatic jump cut, with exact-300ms retention, reasoned per-gap overrides, and an independently recomputed readiness gate.
+- Kept disconnected breaths/transients out of new jump-cut tails; when two clean tail frames are physically unavailable, the one-frame constraint is explicit and verified by preview audio plus the second WhisperX pass.
 - Prevented legacy, unrefined, untimed, incomplete-join, or stale artifact sets from being treated as ready for agent-driven XML export.
 - Prevented long CTC blank spans from swallowing omitted recording cues; windowed two-pass consensus now recovers cues and re-aligns them against raw/RNNoise activity without trusting ordinary secondary-ASR text.
 - Prevented auditable out-of-selection acoustic activity from forcing an identical WhisperX retranscription on every run; provisional caches now continue to the mandatory selected-interval readiness audit.

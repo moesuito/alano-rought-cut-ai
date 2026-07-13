@@ -28,6 +28,8 @@ Alano Cut is a transcript-driven rough-cut harness for talking-head and course f
 ### CUT-02 — Audio-safe boundaries
 
 - WHEN an EDL is refined THEN the system SHALL preserve intended words while tightening silence by using ASR anchors, waveform evidence, and exportable video frames.
+- WHEN two selected consecutive canonical words have a lexical gap strictly greater than 300ms THEN the refiner SHALL create a jump cut before acoustic snapping; a gap equal to 300ms SHALL remain.
+- An intentional gap above 300ms SHALL survive only through an exact consecutive-word override with a non-empty reason; wildcard range overrides SHALL be rejected.
 - WHEN a preview is rendered THEN the system SHALL create only a dry PCM WAV/map and SHALL represent every range entry and join in audio QC.
 - WHEN a boundary has excessive entry inactivity, a tight lexical attack, residual rejected activity, damaged tail, clipping, or a severe join discontinuity THEN the agent SHALL stop before XML.
 
@@ -58,3 +60,4 @@ Alano Cut is a transcript-driven rough-cut harness for talking-head and course f
 - 2026-07-11 - Development harness introduced; v0.4.0 audio boundary refinement planned.
 - 2026-07-13 - Join-centric audio/transcript QC and the fail-closed v0.4.0 workflow made normative.
 - 2026-07-13 - Local CUDA WhisperX/faster-whisper with Community-1 exclusive diarization became the normative transcription source.
+- 2026-07-13 - Internal lexical gaps strictly above 300ms became deterministic jump cuts with fail-closed readiness validation.

@@ -36,7 +36,7 @@ Goal: render and validate the exact audio-only rough cut before XML export.
 .venv\Scripts\python.exe helpers\preview_transcript_qc.py <edit_dir>\preview.wav --provider whisperx --audio <edit_dir>\preview.wav --edl <edit_dir>\edl.json --transcripts <edit_dir>\transcripts --timeline-map <edit_dir>\preview_timeline.json --transcript-output <edit_dir>\transcripts\preview.json --output <edit_dir>\preview_transcript_qc.json
 ```
 
-6. Require both persisted artifacts and evidence for every range entry and every join. Check excessive entry inactivity, a tight first-word attack, residual rejected/cue activity, left-tail damage, clipping/pops, crossed joins, unexpected one- or two-token prefixes, missing/deformed expected words, duplicates, missing beats, and untimed preview words.
+6. Require both persisted artifacts and evidence for every range entry and every join. Check excessive entry inactivity, a tight first-word attack, residual rejected/cue activity, left-tail damage, clipping/pops, crossed joins, unexpected one- or two-token prefixes, missing/deformed expected words, duplicates, missing beats, untimed preview words, and any canonical internal lexical gap still above 300ms without an exact reasoned override.
 7. Treat global similarity and token recall as supplemental evidence; join-local expected suffix/prefix evidence is authoritative for transition integrity.
 8. Treat `preview.wav` and `preview_timeline.json` as QA only, not the final deliverable. Inspect cumulative preview times, not original-source timeline positions.
 9. If any EDL range changes, restart at the Step 07 refiner and regenerate every downstream artifact in this order.

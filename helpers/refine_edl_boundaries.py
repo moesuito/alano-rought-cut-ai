@@ -14,6 +14,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -24,6 +25,14 @@ from typing import Any
 import numpy as np
 
 from helpers.timing import format_fps_fraction, parse_fps_fraction, time_to_frame, frame_to_time
+from helpers.internal_silence import (
+    INTERNAL_SILENCE_OVERRIDE_FIELD,
+    INTERNAL_SILENCE_SPLIT_POLICY,
+    INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
+    compute_internal_silence_event_id,
+    decimal_timestamp,
+    evaluate_internal_silence_contract,
+)
 from helpers.audio_analysis import (
     EXPECTED_MODEL_HASH,
     get_ffmpeg_version,
@@ -37,6 +46,7 @@ from helpers.audio_analysis import (
     run_vad_hysteresis,
     load_pcm_data,
 )
+
 
 
 
@@ -78,6 +88,276 @@ def find_overlapping_words(
         if w_end > start and w_start < end:
             overlapping.append(w)
     return sorted(overlapping, key=lambda w: float(w["start"]))
+
+
+def split_ranges_on_internal_silence(
+    ranges: list[dict[str, Any]],
+    words_by_source: dict[str, list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split selected lexical spans at every internal gap strictly over 300 ms.
+
+    This transformation runs before acoustic boundary refinement.  Each child
+    receives its own immutable lexical selection bounds, so the normal snapper
+    subsequently resolves all four sides of the newly created jump cut.  A
+    pause survives only through an explicit, reasoned per-gap override.
+    """
+    if not isinstance(ranges, list):
+        raise ValueError("EDL ranges must be a list")
+    expanded: list[dict[str, Any]] = []
+    events_by_id: dict[str, dict[str, Any]] = {}
+    event_occurrences: dict[str, int] = {}
+
+    def register_event(event: object, label: str) -> None:
+        if not isinstance(event, dict):
+            raise ValueError(f"{label} audit_event must be an object")
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError(f"{label} audit_event has an invalid event_id")
+        if (
+            event.get("threshold_ms") != 300.0
+            or event.get("comparison") != "strictly_greater_than"
+            or event.get("action") not in {"split", "preserved_by_explicit_overrides"}
+        ):
+            raise ValueError(f"{label} audit_event is incomplete")
+        expected_event_id = compute_internal_silence_event_id(
+            event.get("source"),
+            event.get("original_selection"),
+            event.get("gaps"),
+            event.get("occurrence"),
+        )
+        if event_id != expected_event_id:
+            raise ValueError(f"{label} audit_event event_id is not reproducible")
+        existing = events_by_id.get(event_id)
+        if existing is not None and existing != event:
+            raise ValueError(f"{label} audit_event conflicts with another lineage")
+        events_by_id.setdefault(event_id, copy.deepcopy(event))
+
+    # Persisted event snapshots make a second run reproduce the exact audit
+    # event even when a child retains only an explicitly preserved gap.
+    for range_index, range_data in enumerate(ranges):
+        if not isinstance(range_data, dict):
+            continue
+        lineage = range_data.get("internal_silence_split")
+        if not isinstance(lineage, dict):
+            continue
+        audit_event = lineage.get("audit_event")
+        if audit_event is None:
+            raise ValueError(
+                f"range {range_index} internal_silence_split is missing audit_event"
+            )
+        if lineage.get("event_id") != (
+            audit_event.get("event_id") if isinstance(audit_event, dict) else None
+        ):
+            raise ValueError(
+                f"range {range_index} internal_silence_split event_id is stale"
+            )
+        register_event(audit_event, f"range {range_index} internal_silence_split")
+        occurrence_key = compute_internal_silence_event_id(
+            audit_event["source"],
+            audit_event["original_selection"],
+            audit_event["gaps"],
+            0,
+        )
+        event_occurrences[occurrence_key] = max(
+            event_occurrences.get(occurrence_key, 0),
+            int(audit_event["occurrence"]) + 1,
+        )
+
+    for parent_index, range_data in enumerate(ranges):
+        if not isinstance(range_data, dict):
+            raise ValueError(f"range {parent_index} must be an object")
+        source_id = range_data.get("source")
+        if not isinstance(source_id, str) or source_id not in words_by_source:
+            raise ValueError(f"range {parent_index} has an invalid source")
+
+        try:
+            original_start = decimal_timestamp(
+                range_data.get("original_start", range_data["start"]),
+                f"range {parent_index} original_start",
+            )
+            original_end = decimal_timestamp(
+                range_data.get("original_end", range_data["end"]),
+                f"range {parent_index} original_end",
+            )
+        except KeyError as exc:
+            raise ValueError(f"range {parent_index} is missing start/end") from exc
+        if original_end <= original_start:
+            raise ValueError(f"range {parent_index} must have end greater than start")
+
+        anchors = find_overlapping_words(
+            words_by_source[source_id], float(original_start), float(original_end)
+        )
+        canonical_words = sorted(
+            words_by_source[source_id], key=lambda word: float(word["start"])
+        )
+        canonical_index_by_identity = {
+            id(word): index for index, word in enumerate(canonical_words)
+        }
+        first_word_index = canonical_index_by_identity[id(anchors[0])] if anchors else 0
+        last_word_index = canonical_index_by_identity[id(anchors[-1])] if anchors else -1
+        detected = (
+            evaluate_internal_silence_contract(
+                range_data, canonical_words, first_word_index, last_word_index
+            )
+            if anchors
+            else []
+        )
+        split_gaps = [gap for gap in detected if not gap["preserve_override"]]
+        split_after = [
+            gap["left_word_index"] - first_word_index for gap in split_gaps
+        ]
+
+        if not detected:
+            expanded.append(dict(range_data))
+            continue
+
+        existing_lineage = range_data.get("internal_silence_split")
+        existing_audit_event = (
+            existing_lineage.get("audit_event")
+            if isinstance(existing_lineage, dict)
+            else None
+        )
+        if isinstance(existing_audit_event, dict):
+            persisted_preserved = [
+                gap
+                for gap in existing_audit_event.get("gaps", [])
+                if isinstance(gap, dict)
+                and gap.get("preserve_override") is True
+                and first_word_index <= gap.get("left_word_index", -1)
+                and gap.get("right_word_index", -1) <= last_word_index
+            ]
+            current_preserved = [
+                gap for gap in detected if gap.get("preserve_override") is True
+            ]
+            if persisted_preserved != current_preserved:
+                raise ValueError(
+                    f"range {parent_index} preserved internal-silence override "
+                    "does not match its persisted audit_event"
+                )
+        if existing_audit_event is not None and not split_gaps:
+            expanded.append(dict(range_data))
+            continue
+
+        original_selection = {
+            "start": float(original_start),
+            "end": float(original_end),
+        }
+        occurrence_key = compute_internal_silence_event_id(
+            source_id, original_selection, detected, 0
+        )
+        occurrence = event_occurrences.get(occurrence_key, 0)
+        event_occurrences[occurrence_key] = occurrence + 1
+        event_id = compute_internal_silence_event_id(
+            source_id, original_selection, detected, occurrence
+        )
+        event = {
+            "event_id": event_id,
+            "parent_range_index": parent_index,
+            "source": source_id,
+            "original_selection": original_selection,
+            "occurrence": occurrence,
+            "threshold_ms": float(INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000),
+            "comparison": "strictly_greater_than",
+            "action": "split" if split_gaps else "preserved_by_explicit_overrides",
+            "gaps": detected,
+        }
+        register_event(event, f"range {parent_index}")
+
+        if not split_gaps:
+            preserved = dict(range_data)
+            preserved["internal_silence_split"] = {
+                "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+                "event_id": event_id,
+                "parent_range_index": parent_index,
+                "segment_index": 0,
+                "segment_count": 1,
+                "audit_event": copy.deepcopy(event),
+            }
+            expanded.append(preserved)
+            continue
+
+        segment_bounds = [0] + [index + 1 for index in split_after] + [len(anchors)]
+        segment_count = len(segment_bounds) - 1
+        for segment_index, (anchor_start, anchor_stop) in enumerate(
+            zip(segment_bounds, segment_bounds[1:])
+        ):
+            segment_words = anchors[anchor_start:anchor_stop]
+            child = dict(range_data)
+            child_constraints = dict(range_data.get("boundary_constraints", {}))
+            # This is refiner-generated evidence tied to the old parent edge.
+            child_constraints.pop("end", None)
+            preserved_in_segment = [
+                {
+                    "left_word_index": gap["left_word_index"],
+                    "left_word": gap["left_word"],
+                    "right_word_index": gap["right_word_index"],
+                    "right_word": gap["right_word"],
+                    "reason": gap["override_reason"],
+                }
+                for gap in detected
+                if gap["preserve_override"]
+                and first_word_index + anchor_start <= gap["left_word_index"]
+                and gap["right_word_index"] < first_word_index + anchor_stop
+            ]
+            if preserved_in_segment:
+                child_constraints[INTERNAL_SILENCE_OVERRIDE_FIELD] = preserved_in_segment
+            else:
+                child_constraints.pop(INTERNAL_SILENCE_OVERRIDE_FIELD, None)
+            if child_constraints:
+                child["boundary_constraints"] = child_constraints
+            else:
+                child.pop("boundary_constraints", None)
+            for stale_key in (
+                "source_in_frame",
+                "source_out_frame",
+                "lexical_anchors",
+                "review_status",
+                "review_required",
+            ):
+                child.pop(stale_key, None)
+
+            child_start = original_start if segment_index == 0 else decimal_timestamp(
+                segment_words[0].get("start"),
+                f"range {parent_index} split segment start",
+            )
+            # Keep half of the discarded gap available to the acoustic
+            # refiner while staying away from both lexical components.
+            # Ending exactly at the left word's ASR timestamp would provide
+            # no tail budget and force a low-confidence clamp.
+            if segment_index == segment_count - 1:
+                child_end = original_end
+            else:
+                left_end = decimal_timestamp(
+                    segment_words[-1].get("end"),
+                    f"range {parent_index} split left word end",
+                )
+                right_start = decimal_timestamp(
+                    anchors[anchor_stop].get("start"),
+                    f"range {parent_index} split right word start",
+                )
+                child_end = left_end + (right_start - left_end) / 2
+            child.update({
+                "original_start": float(child_start),
+                "original_end": float(child_end),
+                "start": float(child_start),
+                "end": float(child_end),
+                "quote": " ".join(
+                    str(word.get("text") or "").strip()
+                    for word in segment_words
+                    if str(word.get("text") or "").strip()
+                ),
+                "internal_silence_split": {
+                    "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+                    "event_id": event_id,
+                    "parent_range_index": parent_index,
+                    "segment_index": segment_index,
+                    "segment_count": segment_count,
+                    "audit_event": copy.deepcopy(event),
+                },
+            })
+            expanded.append(child)
+
+    return expanded, list(events_by_id.values())
 
 
 def calculate_sha256_of_string(content: str) -> str:
@@ -176,6 +456,58 @@ def is_connected_crossing(activity_sig: np.ndarray, T: float) -> bool:
         if c_start < T and c_end > T:
             return True
     return False
+
+
+def is_anchor_connected_crossing(
+    activity_sig: np.ndarray,
+    boundary_time: float,
+    anchor_start: float,
+    anchor_end: float,
+) -> bool:
+    """Return True only when the boundary crosses the anchor's VAD component.
+
+    A disconnected breath or noise transient after the selected word must not
+    veto an otherwise safe lexical cut.  Render-level audio QC still inspects
+    the resulting join for a real discontinuity.
+    """
+    component_start: int | None = None
+    for index in range(len(activity_sig) + 1):
+        active = index < len(activity_sig) and bool(activity_sig[index])
+        if active and component_start is None:
+            component_start = index
+        elif not active and component_start is not None:
+            start_time = component_start * 0.005
+            end_time = index * 0.005
+            if (
+                start_time < boundary_time < end_time
+                and start_time < anchor_end
+                and end_time > anchor_start
+            ):
+                return True
+            component_start = None
+    return False
+
+
+def first_disconnected_component_before(
+    activity_sig: np.ndarray,
+    anchor_start: float,
+    anchor_end: float,
+    limit_time: float,
+) -> tuple[float, float] | None:
+    """Find post-anchor activity that would otherwise remain in the range."""
+    component_start: int | None = None
+    for index in range(len(activity_sig) + 1):
+        active = index < len(activity_sig) and bool(activity_sig[index])
+        if active and component_start is None:
+            component_start = index
+        elif not active and component_start is not None:
+            start_time = component_start * 0.005
+            end_time = index * 0.005
+            overlaps_anchor = start_time < anchor_end and end_time > anchor_start
+            if not overlaps_anchor and start_time >= anchor_end and start_time < limit_time:
+                return start_time, end_time
+            component_start = None
+    return None
 
 
 def get_pre_onset_attack_risk(
@@ -368,6 +700,60 @@ def find_prelexical_transient_bridge(
     return min(bridged, key=lambda item: (item[0], item[1]))[2]
 
 
+def is_exact_one_frame_disconnected_tail_constraint(
+    constraint: object,
+) -> bool:
+    """Return whether the only permitted shortened tail is fully evidenced."""
+    return (
+        isinstance(constraint, dict)
+        and constraint.get("reason") == "disconnected_post_word_activity"
+        and type(constraint.get("required_tail_frames")) is int
+        and constraint.get("required_tail_frames") == 2
+        and type(constraint.get("available_tail_frames")) is int
+        and constraint.get("available_tail_frames") == 1
+    )
+
+
+def has_valid_tail_budget(
+    available_tail_frames: object,
+    *,
+    allow_one_frame_exception: bool = False,
+) -> bool:
+    """Require two frames, except for the audited disconnected one-frame case."""
+    return (
+        type(available_tail_frames) is int
+        and (
+            available_tail_frames >= 2
+            or (allow_one_frame_exception and available_tail_frames == 1)
+        )
+    )
+
+
+def ensure_immutable_backup(
+    backup_path: Path,
+    input_raw_bytes: bytes,
+    input_hash: str,
+) -> None:
+    """Create and sync a content-addressed backup, or verify its exact bytes."""
+    try:
+        with open(backup_path, "xb") as backup_file:
+            backup_file.write(input_raw_bytes)
+            backup_file.flush()
+            os.fsync(backup_file.fileno())
+    except FileExistsError:
+        pass
+
+    try:
+        backup_bytes = backup_path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read immutable EDL backup: {exc}") from exc
+    backup_hash = hashlib.sha256(backup_bytes).hexdigest()
+    if backup_hash != input_hash or backup_bytes != input_raw_bytes:
+        raise RuntimeError(
+            "immutable EDL backup does not match the current input bytes"
+        )
+
+
 
 
 def main() -> None:
@@ -493,7 +879,13 @@ def main() -> None:
             sys.exit(1)
 
     # ------------------ Process Refinement ------------------
-    ranges = edl.get("ranges", [])
+    try:
+        ranges, internal_silence_events = split_ranges_on_internal_silence(
+            edl.get("ranges", []), words_by_source
+        )
+    except Exception as e:
+        print(f"Fatal Error: Internal silence split preflight failed: {e}", file=sys.stderr)
+        sys.exit(1)
     boundary_evidence = []
     source_fingerprints = {}
     has_low_confidence = False
@@ -932,12 +1324,32 @@ def main() -> None:
         orig_boundary_time = float(Fraction(F_orig_out, 1) / fps)
         refined_boundary_time = float(Fraction(F_out, 1) / fps)
         has_tail_crossing_orig = (
-            is_connected_crossing(activity_raw, orig_boundary_time)
-            or is_connected_crossing(activity_rnn, orig_boundary_time)
+            is_anchor_connected_crossing(
+                activity_raw,
+                orig_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
+            or is_anchor_connected_crossing(
+                activity_rnn,
+                orig_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
         )
         has_tail_crossing_refined = (
-            is_connected_crossing(activity_raw, refined_boundary_time)
-            or is_connected_crossing(activity_rnn, refined_boundary_time)
+            is_anchor_connected_crossing(
+                activity_raw,
+                refined_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
+            or is_anchor_connected_crossing(
+                activity_rnn,
+                refined_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
         )
 
         # Defensible offset evidence:
@@ -997,8 +1409,18 @@ def main() -> None:
             excludes_next = next_word is None or preview_out_frame <= F_next_limit
             preview_boundary_time = float(Fraction(preview_out_frame, 1) / fps)
             preview_crossing = (
-                is_connected_crossing(activity_raw, preview_boundary_time)
-                or is_connected_crossing(activity_rnn, preview_boundary_time)
+                is_anchor_connected_crossing(
+                    activity_raw,
+                    preview_boundary_time,
+                    float(last_word["start"]),
+                    float(last_word["end"]),
+                )
+                or is_anchor_connected_crossing(
+                    activity_rnn,
+                    preview_boundary_time,
+                    float(last_word["start"]),
+                    float(last_word["end"]),
+                )
             )
             if (
                 contains_lexical_end
@@ -1006,6 +1428,7 @@ def main() -> None:
                 and not preview_crossing
                 and not has_end_collision
                 and not is_end_overlapping_lexical
+                and has_valid_tail_budget(available_tail_frames)
             ):
                 F_out = preview_out_frame
                 t_offset = offset_evidence
@@ -1027,6 +1450,93 @@ def main() -> None:
                         "next_word_start": float(next_word["start"]),
                     }
                     end_notes.append("neighbor_constrained_tail")
+
+        # A breath/noise component disconnected from the last selected word
+        # is not lexical tail and must not survive inside the left range.  If
+        # the normal two-frame endpoint would include it, move to the last
+        # frame boundary before that component.  A one-frame tail is allowed
+        # only through this explicit constraint and remains subject to the
+        # independently rendered preview QC.
+        proposed_boundary_time = float(Fraction(F_out, 1) / fps)
+        disconnected_candidates = []
+        for signal_name, activity_signal in (
+            ("raw", activity_raw),
+            ("rnnoise", activity_rnn),
+        ):
+            component = first_disconnected_component_before(
+                activity_signal,
+                float(last_word["start"]),
+                float(last_word["end"]),
+                proposed_boundary_time,
+            )
+            if component is not None:
+                disconnected_candidates.append((component[0], component[1], signal_name))
+        if disconnected_candidates:
+            first_component_start = min(item[0] for item in disconnected_candidates)
+            first_component_end = max(
+                item[1]
+                for item in disconnected_candidates
+                if item[0] == first_component_start
+            )
+            safe_out_frame = time_to_frame(first_component_start, fps, "floor")
+            minimum_lexical_frame = time_to_frame(float(last_word["end"]), fps, "ceil")
+            if safe_out_frame >= max(minimum_lexical_frame, F_evidence):
+                F_out = min(F_out, safe_out_frame)
+                available_tail_frames = F_out - F_evidence
+                t_offset = offset_evidence
+                tail_frames = available_tail_frames
+                has_insufficient_tail = available_tail_frames < 2
+                cuts_last_word = False
+                is_clamped_end = False
+                is_lexical_safe_end = False
+                is_preview_guarded_end_fallback = True
+                tail_guard_measured_from = "offset_evidence"
+                tail_guard_base_time = offset_evidence
+                end_boundary_constraint = {
+                    "reason": "disconnected_post_word_activity",
+                    "required_tail_frames": 2,
+                    "available_tail_frames": available_tail_frames,
+                    "activity_start": first_component_start,
+                    "activity_end": first_component_end,
+                    "signals": sorted({
+                        item[2]
+                        for item in disconnected_candidates
+                        if item[0] == first_component_start
+                    }),
+                }
+                if has_valid_tail_budget(
+                    available_tail_frames,
+                    allow_one_frame_exception=True,
+                ):
+                    end_notes.append("disconnected_post_word_activity_guard")
+                else:
+                    # Zero available tail is not a narrower version of the
+                    # exception: this limit must remain original and block.
+                    is_preview_guarded_end_fallback = False
+                    end_boundary_constraint = None
+                    end_rejection_reasons.append(
+                        "disconnected_activity_without_one_frame_tail"
+                    )
+            else:
+                is_clamped_end = True
+                end_rejection_reasons.append("disconnected_activity_collision")
+
+        # The candidate may have changed after lexical/disconnected guards.
+        refined_boundary_time = float(Fraction(F_out, 1) / fps)
+        has_tail_crossing_refined = (
+            is_anchor_connected_crossing(
+                activity_raw,
+                refined_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
+            or is_anchor_connected_crossing(
+                activity_rnn,
+                refined_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
+        )
 
 
         # Threshold sweep for agreement and stability independently
@@ -1338,8 +1848,18 @@ def main() -> None:
 
         final_boundary_time = float(Fraction(final_out_frame, 1) / fps)
         has_tail_crossing_final = (
-            is_connected_crossing(activity_raw, final_boundary_time)
-            or is_connected_crossing(activity_rnn, final_boundary_time)
+            is_anchor_connected_crossing(
+                activity_raw,
+                final_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
+            or is_anchor_connected_crossing(
+                activity_rnn,
+                final_boundary_time,
+                float(last_word["start"]),
+                float(last_word["end"]),
+            )
         )
         tail_frames = final_out_frame - time_to_frame(offset_evidence, fps, "ceil")
 
@@ -1563,13 +2083,12 @@ def main() -> None:
     backups_dir.mkdir(parents=True, exist_ok=True)
     backup_path = backups_dir / f"edl.{input_hash}.json"
 
-    # Immutable create-exclusive dedup backup
-    if not backup_path.exists():
-        try:
-            with open(backup_path, "xb") as f:
-                f.write(input_raw_bytes)
-        except FileExistsError:
-            pass
+    # Immutable create-exclusive dedup backup, verified before any replace.
+    try:
+        ensure_immutable_backup(backup_path, input_raw_bytes, input_hash)
+    except RuntimeError as exc:
+        print(f"Fatal Error: Backup preflight failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Serialize output files
     edl_output_str = json.dumps(edl_new, indent=2, ensure_ascii=False)
@@ -1579,6 +2098,25 @@ def main() -> None:
     report = {
         "status": "review" if has_low_confidence else "pass",
         "settings": DEFAULT_VAD_PARAMS,
+        "internal_silence_policy": {
+            "policy": INTERNAL_SILENCE_SPLIT_POLICY,
+            "threshold_ms": float(INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000),
+            "comparison": "strictly_greater_than",
+            "authority": "canonical_whisperx_words",
+            "override_field": (
+                f"boundary_constraints.{INTERNAL_SILENCE_OVERRIDE_FIELD}"
+            ),
+            "detected_gap_count": sum(len(event["gaps"]) for event in internal_silence_events),
+            "split_gap_count": sum(
+                sum(not gap["preserve_override"] for gap in event["gaps"])
+                for event in internal_silence_events
+            ),
+            "preserved_gap_count": sum(
+                sum(gap["preserve_override"] for gap in event["gaps"])
+                for event in internal_silence_events
+            ),
+        },
+        "internal_silence_events": internal_silence_events,
         "input_edl_hash": input_hash,
         "output_edl_hash": output_hash,
         "source_fingerprints": source_fingerprints,

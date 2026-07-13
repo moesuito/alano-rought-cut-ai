@@ -200,7 +200,7 @@ These criteria apply identically to Protocol A and Protocol B. Finish only when:
 - every included source and preview transcript uses the canonical WhisperX schema, matching hashes/configuration, 100% forced-aligned word timing, and Community-1 diarization;
 - the EDL is coherent, duration-checked, structurally valid, declares `sequence_fps` and `required_beats`, and uses refined exact-frame ranges;
 - every join is represented in both preview audio QC and timed preview transcript QC;
-- no unresolved boundary review, excessive entry silence, tight first-word attack, orphan cue/token, crossed join, missing beat, or stale hash remains;
+- no unresolved boundary review, uncut canonical internal silence above 300ms, excessive entry silence, tight first-word attack, orphan cue/token, crossed join, missing beat, or stale hash remains;
 - material EDL revisions restarted the mandatory chain at boundary refinement;
 - `verify_edit_ready.py` returned exit code 0 for the exact EDL, WAV, map, transcripts, and reports being exported;
 - `edit/timeline.xml` exists, has the intended sequence name, and references original media;

@@ -25,10 +25,16 @@ import json
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+if __name__ == "__main__" and __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from helpers.internal_silence import gap_exceeds_internal_silence_threshold
 
 
 # -------- Frame extraction ---------------------------------------------------
@@ -132,18 +138,26 @@ def words_in_range(transcript_path: Path, start: float, end: float) -> list[dict
     return out
 
 
-def find_silences(words: list[dict], start: float, end: float, threshold: float = 0.4) -> list[tuple[float, float]]:
-    """Find gaps >= threshold seconds inside [start, end] between kept tokens."""
+def find_silences(words: list[dict], start: float, end: float, threshold: float = 0.3) -> list[tuple[float, float]]:
+    """Find gaps strictly above threshold inside [start, end] between tokens."""
     gaps: list[tuple[float, float]] = []
     prev_end = start
     for w in words:
         if w.get("type") == "spacing":
             continue
         ws = max(start, w.get("start", start))
-        if ws - prev_end >= threshold:
+        if gap_exceeds_internal_silence_threshold(
+            prev_end,
+            ws,
+            threshold_seconds=Decimal(str(threshold)),
+        ):
             gaps.append((prev_end, ws))
         prev_end = max(prev_end, w.get("end", ws))
-    if end - prev_end >= threshold:
+    if gap_exceeds_internal_silence_threshold(
+        prev_end,
+        end,
+        threshold_seconds=Decimal(str(threshold)),
+    ):
         gaps.append((prev_end, end))
     return gaps
 
@@ -265,7 +279,7 @@ def render_timeline(
 
         # Silence shading (under the waveform)
         words = words_in_range(transcript, start, end) if transcript else []
-        silences = find_silences(words, start, end, threshold=0.4) if words else []
+        silences = find_silences(words, start, end, threshold=0.3) if words else []
         for a, b in silences:
             xa = time_to_x(a)
             xb = time_to_x(b)
@@ -322,7 +336,7 @@ def render_timeline(
 
         # Silences legend if any
         if silences:
-            txt = f"shaded bands = silences ≥ 400ms ({len(silences)} gap(s))"
+            txt = f"shaded bands = silences > 300ms ({len(silences)} gap(s))"
             draw.text((strip_x0, label_y + 30), txt, fill=DIM, font=label_font)
 
         out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -30,9 +30,10 @@ Goal: finish editorial/runtime revision, then deterministically refine every bou
 ```
 
 7. Require exit code 0. Exit code 2 means review is still required; exit code 1 is a structural/runtime failure. Do not render a preview after either non-zero result.
-8. Confirm every range now has integer `source_in_frame` / `source_out_frame`, `review_required: false`, and matching evidence in `edl_boundary_qc.json`.
-9. If an editorial change is made after refinement, restart from this refiner command; downstream artifacts are stale.
-10. Update `edit/run_state.md` with total duration, revision rationale, EDL/report hashes, and boundary-refiner status.
+8. The refiner automatically splits every selected canonical consecutive-word gap strictly greater than 300ms before acoustic snapping. Confirm `edl_boundary_qc.json.internal_silence_policy` reports the fixed threshold and every preserved gap has an exact reasoned per-gap override.
+9. Confirm every range now has integer `source_in_frame` / `source_out_frame`, `review_required: false`, and matching evidence in `edl_boundary_qc.json`.
+10. If an editorial change is made after refinement, restart from this refiner command; downstream artifacts are stale.
+11. Update `edit/run_state.md` with total duration, revision rationale, EDL/report hashes, and boundary-refiner status.
 
 ## Rough Defaults When No Target Exists
 
