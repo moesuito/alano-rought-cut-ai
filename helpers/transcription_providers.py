@@ -257,6 +257,7 @@ class WhisperXProvider:
             raise TranscriptionProviderError(
                 f"acoustic word validation failed: {type(error).__name__}: {error}"
             ) from error
+        acoustic_timing["revision"] = self.config.acoustic_snap_revision
         transcript = convert_whisperx_result(
             raw,
             raw.get("diarization"),

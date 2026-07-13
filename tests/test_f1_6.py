@@ -225,6 +225,106 @@ def test_lexical_fallback(setup_dirs, monkeypatch):
     assert evidence["final_times"]["start"] == 0.2
 
 
+@pytest.mark.parametrize("connected_previous", [False, True])
+def test_preview_guarded_lexical_start_handles_detector_disagreement_or_connected_direction(
+    setup_dirs, monkeypatch, connected_previous
+):
+    """A safe lexical frame may replace ambiguous VAD, but never the word attack."""
+    edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs
+    mock_setup(monkeypatch)
+
+    transcript_data = {
+        "words": [
+            {"text": "deixar", "start": 0.10, "end": 0.20, "type": "word"},
+            {"text": "informe", "start": 0.30, "end": 0.40, "type": "word"},
+            {"text": "o", "start": 0.45, "end": 0.50, "type": "word"},
+            {"text": "endereco", "start": 0.55, "end": 0.70, "type": "word"},
+        ]
+    }
+    transcript_path = transcripts_dir / "test_source.json"
+    transcript_path.write_text(json.dumps(transcript_data), encoding="utf-8")
+
+    from helpers.audio_analysis import get_source_fingerprint
+
+    fingerprint = get_source_fingerprint(
+        source_path,
+        EXPECTED_MODEL_HASH,
+        DEFAULT_VAD_PARAMS,
+        "ffmpeg version 5.0.1",
+        transcript_path,
+    )
+    write_dummy_cache(analysis_dir, fingerprint, source_path)
+
+    raw_activity = np.zeros(200, dtype=bool)
+    raw_activity[20 if connected_previous else 50:140] = True
+    rnn_activity = np.zeros(200, dtype=bool)
+    rnn_activity[60 if connected_previous else 70:140] = True
+    raw_rms = np.full(200, -10.0)
+    raw_rms[::2] = -9.0
+    rnn_rms = raw_rms.copy()
+    noise_floor = np.full(200, -50.0)
+
+    def mock_get_combined_activity(raw_pcm_path, rnn_pcm_path, params, words=None):
+        return (
+            raw_activity.copy(),
+            rnn_activity.copy(),
+            0,
+            raw_rms,
+            rnn_rms,
+            noise_floor,
+            noise_floor.copy(),
+        )
+
+    def mock_run_vad(rms, nf, high_t, low_t, gap, trans):
+        return raw_activity.copy() if rms is raw_rms else rnn_activity.copy()
+
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.get_combined_activity",
+        mock_get_combined_activity,
+    )
+    monkeypatch.setattr(
+        "helpers.refine_edl_boundaries.run_vad_hysteresis",
+        mock_run_vad,
+    )
+
+    edl_path = edit_dir / "edl.json"
+    edl_path.write_text(
+        json.dumps({
+            "version": 1,
+            "sources": {"test_source": "test_source.wav"},
+            "ranges": [{"source": "test_source", "start": 0.30, "end": 0.80}],
+        }),
+        encoding="utf-8",
+    )
+    report_path = edit_dir / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "helpers/refine_edl_boundaries.py",
+            str(edl_path),
+            "--transcripts",
+            str(transcripts_dir),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    try:
+        refine_main()
+    except SystemExit:
+        pass
+
+    evidence = json.loads(report_path.read_text(encoding="utf-8"))["boundary_evidence"][0]
+    assert evidence["confidence"]["start"] == "medium"
+    assert evidence["start_side"]["lexical_fallback"] is True
+    assert evidence["start_side"]["preview_guarded_fallback"] is True
+    assert evidence["start_side"]["final_decision"] == "lexical_fallback"
+    assert "preview_transcript_guarded_lexical_fallback" in evidence["start_side"]["notes"]
+    assert evidence["start_side"]["proposed_cuts_first_word_attack"] is False
+    assert evidence["final_frames"]["in"] == 9
+
+
 def test_rejected_neighbor_guarding_cue(setup_dirs, monkeypatch):
     """Test 3: Rejected cue word 'corta' connected to the anchor is guarded."""
     edit_dir, transcripts_dir, analysis_dir, source_path = setup_dirs

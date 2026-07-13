@@ -27,6 +27,7 @@ from helpers.timing import frame_to_sample, parse_fps_fraction
 from helpers.transcription_contract import (
     TranscriptContractError,
     validate_normative_transcript,
+    validate_normative_transcript_for_intervals,
 )
 
 
@@ -361,6 +362,7 @@ def validate_transcript_report(
     transcript_data: object,
     edl_ranges: list[dict[str, object]],
     map_ranges: list[dict[str, object]],
+    source_transcripts: dict[str, dict[str, object]],
 ) -> list[str]:
     """Recompute the mandatory range/join status from report evidence."""
     errors: list[str] = []
@@ -373,6 +375,7 @@ def validate_transcript_report(
 
     ranges = transcript_data.get("ranges")
     joins = transcript_data.get("joins")
+    residual_checks = transcript_data.get("interword_residual_checks")
     summary = transcript_data.get("summary")
     timing = transcript_data.get("timing_validation")
     if not isinstance(ranges, list):
@@ -381,6 +384,9 @@ def validate_transcript_report(
     if not isinstance(joins, list):
         errors.append("joins is missing or not a list")
         joins = []
+    if not isinstance(residual_checks, list):
+        errors.append("interword_residual_checks is missing or not a list")
+        residual_checks = []
     if not isinstance(summary, dict):
         errors.append("summary is missing or not an object")
         summary = {}
@@ -396,6 +402,7 @@ def validate_transcript_report(
 
     range_review_count = 0
     join_review_count = 0
+    residual_review_count = 0
     evidence_flags: list[str] = []
     for position, result in enumerate(ranges):
         if not isinstance(result, dict):
@@ -447,6 +454,125 @@ def validate_transcript_report(
             ):
                 errors.append(f"joins[{position}] identity does not match timeline map")
 
+    for position, result in enumerate(residual_checks):
+        if not isinstance(result, dict):
+            errors.append(f"interword_residual_checks[{position}] is not an object")
+            continue
+        flags = result.get("blocking_flags")
+        if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+            errors.append(f"interword_residual_checks[{position}] blocking_flags is invalid")
+            flags = []
+        selection_status = result.get("selection_status")
+        if selection_status == "selected":
+            range_index = result.get("range_index")
+            checks = result.get("checks")
+            if (
+                not isinstance(range_index, int)
+                or isinstance(range_index, bool)
+                or range_index < 0
+                or range_index >= len(map_ranges)
+            ):
+                errors.append(f"interword_residual_checks[{position}] range identity is invalid")
+            if not isinstance(checks, dict) or not all(
+                checks.get(key) is True
+                for key in (
+                    "neighbors_faithful",
+                    "neighbors_consecutive",
+                    "no_preview_word_overlap",
+                )
+            ):
+                if "selected_interword_residual_unresolved" not in flags:
+                    errors.append(
+                        f"interword_residual_checks[{position}] omits unresolved evidence"
+                    )
+        elif selection_status == "outside_selection":
+            if flags:
+                errors.append(
+                    f"interword_residual_checks[{position}] outside selection has blockers"
+                )
+        elif "selected_interword_residual_unresolved" not in flags:
+            errors.append(
+                f"interword_residual_checks[{position}] invalid evidence is not blocking"
+            )
+        expected_status = "review" if flags else "pass"
+        if result.get("status") != expected_status:
+            errors.append(
+                f"interword_residual_checks[{position}] status contradicts blocking_flags"
+            )
+        if expected_status == "review":
+            residual_review_count += 1
+        evidence_flags.extend(flags)
+
+    def residual_identity(
+        source_id: object,
+        residual_index: object,
+        component: object,
+        previous: object,
+        following: object,
+    ) -> tuple[str, int, int, float, float, int, int] | None:
+        if (
+            not isinstance(source_id, str)
+            or not isinstance(residual_index, int)
+            or isinstance(residual_index, bool)
+            or not isinstance(component, dict)
+            or not isinstance(previous, dict)
+            or not isinstance(following, dict)
+        ):
+            return None
+        try:
+            return (
+                source_id,
+                residual_index,
+                int(component["index"]),
+                round(float(component["start"]), 6),
+                round(float(component["end"]), 6),
+                int(previous["index"]),
+                int(following["index"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    expected_residual_identities = []
+    for source_id, source_transcript in source_transcripts.items():
+        metadata = source_transcript.get("_alano_cut")
+        acoustic = metadata.get("acoustic_timing") if isinstance(metadata, dict) else None
+        residuals = acoustic.get("nonblocking_outliers", []) if isinstance(acoustic, dict) else []
+        if not isinstance(residuals, list):
+            errors.append(f"source transcript {source_id!r} residual evidence is invalid")
+            continue
+        for residual_index, residual in enumerate(residuals):
+            if not isinstance(residual, dict) or residual.get("type") != "nonblocking_interword_residual":
+                continue
+            identity = residual_identity(
+                source_id,
+                residual_index,
+                residual.get("component"),
+                residual.get("previous_word"),
+                residual.get("following_word"),
+            )
+            if identity is None:
+                errors.append(f"source transcript {source_id!r} residual identity is invalid")
+            else:
+                expected_residual_identities.append(identity)
+
+    observed_residual_identities = []
+    for position, result in enumerate(residual_checks):
+        if not isinstance(result, dict):
+            continue
+        identity = residual_identity(
+            result.get("source"),
+            result.get("residual_index"),
+            result.get("source_component"),
+            result.get("previous_word"),
+            result.get("following_word"),
+        )
+        if identity is None:
+            errors.append(f"interword_residual_checks[{position}] identity is invalid")
+        else:
+            observed_residual_identities.append(identity)
+    if sorted(observed_residual_identities) != sorted(expected_residual_identities):
+        errors.append("interword residual checks do not match source transcript evidence")
+
     timing_flag_map = {
         "untimed_words": {"incomplete_word_timestamps", "missing_timed_words"},
         "invalid_words": {"invalid_preview_word_timestamps"},
@@ -466,6 +592,9 @@ def validate_transcript_report(
         "join_count": len(joins),
         "join_pass_count": len(joins) - join_review_count,
         "join_review_count": join_review_count,
+        "interword_residual_count": len(residual_checks),
+        "interword_residual_pass_count": len(residual_checks) - residual_review_count,
+        "interword_residual_review_count": residual_review_count,
     }
     for key, value in expected_summary.items():
         if summary.get(key) != value:
@@ -767,11 +896,29 @@ def main() -> None:
             print(f"FATAL: Range {idx} does not have 'review_required' set to exactly False.")
             sys.exit(1)
 
+    source_transcripts_for_qc: dict[str, dict[str, object]] = {}
     for source_id in sources:
         t_path = transcripts_dir / f"{source_id}.json"
         try:
             source_transcript = json.loads(t_path.read_text(encoding="utf-8"))
-            validate_normative_transcript(source_transcript)
+            source_transcripts_for_qc[source_id] = source_transcript
+            selected_intervals = [
+                (
+                    frame_to_sample(int(item["source_in_frame"]), edl_fps) / 48000.0,
+                    frame_to_sample(int(item["source_out_frame"]), edl_fps) / 48000.0,
+                )
+                for item in ranges
+                if isinstance(item, dict) and item.get("source") == source_id
+            ]
+            scoped_blockers = validate_normative_transcript_for_intervals(
+                source_transcript,
+                selected_intervals,
+            )
+            if scoped_blockers:
+                print(
+                    f"AUDIT: Source transcript {source_id} retains "
+                    f"{len(scoped_blockers)} acoustic blocker(s), all outside selected audio."
+                )
         except (OSError, json.JSONDecodeError, TranscriptContractError) as error:
             print(
                 f"FATAL: Source transcript {source_id} is not a canonical, "
@@ -794,7 +941,12 @@ def main() -> None:
     if transcript_data.get("preview_wav_hash") != current_wav_hash:
         print(f"STALE: Preview transcript QC report WAV hash mismatch. Re-run preview transcript QC.")
         stale = True
-    transcript_errors = validate_transcript_report(transcript_data, edl_ranges, map_ranges)
+    transcript_errors = validate_transcript_report(
+        transcript_data,
+        edl_ranges,
+        map_ranges,
+        source_transcripts_for_qc,
+    )
     if transcript_errors:
         for error in transcript_errors:
             print(f"FATAL: Preview transcript QC schema/consistency error: {error}.")

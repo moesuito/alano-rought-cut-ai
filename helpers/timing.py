@@ -53,6 +53,14 @@ def parse_fps_fraction(fps: Any) -> Fraction:
     raise TypeError(f"Invalid frame rate type: {type(fps)}")
 
 
+def format_fps_fraction(fps: Fraction) -> str:
+    """Serialize an FPS authority without losing its rational identity."""
+    value = parse_fps_fraction(fps)
+    if value.denominator == 1:
+        return str(value.numerator)
+    return f"{value.numerator}/{value.denominator}"
+
+
 def time_to_frame(t: float | Fraction, fps: Fraction, mode: str = "round") -> int:
     """Convert a time in seconds to a frame index using rational math.
 

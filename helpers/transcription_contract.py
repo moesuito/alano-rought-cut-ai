@@ -9,6 +9,7 @@ failure handling available before the GPU runtime is loaded.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ DEFAULT_PORTUGUESE_HOTWORDS: str | None = None
 DEFAULT_PRIMARY_MODEL_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 DEFAULT_SEMANTIC_VERIFIER_MODEL = "small"
 DEFAULT_SEMANTIC_FUSION_REVISION = "windowed-consensus-v1"
+DEFAULT_ACOUSTIC_SNAP_REVISION = "interword-residual-v1"
 DEFAULT_SEMANTIC_VERIFIER_REVISION = "536b0662742c02347bc0e980a01041f333bce120"
 DEFAULT_ALIGN_MODEL_REVISION = "634ac655299bcdc46c83bc01da9bab52d2987e4f"
 DEFAULT_DIARIZATION_MODEL_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
@@ -67,6 +69,7 @@ class WhisperXConfig:
     semantic_verifier_revision: str | None = DEFAULT_SEMANTIC_VERIFIER_REVISION
     semantic_fusion_mode: str = "guarded_union"
     semantic_fusion_revision: str = DEFAULT_SEMANTIC_FUSION_REVISION
+    acoustic_snap_revision: str = DEFAULT_ACOUSTIC_SNAP_REVISION
     recording_cues: str = DEFAULT_RECORDING_CUES
     language: str | None = "pt"
     device: str = "cuda"
@@ -93,6 +96,7 @@ class WhisperXConfig:
             "semantic_verifier_model",
             "semantic_fusion_mode",
             "semantic_fusion_revision",
+            "acoustic_snap_revision",
             "recording_cues",
             "device",
             "compute_type",
@@ -784,6 +788,7 @@ def validate_normative_transcript(
     if not isinstance(acoustic_timing, Mapping) or (
         acoustic_timing.get("status") != "pass"
         or acoustic_timing.get("blocking_outlier_count") != 0
+        or acoustic_timing.get("revision") != config.get("acoustic_snap_revision")
         or acoustic_timing.get("source_sha256") != metadata.get("source_sha256")
         or acoustic_timing.get("rnnoise_model_sha256") != EXPECTED_RNNOISE_MODEL_HASH
         or not isinstance(acoustic_timing.get("parameters"), Mapping)
@@ -793,13 +798,139 @@ def validate_normative_transcript(
         raise TranscriptContractError("acoustic timing validation binding is invalid")
 
 
+def validate_provisional_normative_transcript(
+    transcript: Mapping[str, Any],
+    *,
+    max_overlap_seconds: float = 0.25,
+) -> list[dict[str, Any]]:
+    """Validate a transcript whose only open issue is scopeable activity.
+
+    Step 02 necessarily runs before the editorial EDL exists.  A fully bound
+    CUDA/WhisperX transcript may therefore remain provisionally usable when
+    its only blockers are well-formed, unattributed acoustic components.  The
+    selected-interval gate must still resolve every such blocker before XML.
+
+    Returns the blockers retained for later interval audit.  A globally
+    normative transcript returns an empty list.
+    """
+    try:
+        validate_normative_transcript(
+            transcript,
+            max_overlap_seconds=max_overlap_seconds,
+        )
+        return []
+    except TranscriptContractError as original_error:
+        metadata = transcript.get("_alano_cut")
+        acoustic_timing = (
+            metadata.get("acoustic_timing")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if not isinstance(acoustic_timing, Mapping) or acoustic_timing.get("status") != "review":
+            raise original_error
+
+    blockers = acoustic_timing.get("blocking_outliers")
+    if (
+        not isinstance(blockers, list)
+        or acoustic_timing.get("blocking_outlier_count") != len(blockers)
+        or not blockers
+    ):
+        raise TranscriptContractError("acoustic blocker list is invalid")
+
+    audited: list[dict[str, Any]] = []
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping) or blocker.get("type") != "unattributed_bilateral_activity":
+            raise TranscriptContractError("non-scopeable acoustic blocker requires review")
+        component = blocker.get("component")
+        if not isinstance(component, Mapping):
+            raise TranscriptContractError("acoustic blocker component is invalid")
+        try:
+            blocker_start = float(component["start"])
+            blocker_end = float(component["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TranscriptContractError("acoustic blocker interval is invalid") from exc
+        if (
+            not math.isfinite(blocker_start)
+            or not math.isfinite(blocker_end)
+            or blocker_start < 0.0
+            or blocker_end <= blocker_start
+        ):
+            raise TranscriptContractError("acoustic blocker interval is invalid")
+        audited.append(dict(blocker))
+
+    # Prove that the original strict failure is exclusively the auditable
+    # acoustic status.  Every other schema/model/runtime/alignment field still
+    # passes the complete normative validator.
+    scoped = copy.deepcopy(dict(transcript))
+    scoped_acoustic = scoped["_alano_cut"]["acoustic_timing"]
+    scoped_acoustic["status"] = "pass"
+    scoped_acoustic["blocking_outlier_count"] = 0
+    scoped_acoustic["blocking_outliers"] = []
+    validate_normative_transcript(
+        scoped,
+        max_overlap_seconds=max_overlap_seconds,
+    )
+    return audited
+
+
+def validate_normative_transcript_for_intervals(
+    transcript: Mapping[str, Any],
+    selected_intervals: Iterable[tuple[float, float]],
+    *,
+    max_overlap_seconds: float = 0.25,
+) -> list[dict[str, Any]]:
+    """Validate a source transcript for the intervals actually used by an EDL.
+
+    A source take may legitimately contain unexplained slate/countdown speech
+    that the edit never selects.  The global transcript remains ``review`` for
+    audit and cache purposes, while final readiness may proceed only when every
+    acoustic blocker is a well-formed orphan entirely outside all selected
+    source intervals.  Any blocker touching selected audio remains fatal.
+
+    Returns the audited, out-of-scope blockers.  A globally normative
+    transcript returns an empty list.
+    """
+    blockers = validate_provisional_normative_transcript(
+        transcript,
+        max_overlap_seconds=max_overlap_seconds,
+    )
+    if not blockers:
+        return []
+
+    intervals: list[tuple[float, float]] = []
+    for raw_start, raw_end in selected_intervals:
+        start = float(raw_start)
+        end = float(raw_end)
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0.0 or end <= start:
+            raise TranscriptContractError("selected transcript interval is invalid")
+        intervals.append((start, end))
+    if not intervals:
+        raise TranscriptContractError("selected transcript intervals are required")
+
+    audited: list[dict[str, Any]] = []
+    for blocker in blockers:
+        component = blocker.get("component")
+        blocker_start = float(component["start"])
+        blocker_end = float(component["end"])
+        if any(
+            blocker_end > selected_start and blocker_start < selected_end
+            for selected_start, selected_end in intervals
+        ):
+            raise TranscriptContractError(
+                "unattributed acoustic activity overlaps selected source audio"
+            )
+        audited.append(dict(blocker))
+
+    return audited
+
+
 def is_cache_valid(
     cache: Mapping[str, Any] | str | os.PathLike[str],
     *,
     source_sha256: str,
     config: WhisperXConfig,
 ) -> bool:
-    """Return true only for a fully valid cache bound to source and config."""
+    """Return true for a strict or scopeable-provisional bound cache."""
 
     try:
         if isinstance(cache, (str, os.PathLike)):
@@ -821,7 +952,7 @@ def is_cache_valid(
             return False
         if metadata.get("config") != config.to_dict():
             return False
-        validate_normative_transcript(value)
+        validate_provisional_normative_transcript(value)
         return True
     except (OSError, json.JSONDecodeError, TranscriptContractError, TypeError, ValueError):
         return False
@@ -879,6 +1010,7 @@ def write_json_atomic(path: str | os.PathLike[str], data: Mapping[str, Any]) -> 
 
 
 __all__ = [
+    "DEFAULT_ACOUSTIC_SNAP_REVISION",
     "DEFAULT_DIARIZATION_MODEL",
     "DEFAULT_PORTUGUESE_HOTWORDS",
     "DEFAULT_PORTUGUESE_INITIAL_PROMPT",
@@ -896,5 +1028,7 @@ __all__ = [
     "sha256_file",
     "validate_transcript",
     "validate_normative_transcript",
+    "validate_provisional_normative_transcript",
+    "validate_normative_transcript_for_intervals",
     "write_json_atomic",
 ]

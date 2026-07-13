@@ -29,9 +29,11 @@ try:
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        TranscriptContractError,
         WhisperXConfig,
         is_cache_valid,
         sha256_file,
+        validate_provisional_normative_transcript,
         write_json_atomic,
     )
     from helpers.transcription_providers import (
@@ -47,9 +49,11 @@ except ModuleNotFoundError as exc:
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
+        TranscriptContractError,
         WhisperXConfig,
         is_cache_valid,
         sha256_file,
+        validate_provisional_normative_transcript,
         write_json_atomic,
     )
     from transcription_providers import (  # type: ignore[no-redef]
@@ -186,6 +190,14 @@ def transcribe_one(
         ):
             if verbose:
                 print(f"cached: {output.name} (source + WhisperX config match)")
+                cached_payload = json.loads(output.read_text(encoding="utf-8"))
+                pending = validate_provisional_normative_transcript(cached_payload)
+                if pending:
+                    print(
+                        f"audit pending: {len(pending)} acoustic component(s) "
+                        "must be outside the eventual EDL selection",
+                        flush=True,
+                    )
             return output
     elif provider == "elevenlabs":
         effective_config = None
@@ -226,19 +238,21 @@ def transcribe_one(
     ensure_no_secret_fields(payload)
     write_json_atomic(output, payload)
 
-    alignment = payload.get("_alano_cut", {}).get("alignment", {})
-    acoustic = payload.get("_alano_cut", {}).get("acoustic_timing", {})
-    if provider == "whisperx" and (
-        alignment.get("status") != "pass" or acoustic.get("status") != "pass"
-    ):
-        count = (
-            int(alignment.get("blocking_outlier_count") or 0)
-            + int(acoustic.get("blocking_outlier_count") or 0)
-        )
-        raise TranscriptionReviewRequired(
-            f"transcription timing gate requires review ({count} blocking outlier(s)); "
-            f"audit transcript saved at {output}"
-        )
+    pending_acoustic: list[dict[str, Any]] = []
+    if provider == "whisperx":
+        try:
+            pending_acoustic = validate_provisional_normative_transcript(payload)
+        except TranscriptContractError as error:
+            alignment = payload.get("_alano_cut", {}).get("alignment", {})
+            acoustic = payload.get("_alano_cut", {}).get("acoustic_timing", {})
+            count = (
+                int(alignment.get("blocking_outlier_count") or 0)
+                + int(acoustic.get("blocking_outlier_count") or 0)
+            )
+            raise TranscriptionReviewRequired(
+                f"transcription timing gate requires review ({count} blocking outlier(s)): "
+                f"{error}; audit transcript saved at {output}"
+            ) from error
 
     if verbose:
         elapsed = time.perf_counter() - started
@@ -253,6 +267,12 @@ def transcribe_one(
             f"in {elapsed:.1f}s",
             flush=True,
         )
+        if pending_acoustic:
+            print(
+                f"audit pending: {len(pending_acoustic)} acoustic component(s) "
+                "must be outside the eventual EDL selection",
+                flush=True,
+            )
     return output
 
 

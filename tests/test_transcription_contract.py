@@ -22,6 +22,8 @@ from helpers.transcription_contract import (
     sha256_file,
     validate_transcript,
     validate_normative_transcript,
+    validate_normative_transcript_for_intervals,
+    validate_provisional_normative_transcript,
     write_json_atomic,
 )
 
@@ -142,6 +144,7 @@ def canonical_transcript() -> dict:
             },
             "acoustic_timing": {
                 "status": "pass",
+                "revision": cfg.acoustic_snap_revision,
                 "blocking_outlier_count": 0,
                 "blocking_outliers": [],
                 "source_sha256": SOURCE_HASH,
@@ -262,6 +265,62 @@ def test_normative_binding_rejects_cpu_or_nonexclusive_output():
     transcript["_alano_cut"]["diarization_status"]["exclusive"] = False
     with pytest.raises(TranscriptContractError, match="exclusive diarization"):
         validate_normative_transcript(transcript)
+
+
+def test_scoped_normative_validation_allows_only_out_of_selection_acoustic_orphans():
+    transcript = canonical_transcript()
+    blocker = {
+        "type": "unattributed_bilateral_activity",
+        "component": {
+            "index": 7,
+            "start": 5.0,
+            "end": 5.5,
+            "bilateral_start": 5.05,
+            "bilateral_end": 5.45,
+        },
+    }
+    acoustic = transcript["_alano_cut"]["acoustic_timing"]
+    acoustic.update({
+        "status": "review",
+        "blocking_outlier_count": 1,
+        "blocking_outliers": [blocker],
+    })
+
+    assert validate_provisional_normative_transcript(transcript) == [blocker]
+    assert is_cache_valid(
+        transcript,
+        source_sha256=SOURCE_HASH,
+        config=config(),
+    )
+    audited = validate_normative_transcript_for_intervals(
+        transcript,
+        [(0.0, 2.5)],
+    )
+
+    assert audited == [blocker]
+    assert transcript["_alano_cut"]["acoustic_timing"]["status"] == "review"
+    with pytest.raises(TranscriptContractError, match="overlaps selected"):
+        validate_normative_transcript_for_intervals(transcript, [(5.25, 6.0)])
+
+
+def test_scoped_normative_validation_never_waives_structural_acoustic_errors():
+    transcript = canonical_transcript()
+    acoustic = transcript["_alano_cut"]["acoustic_timing"]
+    acoustic.update({
+        "status": "review",
+        "blocking_outlier_count": 1,
+        "blocking_outliers": [{"type": "invalid_acoustic_interval"}],
+    })
+
+    with pytest.raises(TranscriptContractError, match="non-scopeable"):
+        validate_provisional_normative_transcript(transcript)
+    assert not is_cache_valid(
+        transcript,
+        source_sha256=SOURCE_HASH,
+        config=config(),
+    )
+    with pytest.raises(TranscriptContractError, match="requires review"):
+        validate_normative_transcript_for_intervals(transcript, [(0.0, 1.0)])
 
 
 @pytest.mark.parametrize(

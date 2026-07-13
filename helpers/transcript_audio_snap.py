@@ -75,6 +75,8 @@ class WordSnapConfig:
     verifier_hint_tolerance_seconds: float = 0.500
     verifier_hint_shift_seconds: float = 0.350
     word_envelope_gap_seconds: float = 0.150
+    maximum_interword_residual_seconds: float = 0.150
+    maximum_interword_context_gap_seconds: float = 0.400
 
 
 def _token(value: object) -> str:
@@ -211,6 +213,88 @@ def _speaker_supported(
     )
 
 
+def _interword_residual_evidence(
+    component: ActivityComponent,
+    words: list[dict[str, Any]],
+    diarization: list[Mapping[str, Any]],
+    config: WordSnapConfig,
+) -> dict[str, Any] | None:
+    """Classify a short residual bracketed inside one continuous speaker turn.
+
+    Bilateral energy alone is not proof of a missing word: mouth clicks,
+    breaths, and CTC blank dwell commonly occupy a short inter-word gap.  The
+    residual is non-blocking only when timed words bracket it closely and one
+    diarization turn covers the complete bracket.  Standalone activity,
+    turn-start activity, and anything longer remain blocking.
+    """
+    if component.duration > config.maximum_interword_residual_seconds + 1e-9:
+        return None
+
+    previous: tuple[int, dict[str, Any]] | None = None
+    following: tuple[int, dict[str, Any]] | None = None
+    for index, word in enumerate(words):
+        word_start = float(word["start"])
+        word_end = float(word["end"])
+        if word_end <= component.start:
+            previous = (index, word)
+        elif word_start >= component.end:
+            following = (index, word)
+            break
+    if previous is None or following is None:
+        return None
+
+    previous_index, previous_word = previous
+    following_index, following_word = following
+    previous_end = float(previous_word["end"])
+    following_start = float(following_word["start"])
+    left_gap = component.start - previous_end
+    right_gap = following_start - component.end
+    maximum_gap = config.maximum_interword_context_gap_seconds
+    if (
+        left_gap < -1e-9
+        or right_gap < -1e-9
+        or left_gap > maximum_gap + 1e-9
+        or right_gap > maximum_gap + 1e-9
+    ):
+        return None
+
+    covering_turn = next(
+        (
+            turn
+            for turn in diarization
+            if float(turn["start"]) <= previous_end + config.hop_seconds
+            and float(turn["end"]) >= following_start - config.hop_seconds
+        ),
+        None,
+    )
+    if covering_turn is None:
+        return None
+
+    return {
+        "type": "nonblocking_interword_residual",
+        "component": asdict(component),
+        "previous_word": {
+            "index": previous_index,
+            "text": previous_word.get("word", previous_word.get("text")),
+            "end": previous_end,
+        },
+        "following_word": {
+            "index": following_index,
+            "text": following_word.get("word", following_word.get("text")),
+            "start": following_start,
+        },
+        "context_gaps_seconds": {
+            "left": round(left_gap, 6),
+            "right": round(right_gap, 6),
+        },
+        "speaker_turn": {
+            "start": float(covering_turn["start"]),
+            "end": float(covering_turn["end"]),
+            "speaker": covering_turn.get("speaker", covering_turn.get("speaker_id")),
+        },
+    }
+
+
 def refine_word_timestamps(
     words: list[dict[str, Any]],
     components: list[ActivityComponent],
@@ -299,10 +383,9 @@ def refine_word_timestamps(
         if recovery.get("requires_component_recovery") is False:
             continue
         cue = str(recovery.get("cue") or "").casefold()
-        verifier_midpoint = (
-            float(recovery.get("verifier_start") or 0.0)
-            + float(recovery.get("verifier_end") or 0.0)
-        ) / 2.0
+        verifier_start = float(recovery.get("verifier_start") or 0.0)
+        verifier_end = float(recovery.get("verifier_end") or 0.0)
+        verifier_midpoint = (verifier_start + verifier_end) / 2.0
         matches = [
             index
             for index, word in enumerate(words)
@@ -324,8 +407,8 @@ def refine_word_timestamps(
         )
         matched_recovery_word_indices.add(cue_index)
         semantic_hint_intervals[cue_index] = (
-            float(recovery.get("verifier_start") or 0.0),
-            float(recovery.get("verifier_end") or 0.0),
+            verifier_start,
+            verifier_end,
         )
         current_component = assignments[cue_index]
         if current_component is None:
@@ -341,10 +424,19 @@ def refine_word_timestamps(
             for component in components
             if (component.index not in used or component.index == current_component)
             and component.end > previous_end - config.anchor_tolerance_seconds
-            and abs(
-                ((component.start + component.end) / 2.0) - verifier_midpoint
+            and (
+                _interval_overlap(
+                    verifier_start,
+                    verifier_end,
+                    component.start,
+                    component.end,
+                )
+                > 0.0
+                or abs(
+                    ((component.start + component.end) / 2.0) - verifier_midpoint
+                )
+                <= config.semantic_recovery_window_seconds
             )
-            <= config.semantic_recovery_window_seconds
             and component.duration >= config.minimum_orphan_seconds
         ]
         if not candidates:
@@ -352,8 +444,28 @@ def refine_word_timestamps(
         recovered_component = min(
             candidates,
             key=lambda component: (
+                0
+                if _interval_overlap(
+                    verifier_start,
+                    verifier_end,
+                    component.start,
+                    component.end,
+                )
+                > 0.0
+                else 1,
+                -_interval_overlap(
+                    verifier_start,
+                    verifier_end,
+                    component.start,
+                    component.end,
+                ),
+                max(
+                    component.start - verifier_end,
+                    verifier_start - component.end,
+                    0.0,
+                ),
                 abs(((component.start + component.end) / 2.0) - verifier_midpoint),
-                abs(component.start - float(recovery.get("verifier_start") or 0.0)),
+                abs(component.start - verifier_start),
                 component.index,
             ),
         ).index
@@ -633,16 +745,30 @@ def refine_word_timestamps(
                 attributed_components.add(component.index)
 
     diarization_records = list(diarization)
-    orphans = [
-        {
-            "type": "unattributed_bilateral_activity",
-            "component": asdict(component),
-        }
-        for component in components
-        if component.index not in attributed_components
-        and component.duration >= config.minimum_orphan_seconds
-        and _speaker_supported(component, diarization_records)
-    ]
+    orphans: list[dict[str, Any]] = []
+    nonblocking_outliers: list[dict[str, Any]] = []
+    for component in components:
+        if (
+            component.index in attributed_components
+            or component.duration < config.minimum_orphan_seconds
+            or not _speaker_supported(component, diarization_records)
+        ):
+            continue
+        residual = _interword_residual_evidence(
+            component,
+            words,
+            diarization_records,
+            config,
+        )
+        if residual is not None:
+            nonblocking_outliers.append(residual)
+            continue
+        orphans.append(
+            {
+                "type": "unattributed_bilateral_activity",
+                "component": asdict(component),
+            }
+        )
     blocking.extend(orphans)
     blocking.extend(
         item
@@ -654,6 +780,8 @@ def refine_word_timestamps(
         "status": "review" if blocking else "pass",
         "blocking_outlier_count": len(blocking),
         "blocking_outliers": blocking,
+        "nonblocking_outlier_count": len(nonblocking_outliers),
+        "nonblocking_outliers": nonblocking_outliers,
         "adjusted_word_count": len(evidence),
         "evidence": evidence,
         "semantic_recovery_evidence": recovery_evidence,

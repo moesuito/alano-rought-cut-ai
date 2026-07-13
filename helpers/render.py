@@ -22,7 +22,7 @@ from pathlib import Path
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helpers.timing import frame_to_sample, parse_fps_fraction, time_to_frame
+from helpers.timing import format_fps_fraction, frame_to_sample, parse_fps_fraction, time_to_frame
 
 
 def resolve_path(maybe_path: str, base: Path) -> Path:
@@ -319,7 +319,7 @@ def main() -> None:
                     "sample_rate": 48000,
                     "channels": 2,
                     "channel_policy": global_channel_policy,
-                    "sequence_fps": float(fps)
+                    "sequence_fps": format_fps_fraction(fps)
                 },
                 "ranges": ranges_map
             }

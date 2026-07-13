@@ -23,6 +23,8 @@
 ### Fixed
 - Prevented legacy, unrefined, untimed, incomplete-join, or stale artifact sets from being treated as ready for agent-driven XML export.
 - Prevented long CTC blank spans from swallowing omitted recording cues; windowed two-pass consensus now recovers cues and re-aligns them against raw/RNNoise activity without trusting ordinary secondary-ASR text.
+- Prevented auditable out-of-selection acoustic activity from forcing an identical WhisperX retranscription on every run; provisional caches now continue to the mandatory selected-interval readiness audit.
+- Prevented short residual energy between words from hiding an omitted token; selected residuals now require consecutive neighbor alignment and an empty mapped interval in the independent preview transcription.
 
 ## v0.3.0 - 2026-07-10
 

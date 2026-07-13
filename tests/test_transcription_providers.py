@@ -106,6 +106,27 @@ def fake_acoustic_refiner(source: Path, raw: dict, **kwargs):
     }
 
 
+def fake_provisional_acoustic_refiner(source: Path, raw: dict, **kwargs):
+    refined, report = fake_acoustic_refiner(source, raw, **kwargs)
+    report.update({
+        "status": "review",
+        "blocking_outlier_count": 1,
+        "blocking_outliers": [
+            {
+                "type": "unattributed_bilateral_activity",
+                "component": {
+                    "index": 2,
+                    "start": 2.0,
+                    "end": 2.1,
+                    "bilateral_start": 2.0,
+                    "bilateral_end": 2.1,
+                },
+            }
+        ],
+    })
+    return refined, report
+
+
 def test_env_loader_prefers_process_and_reads_nearest_file(monkeypatch, tmp_path):
     project = tmp_path / "project"
     nested = project / "audio"
@@ -177,6 +198,58 @@ def test_provider_failure_is_secret_free(monkeypatch, tmp_path):
             acoustic_refiner=fake_acoustic_refiner,
         ).transcribe(source)
     assert secret not in str(captured.value)
+
+
+def test_first_run_provisional_transcript_succeeds_and_next_run_uses_cache(
+    monkeypatch,
+    tmp_path,
+):
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"fake wav")
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"")
+    config = WhisperXConfig()
+
+    def runner(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps(raw_worker_result(source)), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    payload = WhisperXProvider(
+        config,
+        runtime_python=runtime,
+        runner=runner,
+        acoustic_refiner=fake_provisional_acoustic_refiner,
+    ).transcribe(source)
+
+    class StubProvider:
+        def transcribe(self, _source):
+            return payload
+
+    monkeypatch.setattr(transcribe, "WhisperXProvider", lambda *args, **kwargs: StubProvider())
+    edit_dir = tmp_path / "edit"
+    first = transcribe.transcribe_one(
+        source,
+        edit_dir,
+        provider="whisperx",
+        config=config,
+        verbose=False,
+    )
+
+    def unexpected_provider(*args, **kwargs):
+        raise AssertionError("valid provisional cache should avoid retranscription")
+
+    monkeypatch.setattr(transcribe, "WhisperXProvider", unexpected_provider)
+    second = transcribe.transcribe_one(
+        source,
+        edit_dir,
+        provider="whisperx",
+        config=config,
+        verbose=False,
+    )
+
+    assert first == second
+    assert json.loads(first.read_text(encoding="utf-8"))["_alano_cut"]["acoustic_timing"]["status"] == "review"
 
 
 @pytest.mark.parametrize("field", ["token", "hf_token", "api_key", "authorization"])

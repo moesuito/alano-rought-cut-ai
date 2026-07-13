@@ -119,6 +119,44 @@ def test_recovered_cue_can_shift_forward_to_later_component():
     assert report["semantic_recovery_evidence"][0]["to_component"] == 1
 
 
+def test_recovered_cue_prefers_component_overlapping_verifier_over_nearer_midpoint():
+    """A long speech run containing the hint must beat an earlier orphan."""
+    words = [
+        {"word": "salve", "start": 2.35, "end": 3.77},
+        {"word": "Corta", "start": 4.827, "end": 5.247},
+        {"word": "Manter", "start": 5.427, "end": 5.687},
+        {"word": "endereco", "start": 5.807, "end": 6.287},
+    ]
+    components = [
+        component(0, 1.59, 2.90),
+        component(1, 3.41, 4.14),
+        component(2, 4.83, 9.375),
+    ]
+    recovery = [{
+        "cue": "corta",
+        "verifier_start": 4.64,
+        "verifier_end": 5.24,
+    }]
+
+    report = refine_word_timestamps(
+        words,
+        components,
+        diarization=speech_turn(),
+        semantic_recoveries=recovery,
+    )
+
+    assert words[1]["start"] >= 4.8
+    assert not any(
+        item["reason"] == "semantic_cue_component_shift"
+        for item in report["semantic_recovery_evidence"]
+    )
+    assert any(
+        item["type"] == "unattributed_bilateral_activity"
+        and item["component"]["index"] == 1
+        for item in report["blocking_outliers"]
+    )
+
+
 def test_repeated_semantic_recoveries_bind_to_distinct_cue_words():
     words = [
         {"word": "Corta", "start": 1.0, "end": 1.4},
@@ -226,6 +264,55 @@ def test_unattributed_bilateral_speech_is_blocking_but_raw_only_is_absent():
     assert report["status"] == "review"
     assert report["blocking_outlier_count"] == 1
     assert report["blocking_outliers"][0]["type"] == "unattributed_bilateral_activity"
+
+
+def test_short_interword_residual_inside_one_speaker_turn_is_nonblocking():
+    words = [
+        {"word": "cadastro", "start": 1.0, "end": 1.4},
+        {"word": "entre", "start": 1.9, "end": 2.3},
+    ]
+    components = [
+        component(0, 0.95, 1.45),
+        component(1, 1.55, 1.65),
+        component(2, 1.85, 2.35),
+    ]
+
+    report = refine_word_timestamps(
+        words,
+        components,
+        diarization=speech_turn(0.8, 2.5),
+    )
+
+    assert report["status"] == "pass"
+    assert report["blocking_outlier_count"] == 0
+    assert report["nonblocking_outlier_count"] == 1
+    residual = report["nonblocking_outliers"][0]
+    assert residual["type"] == "nonblocking_interword_residual"
+    assert residual["component"]["index"] == 1
+    assert residual["previous_word"]["text"] == "cadastro"
+    assert residual["following_word"]["text"] == "entre"
+
+
+def test_short_residual_across_speaker_turn_boundary_remains_blocking():
+    words = [
+        {"word": "um", "start": 1.0, "end": 1.4},
+        {"word": "dois", "start": 1.9, "end": 2.3},
+    ]
+    components = [
+        component(0, 0.95, 1.45),
+        component(1, 1.55, 1.65),
+        component(2, 1.85, 2.35),
+    ]
+    turns = [
+        {"start": 0.8, "end": 1.7, "speaker": "speaker_0"},
+        {"start": 1.8, "end": 2.5, "speaker": "speaker_0"},
+    ]
+
+    report = refine_word_timestamps(words, components, diarization=turns)
+
+    assert report["status"] == "review"
+    assert report["blocking_outlier_count"] == 1
+    assert report["blocking_outliers"][0]["component"]["index"] == 1
 
 
 def test_component_without_speaker_support_is_not_reported_as_orphan():

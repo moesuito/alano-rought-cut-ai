@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from helpers.timing import parse_fps_fraction, time_to_frame, frame_to_time
+from helpers.timing import format_fps_fraction, parse_fps_fraction, time_to_frame, frame_to_time
 from helpers.audio_analysis import (
     EXPECTED_MODEL_HASH,
     get_ffmpeg_version,
@@ -1124,6 +1124,54 @@ def main() -> None:
             spread_out = 9999
             sweep_end_ok = False
 
+        # The detector pair may disagree by several frames, or the raw signal
+        # may stay connected to a rejected direction immediately before the
+        # selected take.  In those cases the transcript still gives us one
+        # conservative, frame-exact boundary: floor(first_word.start).  It is
+        # safe only when that frame is at/after ceil(previous_word.end), the
+        # selected span contains later bilateral speech, and local evidence is
+        # healthy.  The mandatory rendered-preview transcription is the final
+        # authority, so this path is deliberately medium confidence.
+        unstable_or_connected_start = (
+            not sweep_start_ok
+            or spread_in > 2
+            or has_start_collision
+            or is_clamped_start
+        )
+        lexical_frame_separates_neighbor = (
+            prev_word is None
+            or (
+                not is_overlapping_lexical
+                and F_prev_limit <= F_attack_limit
+            )
+        )
+        lexical_guard_metrics_ok = (
+            start_snr is not None
+            and start_corr is not None
+            and start_snr >= 8.0
+            and start_corr >= 0.8
+        )
+        if (
+            not is_lexical_fallback_start
+            and not cue_guarded_start
+            and unstable_or_connected_start
+            and lexical_frame_separates_neighbor
+            and lexical_guard_metrics_ok
+            and has_later_speech
+            and len(anchors) >= 3
+            and (has_start_raw or has_start_rnn)
+        ):
+            t_onset = float(first_word["start"])
+            F_in = F_attack_limit
+            is_lexical_fallback_start = True
+            is_preview_guarded_start_fallback = True
+            is_clamped_start = False
+            for obsolete_reason in ("non_cue_collision", "frame_clamp_collision"):
+                while obsolete_reason in start_rejection_reasons:
+                    start_rejection_reasons.remove(obsolete_reason)
+            if "preview_transcript_guarded_lexical_fallback" not in start_notes:
+                start_notes.append("preview_transcript_guarded_lexical_fallback")
+
         # Medium cue guard requires: both baseline detectors active, sweep stable and spread <= 2,
         # non-overlapping lexical timestamps, valid local metrics, and no attack cut.
         is_safe_cue_guard_start = False
@@ -1409,6 +1457,7 @@ def main() -> None:
                     "start": t_onset
                 },
                 "lexical_fallback": is_lexical_fallback_start,
+                "preview_guarded_fallback": is_preview_guarded_start_fallback,
                 "cue_guard": cue_guarded_start,
                 "collision": has_start_collision,
                 "is_clamped": is_clamped_start,
@@ -1506,7 +1555,7 @@ def main() -> None:
     edl_new["total_duration_s"] = new_total_duration
     if "metadata" not in edl_new:
         edl_new["metadata"] = {}
-    edl_new["metadata"]["sequence_fps"] = float(fps)
+    edl_new["metadata"]["sequence_fps"] = format_fps_fraction(fps)
     edl_new["metadata"]["refined_by"] = "alano-cut-snapper-f1.1"
 
     # Write Backup BEFORE modifying the input EDL file

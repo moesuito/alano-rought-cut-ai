@@ -104,6 +104,72 @@ def make_report(transcript, edl, timeline_map, sources):
     )
 
 
+def make_long_right_context(expected: list[str], actual: list[str]):
+    transcript, edl, timeline_map, sources = make_context()
+    source_step = 0.75 / max(1, len(expected) - 1)
+    source_duration = min(0.06, source_step * 0.70)
+    source_prefix = sources["source1"]["words"][:3]
+    source_right = [
+        {
+            "text": token,
+            "start": 2.10 + index * source_step,
+            "end": 2.10 + index * source_step + source_duration,
+            "type": "word",
+        }
+        for index, token in enumerate(expected)
+    ]
+    sources["source1"]["words"] = source_prefix + source_right
+    timeline_map["ranges"][1]["lexical_anchors"] = {
+        "first": {"word_index": 3, **source_right[0]},
+        "last": {
+            "word_index": len(sources["source1"]["words"]) - 1,
+            **source_right[-1],
+        },
+    }
+
+    preview_step = 0.75 / max(1, len(actual) - 1)
+    preview_duration = min(0.06, preview_step * 0.70)
+    preview_prefix = transcript["words"][:2]
+    preview_right = [
+        {
+            "text": token,
+            "start": 1.10 + index * preview_step,
+            "end": 1.10 + index * preview_step + preview_duration,
+            "type": "word",
+        }
+        for index, token in enumerate(actual)
+    ]
+    transcript["words"] = preview_prefix + preview_right
+    transcript["text"] = " ".join(word["text"] for word in transcript["words"])
+    return transcript, edl, timeline_map, sources
+
+
+def add_interword_residual(
+    sources,
+    *,
+    start: float = 2.32,
+    end: float = 2.36,
+):
+    sources["source1"]["_alano_cut"] = {
+        "acoustic_timing": {
+            "nonblocking_outliers": [
+                {
+                    "type": "nonblocking_interword_residual",
+                    "component": {
+                        "index": 7,
+                        "start": start,
+                        "end": end,
+                        "bilateral_start": start,
+                        "bilateral_end": end,
+                    },
+                    "previous_word": {"index": 3, "text": "tela", "end": 2.3},
+                    "following_word": {"index": 4, "text": "preencha", "start": 2.4},
+                }
+            ]
+        }
+    }
+
+
 def test_clean_resume_reports_every_join_and_passes():
     report = make_report(*make_context())
 
@@ -150,6 +216,174 @@ def test_missing_right_first_word_blocks():
     report = make_report(transcript, edl, timeline_map, sources)
 
     assert "missing_right_first_word" in report["joins"][0]["blocking_flags"]
+
+
+def test_single_short_function_word_omission_keeps_fluent_join_passable():
+    expected = [
+        "para", "a", "atualização", "de", "endereço",
+        "da", "conta", "do", "usuário", "agora",
+    ]
+    actual = [token for token in expected if token != "a"]
+    report = make_report(*make_long_right_context(expected, actual))
+
+    assert report["ranges"][1]["token_recall"] == pytest.approx(0.9)
+    assert report["joins"][0]["right_prefix_similarity"] >= 0.85
+    assert report["joins"][0]["checks"]["right_first_word_ok"] is True
+    assert report["joins"][0]["checks"]["right_prefix_phrase_ok"] is True
+    assert report["joins"][0]["tolerated_prefix_omission"]["normalized"] == "a"
+    assert report["status"] == "pass"
+
+
+def test_content_word_omission_at_join_remains_blocking():
+    expected = [
+        "para", "nova", "atualização", "de", "endereço",
+        "da", "conta", "do", "usuário", "agora",
+    ]
+    actual = [token for token in expected if token != "nova"]
+
+    report = make_report(*make_long_right_context(expected, actual))
+
+    assert report["ranges"][1]["token_recall"] == pytest.approx(0.9)
+    assert report["joins"][0]["right_prefix_similarity"] >= 0.85
+    assert "right_prefix_phrase_mismatch" in report["joins"][0]["blocking_flags"]
+    assert report["status"] == "review"
+
+
+def test_reordered_article_at_join_remains_blocking():
+    expected = [
+        "para", "a", "atualização", "de", "endereço",
+        "da", "conta", "do", "usuário", "agora",
+        "sem", "alterar", "outros", "dados", "da",
+        "sua", "conta", "neste", "momento", "também",
+    ]
+    actual = ["para", "atualização", "a", *expected[3:]]
+
+    report = make_report(*make_long_right_context(expected, actual))
+
+    assert report["ranges"][1]["token_recall"] == pytest.approx(0.9)
+    assert report["joins"][0]["right_prefix_similarity"] >= 0.85
+    assert "right_prefix_phrase_mismatch" in report["joins"][0]["blocking_flags"]
+    assert report["status"] == "review"
+
+
+def test_article_moved_past_join_prefix_remains_blocking():
+    expected = [
+        "para", "a", "atualização", "de", "endereço",
+        "da", "conta", "do", "usuário", "agora",
+        "sem", "alterar", "outros", "dados", "da",
+        "sua", "conta", "neste", "momento", "também",
+    ]
+    actual = ["para", "atualização", "de", "a", *expected[4:]]
+
+    report = make_report(*make_long_right_context(expected, actual))
+
+    assert report["ranges"][1]["token_recall"] >= 0.9
+    assert report["joins"][0]["right_prefix_similarity"] >= 0.85
+    assert "right_prefix_phrase_mismatch" in report["joins"][0]["blocking_flags"]
+    assert report["joins"][0]["tolerated_prefix_omission"] is None
+    assert report["status"] == "review"
+
+
+def test_phrase_valid_nonfirst_asr_variation_keeps_join_passable():
+    expected = [
+        "para", "a", "atualização", "de", "endereço",
+        "da", "conta", "do", "usuário", "agora",
+    ]
+    actual = [*expected]
+    actual[2] = "atualizações"
+
+    report = make_report(*make_long_right_context(expected, actual))
+
+    assert report["ranges"][1]["phrase_similarity"] >= 0.85
+    assert report["ranges"][1]["token_recall"] >= 0.9
+    assert report["joins"][0]["right_prefix_similarity"] >= 0.85
+    assert report["joins"][0]["right_prefix_reordered"] is False
+    assert report["joins"][0]["checks"]["right_prefix_phrase_ok"] is True
+    assert report["status"] == "pass"
+
+
+def test_selected_interword_residual_requires_clean_second_asr_gap():
+    context = make_context(("tela", "preencha"), ("tela", "preencha"))
+    add_interword_residual(context[3])
+
+    report = make_report(*context)
+
+    check = report["interword_residual_checks"][0]
+    assert check["selection_status"] == "selected"
+    assert all(check["checks"].values())
+    assert check["status"] == "pass"
+    assert report["status"] == "pass"
+    assert validate_transcript_report(
+        report,
+        context[1]["ranges"],
+        context[2]["ranges"],
+        context[3],
+    ) == []
+
+
+def test_selected_interword_residual_blocks_inserted_short_word():
+    transcript, edl, timeline_map, sources = make_context(
+        ("tela", "preencha"),
+        ("tela", "preencha"),
+    )
+    add_interword_residual(sources)
+    transcript["words"].insert(
+        3,
+        {"text": "não", "start": 1.32, "end": 1.36, "type": "word"},
+    )
+    transcript["text"] = "termina bem tela não preencha"
+
+    report = make_report(transcript, edl, timeline_map, sources)
+
+    check = report["interword_residual_checks"][0]
+    assert check["selection_status"] == "selected"
+    assert check["checks"]["neighbors_consecutive"] is False
+    assert check["checks"]["no_preview_word_overlap"] is False
+    assert "selected_interword_residual_unresolved" in check["blocking_flags"]
+    assert report["status"] == "review"
+
+
+def test_interword_residual_outside_selection_needs_no_preview_waiver():
+    context = make_context(("tela", "preencha"), ("tela", "preencha"))
+    add_interword_residual(context[3], start=1.20, end=1.30)
+
+    report = make_report(*context)
+
+    check = report["interword_residual_checks"][0]
+    assert check["selection_status"] == "outside_selection"
+    assert check["status"] == "pass"
+    assert report["status"] == "pass"
+
+
+def test_readiness_rejects_forged_interword_residual_pass():
+    context = make_context(("tela", "preencha"), ("tela", "preencha"))
+    add_interword_residual(context[3])
+    report = make_report(*context)
+    report["interword_residual_checks"][0]["checks"]["neighbors_faithful"] = False
+
+    errors = validate_transcript_report(
+        report,
+        context[1]["ranges"],
+        context[2]["ranges"],
+        context[3],
+    )
+
+    assert any("omits unresolved evidence" in error for error in errors)
+
+    omitted = make_report(*context)
+    omitted["interword_residual_checks"] = []
+    omitted["summary"].update({
+        "interword_residual_count": 0,
+        "interword_residual_pass_count": 0,
+        "interword_residual_review_count": 0,
+    })
+    omitted_errors = validate_transcript_report(
+        omitted,
+        context[1]["ranges"],
+        context[2]["ranges"],
+        context[3],
+    )
+    assert any("do not match source transcript evidence" in error for error in omitted_errors)
 
 
 def test_word_materially_spanning_join_blocks():
@@ -207,20 +441,35 @@ def test_text_without_word_timestamps_cannot_pass():
 def test_readiness_recomputes_join_count_and_status():
     transcript, edl, timeline_map, sources = make_context()
     report = make_report(transcript, edl, timeline_map, sources)
-    assert validate_transcript_report(report, edl["ranges"], timeline_map["ranges"]) == []
+    assert validate_transcript_report(
+        report,
+        edl["ranges"],
+        timeline_map["ranges"],
+        sources,
+    ) == []
 
     forged = copy.deepcopy(report)
     forged["joins"][0]["blocking_flags"] = ["deformed_right_first_word"]
     assert any(
         "status contradicts" in error
-        for error in validate_transcript_report(forged, edl["ranges"], timeline_map["ranges"])
+        for error in validate_transcript_report(
+            forged,
+            edl["ranges"],
+            timeline_map["ranges"],
+            sources,
+        )
     )
 
     missing_join = copy.deepcopy(report)
     missing_join["joins"] = []
     assert any(
         "range count minus one" in error
-        for error in validate_transcript_report(missing_join, edl["ranges"], timeline_map["ranges"])
+        for error in validate_transcript_report(
+            missing_join,
+            edl["ranges"],
+            timeline_map["ranges"],
+            sources,
+        )
     )
 
 

@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import pytest
 
-from helpers.timing import parse_fps_fraction, time_to_frame, frame_to_time
+from helpers.timing import format_fps_fraction, parse_fps_fraction, time_to_frame, frame_to_time
 from helpers.audio_analysis import (
     verify_model_hash,
     compute_rms_db,
@@ -34,6 +34,8 @@ def test_rational_frame_math():
     assert parse_fps_fraction(23.976) == Fraction(24000, 1001)
     assert parse_fps_fraction("29.97") == Fraction(30000, 1001)
     assert parse_fps_fraction("23.98") == Fraction(1199, 50)
+    assert format_fps_fraction(Fraction(30000, 1001)) == "30000/1001"
+    assert format_fps_fraction(Fraction(30, 1)) == "30"
 
     fps = Fraction(30000, 1001)
     # floor onset

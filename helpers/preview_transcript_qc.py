@@ -551,6 +551,164 @@ def _source_words(data: dict[str, Any], source_id: str) -> list[dict[str, Any]]:
     return words
 
 
+def _build_interword_residual_checks(
+    source_transcripts: dict[str, dict[str, Any]],
+    map_ranges: list[dict[str, Any]],
+    source_intervals: list[list[int]],
+    range_results: list[dict[str, Any]],
+    actual_by_range: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Resolve deferred short residuals against the mandatory preview ASR.
+
+    Source timing alone cannot distinguish a mouth click from an ASR-missed
+    short word such as ``não``.  A selected residual is therefore accepted
+    only when the independently rendered/retranscribed preview preserves both
+    neighboring words consecutively and contains no timed word over the mapped
+    residual window.
+    """
+    checks: list[dict[str, Any]] = []
+    hop_samples = 240  # 5 ms at the mandatory 48 kHz preview rate.
+
+    for source_id, source_transcript in source_transcripts.items():
+        metadata = source_transcript.get("_alano_cut")
+        acoustic = metadata.get("acoustic_timing") if isinstance(metadata, dict) else None
+        residuals = acoustic.get("nonblocking_outliers", []) if isinstance(acoustic, dict) else []
+        if not isinstance(residuals, list):
+            checks.append({
+                "source": source_id,
+                "residual_index": None,
+                "selection_status": "invalid_source_evidence",
+                "blocking_flags": ["selected_interword_residual_unresolved"],
+                "status": "review",
+            })
+            continue
+
+        for residual_index, residual in enumerate(residuals):
+            if not isinstance(residual, dict) or residual.get("type") != "nonblocking_interword_residual":
+                continue
+            component = residual.get("component")
+            previous = residual.get("previous_word")
+            following = residual.get("following_word")
+            base = {
+                "source": source_id,
+                "residual_index": residual_index,
+                "source_component": component,
+                "previous_word": previous,
+                "following_word": following,
+            }
+            try:
+                component_start = int(round(float(component["start"]) * 48000))
+                component_end = int(round(float(component["end"]) * 48000))
+                previous_index = int(previous["index"])
+                following_index = int(following["index"])
+                if component_end <= component_start or previous_index >= following_index:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                checks.append(base | {
+                    "selection_status": "invalid_source_evidence",
+                    "blocking_flags": ["selected_interword_residual_unresolved"],
+                    "status": "review",
+                })
+                continue
+
+            selected_ranges = [
+                range_index
+                for range_index, (map_range, source_interval) in enumerate(
+                    zip(map_ranges, source_intervals)
+                )
+                if map_range.get("source") == source_id
+                and component_end > source_interval[0]
+                and component_start < source_interval[1]
+            ]
+            if not selected_ranges:
+                checks.append(base | {
+                    "selection_status": "outside_selection",
+                    "blocking_flags": [],
+                    "status": "pass",
+                })
+                continue
+
+            flags: list[str] = []
+            if len(selected_ranges) != 1:
+                flags.append("selected_interword_residual_unresolved")
+                range_index = selected_ranges[0]
+            else:
+                range_index = selected_ranges[0]
+            source_interval = source_intervals[range_index]
+            output_interval = map_ranges[range_index]["output_cumulative_sample_interval"]
+            if component_start < source_interval[0] or component_end > source_interval[1]:
+                flags.append("selected_interword_residual_unresolved")
+
+            mapped_start = output_interval[0] + component_start - source_interval[0]
+            mapped_end = output_interval[0] + component_end - source_interval[0]
+            alignment = range_results[range_index]["alignment"]
+            previous_ops = [
+                operation
+                for operation in alignment
+                if operation["expected"] is not None
+                and operation["expected"].get("source_word_index") == previous_index
+            ]
+            following_ops = [
+                operation
+                for operation in alignment
+                if operation["expected"] is not None
+                and operation["expected"].get("source_word_index") == following_index
+            ]
+
+            def faithful(operations: list[dict[str, Any]]) -> bool:
+                return bool(operations) and all(
+                    operation["op"] in {"equal", "fuzzy"}
+                    and float(operation.get("similarity") or 0.0) >= 0.90
+                    and isinstance(operation.get("actual_index"), int)
+                    for operation in operations
+                )
+
+            neighbors_faithful = faithful(previous_ops) and faithful(following_ops)
+            previous_actual = [operation["actual_index"] for operation in previous_ops if isinstance(operation.get("actual_index"), int)]
+            following_actual = [operation["actual_index"] for operation in following_ops if isinstance(operation.get("actual_index"), int)]
+            neighbors_consecutive = bool(
+                neighbors_faithful
+                and previous_actual
+                and following_actual
+                and max(previous_actual) + 1 == min(following_actual)
+            )
+            overlapping_words: list[dict[str, Any]] = []
+            seen_preview_words: set[int] = set()
+            for record in actual_by_range[range_index]:
+                preview_word_index = record["preview_word_index"]
+                if preview_word_index in seen_preview_words:
+                    continue
+                if (
+                    record["end_sample"] > mapped_start + hop_samples
+                    and record["start_sample"] < mapped_end - hop_samples
+                ):
+                    seen_preview_words.add(preview_word_index)
+                    overlapping_words.append({
+                        "preview_word_index": preview_word_index,
+                        "text": record.get("text"),
+                        "start_sample": record["start_sample"],
+                        "end_sample": record["end_sample"],
+                    })
+            no_preview_word_overlap = not overlapping_words
+            if not neighbors_faithful or not neighbors_consecutive or not no_preview_word_overlap:
+                flags.append("selected_interword_residual_unresolved")
+            flags = list(dict.fromkeys(flags))
+            checks.append(base | {
+                "selection_status": "selected",
+                "range_index": range_index,
+                "mapped_preview_sample_interval": [mapped_start, mapped_end],
+                "checks": {
+                    "neighbors_faithful": neighbors_faithful,
+                    "neighbors_consecutive": neighbors_consecutive,
+                    "no_preview_word_overlap": no_preview_word_overlap,
+                },
+                "overlapping_preview_words": overlapping_words,
+                "blocking_flags": flags,
+                "status": "review" if flags else "pass",
+            })
+    return checks
+
+
 def build_join_analysis(
     transcript_data: dict[str, Any],
     edl_data: dict[str, Any],
@@ -586,6 +744,7 @@ def build_join_analysis(
     }
     range_results: list[dict[str, Any]] = []
     expected_by_range: list[list[dict[str, Any]]] = []
+    source_intervals: list[list[int]] = []
 
     for position, (edl_range, map_range) in enumerate(zip(edl_ranges, map_ranges)):
         if map_range.get("range_index") != position:
@@ -637,6 +796,8 @@ def build_join_analysis(
                 frame_to_sample(source_frames[0], fps),
                 frame_to_sample(source_frames[1], fps),
             ]
+        source_interval = [int(source_interval[0]), int(source_interval[1])]
+        source_intervals.append(source_interval)
 
         expected_records = []
         for word_index in range(first_index, last_index + 1):
@@ -755,6 +916,14 @@ def build_join_analysis(
             "blocking_flags": flags,
         })
 
+    residual_checks = _build_interword_residual_checks(
+        source_transcripts,
+        map_ranges,
+        source_intervals,
+        range_results,
+        actual_by_range,
+    )
+
     join_results = []
     for join_index in range(len(map_ranges) - 1):
         left_result = range_results[join_index]
@@ -814,7 +983,74 @@ def build_join_analysis(
             " ".join(record["normalized"] for record in expected_right_prefix),
             " ".join(record["normalized"] for record in matched_prefix),
         )
-        right_prefix_ok = prefix_similarity >= 0.85 and len(matched_prefix) == len(expected_right_prefix)
+        # Preview ASR can legitimately omit one extremely short article at a
+        # clean join (for example ``"para a atualização"`` ->
+        # ``"para atualização"``).  Keep this exception deliberately narrow:
+        # a content-word omission, replacement, or reordered article must not
+        # turn into a false pass merely because the whole phrase is similar.
+        prefix_ops = [
+            operation
+            for operation in right_ops
+            if operation["expected_index"] in prefix_expected_indices
+        ]
+        prefix_deletions = [operation for operation in prefix_ops if operation["op"] == "delete"]
+        early_insertions = [
+            operation
+            for operation in right_ops
+            if operation["op"] == "insert"
+            and operation["actual_index"] is not None
+            and operation["actual_index"] < len(expected_right_prefix)
+        ]
+        omitted_article = prefix_deletions[0] if len(prefix_deletions) == 1 else None
+        reinserted_omitted_article = bool(
+            omitted_article
+            and any(
+                operation["op"] == "insert"
+                and operation["actual"] is not None
+                and operation["actual"]["normalized"]
+                == omitted_article["expected"]["normalized"]
+                for operation in right_ops
+            )
+        )
+        tolerated_article_omission = bool(
+            omitted_article
+            and omitted_article["expected_index"] not in {None, 0}
+            and omitted_article["expected"]["normalized"] in {"a", "o", "as", "os"}
+            and all(
+                operation["op"] in {"equal", "fuzzy", "delete"}
+                for operation in prefix_ops
+            )
+            and all(
+                operation["op"] in {"equal", "fuzzy"}
+                for operation in prefix_ops
+                if operation is not omitted_article
+            )
+            and not early_insertions
+            and not reinserted_omitted_article
+            and "range_token_recall_low" not in right_result["blocking_flags"]
+        )
+        expected_prefix_tokens = [
+            record["normalized"] for record in expected_right_prefix
+        ]
+        aligned_prefix_tokens = [
+            operation["actual"]["normalized"]
+            for operation in prefix_ops
+            if operation["actual"] is not None
+        ]
+        prefix_reordered = bool(
+            len(aligned_prefix_tokens) == len(expected_prefix_tokens)
+            and Counter(aligned_prefix_tokens) == Counter(expected_prefix_tokens)
+            and aligned_prefix_tokens != expected_prefix_tokens
+        )
+        full_prefix_coverage = bool(
+            len(matched_prefix) == len(expected_right_prefix)
+            and not early_insertions
+            and not prefix_reordered
+        )
+        right_prefix_ok = bool(
+            prefix_similarity >= 0.85
+            and (full_prefix_coverage or tolerated_article_omission)
+        )
         if not right_prefix_ok:
             flags.append("right_prefix_phrase_mismatch")
 
@@ -874,6 +1110,10 @@ def build_join_analysis(
                 "left_after": left_content_after,
             },
             "right_prefix_similarity": round(prefix_similarity, 3),
+            "right_prefix_reordered": prefix_reordered,
+            "tolerated_prefix_omission": (
+                omitted_article["expected"] if tolerated_article_omission else None
+            ),
             "checks": {
                 "left_suffix_ok": left_suffix_ok,
                 "right_first_word_ok": right_first_ok,
@@ -893,6 +1133,7 @@ def build_join_analysis(
     return {
         "ranges": range_results,
         "joins": join_results,
+        "interword_residual_checks": residual_checks,
         "expected_text": expected_text,
         "timing_validation": {
             "untimed_words": untimed_words,
@@ -987,6 +1228,7 @@ def build_report(
 
     range_results = join_analysis["ranges"] if join_analysis else []
     join_results = join_analysis["joins"] if join_analysis else []
+    residual_checks = join_analysis["interword_residual_checks"] if join_analysis else []
     timing_validation = join_analysis["timing_validation"] if join_analysis else {
         "untimed_words": [],
         "invalid_words": [],
@@ -1000,6 +1242,8 @@ def build_report(
         for result in range_results:
             blocking_flags.extend(result.get("blocking_flags", []))
         for result in join_results:
+            blocking_flags.extend(result.get("blocking_flags", []))
+        for result in residual_checks:
             blocking_flags.extend(result.get("blocking_flags", []))
         if timing_validation["invalid_words"]:
             blocking_flags.append("invalid_preview_word_timestamps")
@@ -1039,6 +1283,7 @@ def build_report(
             "phrase_similarity_min": 0.85,
             "expected_token_recall_min": 0.90,
             "cross_tolerance_frames": 2,
+            "interword_residual_tolerance_ms": 5,
         },
         "summary": {
             "text_chars": len(text),
@@ -1059,6 +1304,9 @@ def build_report(
             "join_count": len(join_results),
             "join_pass_count": sum(result.get("status") == "pass" for result in join_results),
             "join_review_count": sum(result.get("status") == "review" for result in join_results),
+            "interword_residual_count": len(residual_checks),
+            "interword_residual_pass_count": sum(result.get("status") == "pass" for result in residual_checks),
+            "interword_residual_review_count": sum(result.get("status") == "review" for result in residual_checks),
             "status": status,
             "blocking_flags": blocking_flags,
         },
@@ -1072,6 +1320,7 @@ def build_report(
         "timing_validation": timing_validation,
         "ranges": range_results,
         "joins": join_results,
+        "interword_residual_checks": residual_checks,
     }
     return report
 

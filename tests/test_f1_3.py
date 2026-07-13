@@ -116,6 +116,7 @@ def canonical_source_transcript(words: list[dict], source_sha256: str) -> dict:
         },
         "acoustic_timing": {
             "status": "pass",
+            "revision": config.acoustic_snap_revision,
             "blocking_outlier_count": 0,
             "blocking_outliers": [],
             "source_sha256": source_sha256,
@@ -559,6 +560,9 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
             "join_count": 0,
             "join_pass_count": 0,
             "join_review_count": 0,
+            "interword_residual_count": 0,
+            "interword_residual_pass_count": 0,
+            "interword_residual_review_count": 0,
             "blocking_flags": []
         },
         "timing_validation": {
@@ -576,6 +580,7 @@ def test_verify_ready_gate_freshness_and_statuses(temp_workspace, monkeypatch):
             "blocking_flags": [],
         }],
         "joins": [],
+        "interword_residual_checks": [],
         "words_evidence": [
             {"text": f"word{i}", "type": "word", "start": float(i), "end": float(i) + 0.5}
             for i in range(10)

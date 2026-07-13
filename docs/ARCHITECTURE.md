@@ -37,7 +37,7 @@ The runtime is a Python/FFmpeg helper suite directed by the product `AGENTS.md` 
 - Any EDL change invalidates every downstream artifact and restarts the dataflow at boundary refinement.
 - Private source media, API keys, transcripts, and temporary edit artifacts are never committed.
 - Hugging Face credentials cross into the worker only through its environment. Tokens are forbidden in command arguments, config/result JSON, reports, exceptions, and logs.
-- Local transcription is fail-closed: CUDA, 100% forced-aligned lexical timing, and a Community-1 speaker on every word are mandatory; there is no silent CPU or unaligned-ASR fallback.
+- Local transcription is fail-closed: CUDA, 100% forced-aligned lexical timing, and a Community-1 speaker on every word are mandatory; there is no silent CPU or unaligned-ASR fallback. Well-formed unattributed acoustic components may be cached provisionally before an EDL exists, but readiness rejects blocking components that overlap selected source audio. A selected short inter-word residual is cleared only when the mapped preview ASR preserves both neighboring words consecutively and places no word over its interval.
 - Development routing lives in `DEV_AGENTS.md`; the shipped product routing remains in `AGENTS.md`.
 
 ## Testing & Parallelism
@@ -50,3 +50,5 @@ Unit tests must use generated synthetic media. Private lesson regression is opt-
 - 2026-07-11 - v0.4 preview is audio-only; visual review is not a normative gate.
 - 2026-07-13 - v0.4 requires join-complete audio/transcript evidence and readiness exit code 0 before agent-driven XML export; legacy visual/validator helpers are manual-only until v0.5.0.
 - 2026-07-13 - v0.4 replaces normative external transcription with a pinned shared CUDA WhisperX/faster-whisper/Community-1 runtime and hash-bound canonical transcript schema.
+- 2026-07-13 - Scopeable acoustic-review transcripts are stable provisional caches; the exact EDL interval audit remains mandatory and fail-closed before XML.
+- 2026-07-13 - Short inter-word residuals are deferred to the mandatory preview transcript instead of being trusted from source timing alone.
