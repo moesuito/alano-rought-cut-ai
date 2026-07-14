@@ -58,8 +58,8 @@ Transcription provider/schema:
 ASR/alignment/diarization models:
 Runtime versions/GPU:
 Source/config transcript hashes:
-Forced-aligned word coverage:
-Community-1 exclusive diarization status:
+Provider word-timing coverage:
+WhisperX forced-alignment / diarization status:
 Boundary refiner report/status/hash:
 Refined EDL hash:
 Preview WAV hash:

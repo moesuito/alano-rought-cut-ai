@@ -42,8 +42,8 @@ def group_into_phrases(
     """Walk a canonical word list, break on silence >= threshold
     OR speaker change. Returns list of {start, end, text, speaker_id}.
 
-    Canonical WhisperX entries are lexical words with forced-aligned intervals
-    and speaker IDs. Legacy compatibility entries of type ``spacing`` or
+    Canonical provider entries are lexical words with timed intervals and may
+    have speaker IDs. Legacy compatibility entries of type ``spacing`` or
     ``audio_event`` remain readable but are not produced by the normative path.
     """
     phrases: list[dict] = []

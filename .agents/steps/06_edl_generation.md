@@ -25,9 +25,9 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Preserve natural cadence.
 - Do not over-tighten.
 - Use word boundaries for all cut edges.
-- Use canonical WhisperX JSON for exact forced-aligned word timestamps when trimming inside packed phrases.
+- Use canonical provider JSON for exact word timestamps when trimming inside packed phrases; WhisperX timestamps are forced-aligned.
 - Do not add a global fixed trim or pre-roll. Select the intended lexical span; Step 07 will resolve its exact frame boundaries from lexical and acoustic evidence.
-- Every lexical gap strictly greater than 300ms inside a selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical WhisperX word timestamps.
+- Every lexical gap strictly greater than 300ms inside a selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical provider word timestamps.
 - A gap of exactly 300ms remains untouched. There is no warning band.
 - Treat gaps < 150ms as unsafe unless there is a strong editorial reason.
 - When a speaker handoff genuinely needs 400-600ms of air, preserve that exact gap through the reasoned per-gap override below.

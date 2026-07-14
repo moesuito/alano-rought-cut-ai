@@ -1,4 +1,4 @@
-"""Sequential CUDA transcription for every media source in a directory."""
+"""Sequential transcription for every media source in a directory."""
 
 from __future__ import annotations
 
@@ -11,22 +11,32 @@ try:
     from helpers.transcribe import transcribe_one
     from helpers.transcription_contract import (
         DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_DIARIZATION_MODEL_REVISION,
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         WhisperXConfig,
+        ElevenLabsConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
     )
+    from helpers.transcription_settings import resolve_settings
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
     from transcribe import transcribe_one  # type: ignore[no-redef]
     from transcription_contract import (  # type: ignore[no-redef]
         DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_DIARIZATION_MODEL_REVISION,
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         WhisperXConfig,
+        ElevenLabsConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
     )
+    from transcription_settings import resolve_settings  # type: ignore[no-redef]
 
 
 MEDIA_EXTENSIONS = {
@@ -68,12 +78,14 @@ def find_sources(directory: Path, *, recursive: bool = False) -> list[Path]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Transcribe a media directory with one sequential CUDA worker"
+        description="Transcribe a media directory with the selected provider"
     )
     parser.add_argument("sources_dir", type=Path)
     parser.add_argument("--edit-dir", type=Path, default=None)
     parser.add_argument(
-        "--provider", choices=("whisperx", "elevenlabs"), default="whisperx"
+        "--provider",
+        choices=("configured", "whisperx", "elevenlabs"),
+        default="configured",
     )
     parser.add_argument("--language", default="pt")
     parser.add_argument("--model", default="large-v3")
@@ -82,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--diarization-model",
         default=DEFAULT_DIARIZATION_MODEL,
         choices=(DEFAULT_DIARIZATION_MODEL,),
+    )
+    parser.add_argument(
+        "--diarization",
+        choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE),
+        default=None,
     )
     parser.add_argument(
         "--batch-size",
@@ -119,32 +136,55 @@ def main() -> int:
         print(f"no supported media found in {sources_dir}", file=sys.stderr)
         return 1
 
-    language = None if str(args.language).lower() == "auto" else args.language
-    min_speakers = args.speaker_range[0] if args.speaker_range else None
-    max_speakers = args.speaker_range[1] if args.speaker_range else None
     try:
-        config = WhisperXConfig(
-            model=args.model,
-            language=language,
-            compute_type=args.compute_type,
-            batch_size=args.batch_size,
-            beam_size=args.beam_size,
-            initial_prompt=args.initial_prompt if language == "pt" else None,
-            hotwords=args.hotwords if language == "pt" else None,
-            align_model=args.align_model if language == "pt" else None,
-            diarization_model=args.diarization_model,
-            num_speakers=args.num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
+        settings = resolve_settings(sources_dir) if args.provider == "configured" else None
+        provider = settings.provider if settings else args.provider
+        configured_language = settings.language if settings else args.language
+        language = None if str(configured_language).lower() == "auto" else configured_language
+        min_speakers = args.speaker_range[0] if args.speaker_range else None
+        max_speakers = args.speaker_range[1] if args.speaker_range else None
+        if provider == "whisperx":
+            diarization_mode = (
+                args.diarization
+                or (settings.diarization if settings else DIARIZATION_COMMUNITY_1)
+            )
+            config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(
+                model=args.model,
+                language=language,
+                compute_type=args.compute_type,
+                batch_size=args.batch_size,
+                beam_size=args.beam_size,
+                initial_prompt=args.initial_prompt if language == "pt" else None,
+                hotwords=args.hotwords if language == "pt" else None,
+                align_model=args.align_model if language == "pt" else None,
+                vad_method=("pyannote" if diarization_mode == DIARIZATION_COMMUNITY_1 else "silero"),
+                diarization_mode=diarization_mode,
+                diarization_model=(
+                    args.diarization_model
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                diarization_model_revision=(
+                    DEFAULT_DIARIZATION_MODEL_REVISION
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                num_speakers=args.num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+        else:
+            config = ElevenLabsConfig(language=language)
     except Exception as error:
         print(f"invalid transcription configuration: {error}", file=sys.stderr)
         return 1
 
     edit_dir = (args.edit_dir or sources_dir / "edit").resolve()
+    execution_mode = (
+        "GPU concurrency=1" if provider == "whisperx" else "cloud API sequential mode"
+    )
     print(
-        f"found {len(sources)} source(s); provider={args.provider}; "
-        "GPU concurrency=1",
+        f"found {len(sources)} source(s); provider={provider}; {execution_mode}",
         flush=True,
     )
     started = time.perf_counter()
@@ -158,7 +198,7 @@ def main() -> int:
                 language=language,
                 num_speakers=args.num_speakers,
                 force=args.force,
-                provider=args.provider,
+                provider=provider,
                 config=config,
                 runtime_python=args.runtime_python,
             )

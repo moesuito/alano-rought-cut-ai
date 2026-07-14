@@ -20,7 +20,7 @@ INPUTS:
 
 RULES:
   - Start/end times must fall on word boundaries from the transcript.
-  - If cutting inside a phrase, inspect canonical WhisperX JSON and snap to exact forced-alignment timestamps.
+  - If cutting inside a phrase, inspect canonical provider JSON and snap to exact word timestamps (forced alignment when the provider is WhisperX).
   - Pad cut boundaries within the 30-200ms working window.
   - Every lexical gap strictly greater than 300ms inside one selected range will be split automatically into a jump cut. Exactly 300ms is retained; there is no warning band.
   - If a pause above 300ms is intentionally essential, emit an exact per-gap `boundary_constraints.preserve_internal_silences` entry with both canonical consecutive word indices/text and a non-empty editorial reason. Never use a wildcard override.

@@ -318,7 +318,7 @@ def test_batch_finds_audio_and_video_and_rejects_colliding_stems(tmp_path):
 
 def test_transcribe_cli_defaults_to_normative_cuda_stack():
     args = transcribe.build_parser().parse_args(["clip.wav"])
-    assert args.provider == "whisperx"
+    assert args.provider == "configured"
     assert args.model == "large-v3"
     assert args.compute_type == "float16"
     assert args.batch_size == 2

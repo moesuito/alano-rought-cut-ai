@@ -285,6 +285,7 @@ def canonical_source_transcript(words: list[dict], source_sha256: str) -> dict:
         },
         "diarization_status": {
             "status": "pass",
+            "mode": "community-1",
             "model": config.diarization_model,
             "exclusive": True,
             "turn_count": len(transcript["diarization"]),

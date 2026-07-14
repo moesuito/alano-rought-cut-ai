@@ -16,6 +16,7 @@ from helpers.preview_transcript_qc import (
     build_report,
     whisper_cpp_json_to_transcript,
 )
+import helpers.preview_transcript_qc as preview_transcript_qc
 from helpers.repair_edl_from_preview import apply_repairs, find_safe_repairs
 from helpers.timing import parse_fps_fraction
 from helpers.verify_edit_ready import validate_transcript_report
@@ -921,9 +922,18 @@ def test_direct_script_provider_imports_sibling_transcribe(monkeypatch):
     """Direct ``python helpers/...py`` execution has no helpers package."""
     fake_backend = types.ModuleType("transcribe")
     fake_backend.load_api_key = lambda: "test-key"
-    fake_backend.call_scribe = lambda path, key: {
+    fake_backend.call_scribe = lambda path, key, language=None: {
         "text": path.name,
-        "api_key": key,
+        "language_code": language or "pt",
+        "words": [
+            {
+                "type": "word",
+                "text": "preview",
+                "start": 0.0,
+                "end": 0.4,
+                "speaker_id": "speaker_0",
+            }
+        ],
     }
     monkeypatch.setitem(sys.modules, "transcribe", fake_backend)
 
@@ -937,11 +947,11 @@ def test_direct_script_provider_imports_sibling_transcribe(monkeypatch):
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", direct_script_import)
+    monkeypatch.setattr(preview_transcript_qc, "sha256_file", lambda _path: "a" * 64)
 
-    assert ElevenLabsScribeProvider().transcribe(Path("preview.wav")) == {
-        "text": "preview.wav",
-        "api_key": "test-key",
-    }
+    result = ElevenLabsScribeProvider().transcribe(Path("preview.wav"))
+    assert result["text"] == "preview.wav"
+    assert result["_alano_cut"]["transcription_provider"] == "elevenlabs_scribe"
 
 
 def test_whisper_cpp_subwords_become_timed_words():

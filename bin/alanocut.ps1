@@ -8,8 +8,9 @@ function Show-Help {
     Write-Host "Usage:" -ForegroundColor White
     Write-Host "  alanocut init        Initialize current directory as a video rough-cut workspace" -ForegroundColor White
     Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
-    Write-Host "  alanocut setup-transcription   Install/update the shared CUDA WhisperX runtime" -ForegroundColor White
-    Write-Host "  alanocut transcription-doctor  Verify CUDA, versions, imports, and GPU" -ForegroundColor White
+    Write-Host "  alanocut configure   Configure ElevenLabs or local WhisperX transcription" -ForegroundColor White
+    Write-Host "  alanocut setup-transcription   Repair the selected provider/runtime/models" -ForegroundColor White
+    Write-Host "  alanocut transcription-doctor  Verify the selected provider profile" -ForegroundColor White
     Write-Host "  alanocut --help      Show this help message" -ForegroundColor White
     Write-Host ""
 }
@@ -63,6 +64,26 @@ function Test-RemoteVersionIsNewer {
     $Latest = Convert-VersionTag $LatestTag
     $Local = Convert-VersionTag $LocalVersion
     return ($Latest.CompareTo($Local) -gt 0)
+}
+
+function Get-AlanoPython {
+    $PythonPath = Join-Path $InstallRoot ".venv\Scripts\python.exe"
+    if (Test-Path $PythonPath) { return $PythonPath }
+    return "python"
+}
+
+function Invoke-SetupWizard {
+    param([string[]]$WizardArguments)
+    $WizardPath = Join-Path $InstallRoot "helpers\setup_wizard.py"
+    if (!(Test-Path $WizardPath)) {
+        Write-Error "Setup wizard is missing: $WizardPath"
+        return 1
+    }
+    $PythonPath = Get-AlanoPython
+    # Send the wizard's normal output to the terminal instead of this function's
+    # success stream. Callers capture only the numeric exit code.
+    & $PythonPath $WizardPath @WizardArguments | Out-Host
+    return $LASTEXITCODE
 }
 
 function Update-System {
@@ -138,8 +159,8 @@ function Update-System {
         $SubDir = Get-ChildItem -Path $TempExtractDir -Directory | Select-Object -First 1
         if (!$SubDir) { throw "Release directory not found inside the zip archive." }
         
-        # Clear target folder, keeping .venv and .env
-        Get-ChildItem -Path $InstallRoot | Where-Object { $_.Name -ne ".venv" -and $_.Name -ne ".env" } | Remove-Item -Recurse -Force
+        # Clear target folder, keeping credentials, light environment, and preference.
+        Get-ChildItem -Path $InstallRoot | Where-Object { $_.Name -ne ".venv" -and $_.Name -ne ".env" -and $_.Name -ne "user-settings.json" } | Remove-Item -Recurse -Force
         
         # Copy extracted files to target folder
         Get-ChildItem -Path $SubDir.FullName | Copy-Item -Destination $InstallRoot -Recurse -Force
@@ -174,13 +195,49 @@ if ($SubCommand -eq "init") {
         $NewScriptPath = Join-Path $InstallRoot "bin\alanocut.ps1"
         if (Test-Path $NewScriptPath) {
             Write-Host "Restarting command with the updated version..." -ForegroundColor Cyan
-            & $NewScriptPath init
+            & $NewScriptPath @args
             exit
         }
     }
 
     $CurrentDir = (Get-Location).Path
     Write-Host "Initializing rough cut workspace in: $CurrentDir..." -ForegroundColor Cyan
+
+    # Resolve and provision the provider before writing any workspace artifact.
+    $InitProvider = $null
+    $InitDiarization = $null
+    $InitNonInteractive = $false
+    for ($ArgumentIndex = 1; $ArgumentIndex -lt $args.Count; $ArgumentIndex++) {
+        switch ($args[$ArgumentIndex]) {
+            "--provider" {
+                $ArgumentIndex++
+                if ($ArgumentIndex -ge $args.Count) { Write-Error "--provider requires a value"; exit 1 }
+                $InitProvider = $args[$ArgumentIndex]
+            }
+            "--diarization" {
+                $ArgumentIndex++
+                if ($ArgumentIndex -ge $args.Count) { Write-Error "--diarization requires a value"; exit 1 }
+                $InitDiarization = $args[$ArgumentIndex]
+            }
+            "--non-interactive" { $InitNonInteractive = $true }
+            default { Write-Error "Unknown init option: $($args[$ArgumentIndex])"; exit 1 }
+        }
+    }
+    $SettingsTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("alanocut-settings-" + [System.Guid]::NewGuid().ToString() + ".json")
+    try {
+        $WizardArguments = @("init", "--workspace", $CurrentDir, "--settings-output", $SettingsTemp)
+        if ($InitProvider) { $WizardArguments += @("--provider", $InitProvider) }
+        if ($InitDiarization) { $WizardArguments += @("--diarization", $InitDiarization) }
+        if ($InitNonInteractive) { $WizardArguments += "--non-interactive" }
+        $WizardExit = Invoke-SetupWizard -WizardArguments $WizardArguments
+        if ($WizardExit -ne 0 -or !(Test-Path $SettingsTemp)) {
+            Write-Error "Workspace was not changed because provider setup did not complete."
+            exit 1
+        }
+    } catch {
+        Remove-Item -LiteralPath $SettingsTemp -Force -ErrorAction SilentlyContinue
+        throw
+    }
 
     # 1. Copy helpers directory
     $HelpersDir = Join-Path $InstallRoot "helpers"
@@ -217,22 +274,11 @@ if ($SubCommand -eq "init") {
     New-Item -ItemType Directory -Path $EditDir -Force -ErrorAction SilentlyContinue | Out-Null
     Write-Host "  -> Created raw_video/ and raw_video/edit/ folders" -ForegroundColor Gray
 
-    # 4. Copy .env if not exists (preferring the global configured one)
-    $EnvFile = Join-Path $CurrentDir ".env"
-    $GlobalEnv = Join-Path $InstallRoot ".env"
-    $EnvConfigured = $false
-    if (!(Test-Path $EnvFile)) {
-        if (Test-Path $GlobalEnv) {
-            Copy-Item -Path $GlobalEnv -Destination $EnvFile -Force
-            Write-Host "  -> Copied configured .env file from global install" -ForegroundColor Gray
-            $EnvConfigured = $true
-        }
-    } else {
-        $LocalEnvContent = Get-Content $EnvFile
-        if ($LocalEnvContent -match "HF_TOKEN=.+") {
-            $EnvConfigured = $true
-        }
-    }
+    # 4. Persist provider choice without copying global credentials into the project.
+    $WorkspaceSettings = Join-Path $CurrentDir "alanocut.json"
+    Copy-Item -LiteralPath $SettingsTemp -Destination $WorkspaceSettings -Force
+    Remove-Item -LiteralPath $SettingsTemp -Force -ErrorAction SilentlyContinue
+    Write-Host "  -> Saved workspace transcription provider in alanocut.json" -ForegroundColor Gray
 
     # 5. Register junctions
     $ClaudeLink = Join-Path $Home ".claude\skills\video-use"
@@ -277,29 +323,28 @@ if ($SubCommand -eq "init") {
     Write-Host " Workspace: $CurrentDir" -ForegroundColor Cyan
     Write-Host " Next Steps:" -ForegroundColor White
     Write-Host "   1. Put your raw files inside 'raw_video/'" -ForegroundColor White
-    if ($EnvConfigured) {
-        Write-Host "   2. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
-    } else {
-        Write-Host "   2. Configure HF_TOKEN in '.env' for Community-1 diarization" -ForegroundColor White
-        Write-Host "   3. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
-    }
+    Write-Host "   2. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
 }
 elseif ($SubCommand -eq "update") {
     $Updated = Update-System -Silent $false
-}
-elseif ($SubCommand -eq "setup-transcription" -or $SubCommand -eq "transcription-doctor") {
-    $RuntimeHelper = Join-Path $InstallRoot "helpers\whisperx_runtime.py"
-    if (!(Test-Path $RuntimeHelper)) {
-        Write-Error "WhisperX runtime helper is missing: $RuntimeHelper"
-        exit 1
+    if ($Updated) {
+        $WizardExit = Invoke-SetupWizard -WizardArguments @("migrate")
+        if ($WizardExit -ne 0) { exit $WizardExit }
     }
-    $PythonPath = Join-Path $InstallRoot ".venv\Scripts\python.exe"
-    if (!(Test-Path $PythonPath)) { $PythonPath = "python" }
-    $RuntimeCommand = if ($SubCommand -eq "setup-transcription") { "setup" } else { "doctor" }
-    & $PythonPath $RuntimeHelper $RuntimeCommand
-    exit $LASTEXITCODE
+}
+elseif ($SubCommand -eq "configure") {
+    $WizardExit = Invoke-SetupWizard -WizardArguments @("configure")
+    exit $WizardExit
+}
+elseif ($SubCommand -eq "setup-transcription") {
+    $WizardExit = Invoke-SetupWizard -WizardArguments @("setup")
+    exit $WizardExit
+}
+elseif ($SubCommand -eq "transcription-doctor") {
+    $WizardExit = Invoke-SetupWizard -WizardArguments @("doctor")
+    exit $WizardExit
 }
 elseif ($SubCommand -eq "-h" -or $SubCommand -eq "--help" -or $SubCommand -eq "help" -or [string]::IsNullOrEmpty($SubCommand)) {
     Show-Help

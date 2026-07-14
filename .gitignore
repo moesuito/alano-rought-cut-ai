@@ -1,6 +1,8 @@
 # Secrets
 .env
 .env.local
+alanocut.json
+user-settings.json
 *.pem
 *.key
 

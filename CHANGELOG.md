@@ -3,6 +3,8 @@
 ## v0.4.0 - 2026-07-11
 
 ### Added
+- Added guided terminal setup for a per-workspace ElevenLabs Scribe or CUDA WhisperX profile, with secret-free `alanocut.json` settings and global-only credentials.
+- Added optional Community-1 diarization, a no-diarization pinned Silero VAD profile, model prefetch/doctor, and canonical ElevenLabs Scribe transcript conversion.
 - Added a shared, pinned Python 3.12 CUDA transcription runtime with WhisperX 3.8.6, faster-whisper `large-v3`, Pyannote Community-1, runtime doctor, and installer command.
 - Added a canonical hash-bound transcript schema requiring 100% forced-aligned word timing and Community-1 speaker IDs.
 - Added `verify_edit_ready.py` gate validation prior to XML timeline export in Step 09.
@@ -13,7 +15,8 @@
 - Added mandatory `required_beats` alternatives and `beat_id` coverage checks.
 
 ### Changed
-- Made local CUDA WhisperX the normative source and preview provider; ElevenLabs and whisper.cpp remain explicit compatibility/diagnostic paths with no silent fallback.
+- Made the selected workspace transcription profile normative for both source and preview; ElevenLabs and WhisperX never silently fall back into one another.
+- Bound contextual preview transcription to the exact provider/configuration provenance shared by the EDL's source transcripts.
 - Shifted the workflow from the legacy video preview to audio-only `preview.wav` and `preview_timeline.json` artifacts.
 - Made the gate order mandatory: refine -> render -> audio QC -> semantic QC -> persisted preview transcript/hash -> join transcript QC -> readiness exit 0 -> XML.
 - Kept global transcript similarity/recall as supplemental evidence and removed project-specific domain assumptions from generic QC.

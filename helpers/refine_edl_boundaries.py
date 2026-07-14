@@ -2102,7 +2102,7 @@ def main() -> None:
             "policy": INTERNAL_SILENCE_SPLIT_POLICY,
             "threshold_ms": float(INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000),
             "comparison": "strictly_greater_than",
-            "authority": "canonical_whisperx_words",
+            "authority": "canonical_provider_words",
             "override_field": (
                 f"boundary_constraints.{INTERNAL_SILENCE_OVERRIDE_FIELD}"
             ),

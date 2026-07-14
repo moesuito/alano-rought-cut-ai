@@ -21,7 +21,7 @@ Goal: create the compact transcript view used for reading and phrase-level selec
 3. Produce `edit/takes_packed.md`.
 4. Treat `takes_packed.md` as the primary reading view and phrase-level map.
 5. Do not treat packed transcript lines as final editorial interpretation.
-6. If exact cuts inside a packed phrase are needed later, use canonical WhisperX `words[]` forced-alignment timestamps.
+6. If exact cuts inside a packed phrase are needed later, use canonical provider `words[]` timestamps (forced alignment for WhisperX, provider word timestamps for ElevenLabs).
 7. Update `edit/run_state.md`.
 
 ## Output

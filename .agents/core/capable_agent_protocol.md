@@ -51,5 +51,5 @@ Keep downstream constraints visible while making upstream decisions. For example
 - Update `edit/run_state.md` after material decisions and step transitions even when executing continuously.
 - Treat state as an audit and recovery surface, not as a replacement for the full workflow model.
 - On interruption, resume from the first incomplete gate recorded in state rather than restarting completed work.
-- Read large source artifacts on demand: packed transcript for overview, canonical WhisperX JSON for exact timing/speakers, and audio QC evidence for ambiguity.
+- Read large source artifacts on demand: packed transcript for overview, canonical provider JSON for exact timing/speakers, and audio QC evidence for ambiguity.
 - Complete only when the shared completion criteria in `.agents/core/workflow.md` are satisfied.

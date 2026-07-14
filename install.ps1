@@ -1,28 +1,12 @@
 # Alano Rough Cut AI Assistant Installer for Windows
 
-$ErrorActionPreference = "Stop"
+param(
+    [ValidateSet("whisperx", "elevenlabs")][string]$Provider,
+    [ValidateSet("community-1", "none")][string]$Diarization,
+    [switch]$NonInteractive
+)
 
-function Set-EnvEntry {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$Value
-    )
-    $Lines = @()
-    if (Test-Path $Path) { $Lines = @(Get-Content $Path) }
-    $Pattern = "^\s*" + [regex]::Escape($Name) + "\s*="
-    $Found = $false
-    $Updated = foreach ($Line in $Lines) {
-        if ($Line -match $Pattern) {
-            if (!$Found) { "$Name=$Value" }
-            $Found = $true
-        } else {
-            $Line
-        }
-    }
-    if (!$Found) { $Updated += "$Name=$Value" }
-    $Updated | Set-Content -Path $Path -Encoding utf8
-}
+$ErrorActionPreference = "Stop"
 
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "         Installing Alano Rough Cut AI Assistant...       " -ForegroundColor Green
@@ -92,11 +76,11 @@ if ($LatestTag) {
             throw "No directory found in extracted archive"
         }
         
-        # Clean target directory preserving .env and .venv
+        # Clean target directory preserving secrets, light environment, and preference.
         if (!(Test-Path $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         } else {
-            Get-ChildItem -Path $InstallDir | Where-Object { $_.Name -ne ".venv" -and $_.Name -ne ".env" } | Remove-Item -Recurse -Force
+            Get-ChildItem -Path $InstallDir | Where-Object { $_.Name -ne ".venv" -and $_.Name -ne ".env" -and $_.Name -ne "user-settings.json" } | Remove-Item -Recurse -Force
         }
         
         # Copy to installation folder
@@ -147,56 +131,24 @@ $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
 Write-Host "Installing dependencies..." -ForegroundColor Cyan
 & $PipPath install -e $InstallDir
 
-# 4. Configure the gated Community-1 model credential
-$EnvPath = Join-Path $InstallDir ".env"
-$HasKey = $false
-if (Test-Path $EnvPath) {
-    $EnvContent = Get-Content $EnvPath
-    if ($EnvContent -match "HF_TOKEN=.+") {
-        $HasKey = $true
-    }
-}
-
-if (!$HasKey) {
-    Write-Host ""
-    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host " Configurando Hugging Face para Pyannote Community-1    " -ForegroundColor Yellow
-    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host "Aceite os termos do modelo e gere um token de leitura em:" -ForegroundColor Gray
-    Write-Host "  https://huggingface.co/pyannote/speaker-diarization-community-1" -ForegroundColor Gray
-    Write-Host ""
-    $SecureToken = Read-Host "Cole o Hugging Face access token" -AsSecureString
-    $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken)
-    try { $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr) }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr) }
-    if (![string]::IsNullOrEmpty($Token)) {
-        Set-EnvEntry -Path $EnvPath -Name "HF_TOKEN" -Value $Token
-        $Token = $null
-        Write-Host "  -> Credencial salva no .env ignorado pelo Git." -ForegroundColor Green
-        $HasKey = $true
-    }
-    else {
-        Write-Host "Nenhuma chave inserida. Voce podera configurar o arquivo .env manualmente depois." -ForegroundColor Red
-    }
-    Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
-    Write-Host ""
-} else {
-    Write-Host "Hugging Face token já configurado em $EnvPath." -ForegroundColor Green
-}
-
-# 5. Install the shared CUDA transcription runtime once per Windows user.
+# 4. Provider profile, credentials, CUDA runtime, and selected model prefetch.
 $PythonPath = Join-Path $VenvDir "Scripts\python.exe"
-$RuntimeHelper = Join-Path $InstallDir "helpers\whisperx_runtime.py"
-if (Test-Path $RuntimeHelper) {
-    Write-Host "Setting up shared WhisperX CUDA runtime (this can take several minutes)..." -ForegroundColor Cyan
-    & $PythonPath $RuntimeHelper setup
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "WhisperX CUDA runtime setup failed. Run 'alanocut setup-transcription' to retry."
-        exit 1
-    }
+$WizardPath = Join-Path $InstallDir "helpers\setup_wizard.py"
+if (!(Test-Path $WizardPath)) {
+    Write-Error "Setup wizard is missing: $WizardPath"
+    exit 1
+}
+$WizardArgs = @($WizardPath, "install")
+if ($Provider) { $WizardArgs += @("--provider", $Provider) }
+if ($Diarization) { $WizardArgs += @("--diarization", $Diarization) }
+if ($NonInteractive) { $WizardArgs += "--non-interactive" }
+& $PythonPath @WizardArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Provider setup failed. Run 'alanocut configure' to retry."
+    exit 1
 }
 
-# 6. Expose CLI to PATH
+# 5. Expose CLI to PATH
 $BinDir = Join-Path $InstallDir "bin"
 Write-Host "Adding $BinDir to PATH..." -ForegroundColor Cyan
 
@@ -212,7 +164,7 @@ if ($PathList -notcontains $BinDir) {
     Write-Host "Path is already configured." -ForegroundColor Gray
 }
 
-# 7. Done
+# 6. Done
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "          Installation Completed Successfully!            " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green

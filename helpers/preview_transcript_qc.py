@@ -37,6 +37,22 @@ from helpers.internal_silence import (
     INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
     evaluate_internal_silence_contract,
 )
+from helpers.transcription_contract import (
+    DEFAULT_DIARIZATION_MODEL,
+    DEFAULT_DIARIZATION_MODEL_REVISION,
+    DIARIZATION_COMMUNITY_1,
+    ELEVENLABS_TRANSCRIPTION_PROVIDER,
+    ElevenLabsConfig,
+    WHISPERX_TRANSCRIPTION_PROVIDER,
+    WhisperXConfig,
+    convert_elevenlabs_result,
+    sha256_file,
+)
+from helpers.transcription_settings import (
+    PROVIDER_ELEVENLABS,
+    PROVIDER_WHISPERX,
+    resolve_settings,
+)
 
 
 DEFAULT_CUE_TERMS = [
@@ -257,6 +273,9 @@ class TranscriptProvider:
 
 
 class ElevenLabsScribeProvider(TranscriptProvider):
+    def __init__(self, config: ElevenLabsConfig | None = None):
+        self.config = config or ElevenLabsConfig()
+
     def transcribe(self, audio_path: Path) -> dict[str, Any]:
         # Keep both invocation modes working: ``python -m helpers...`` imports
         # through the package, while ``python helpers\preview_transcript_qc.py``
@@ -268,7 +287,11 @@ class ElevenLabsScribeProvider(TranscriptProvider):
                 raise
             from transcribe import call_scribe, load_api_key
         api_key = load_api_key()
-        return call_scribe(audio_path, api_key)
+        return convert_elevenlabs_result(
+            call_scribe(audio_path, api_key, self.config.language),
+            config=self.config,
+            source_sha256=sha256_file(audio_path),
+        )
 
 
 class WhisperXTranscriptProvider(TranscriptProvider):
@@ -293,6 +316,74 @@ class MockTranscriptProvider(TranscriptProvider):
 
     def transcribe(self, audio_path: Path) -> dict[str, Any]:
         return self.response_data
+
+
+def load_source_transcription_profile(
+    edl_data: dict[str, Any],
+    transcripts_dir: Path,
+) -> tuple[str, WhisperXConfig | ElevenLabsConfig]:
+    """Load the single canonical provider/configuration used by EDL sources.
+
+    A preview transcript is only comparable with source-selected words when it
+    uses the exact same output-affecting provider configuration.  The source
+    transcript provenance is therefore authoritative here; rebuilding a
+    config from the currently selected profile would silently lose overrides
+    such as language, speaker constraints, or batch-specific runtime options.
+    """
+
+    sources = edl_data.get("sources")
+    if not isinstance(sources, dict) or not sources:
+        raise ValueError("EDL sources must be a non-empty object")
+
+    profiles: dict[tuple[str, str], WhisperXConfig | ElevenLabsConfig] = {}
+    for source_id in sorted(sources):
+        source_path = transcripts_dir / f"{source_id}.json"
+        try:
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(
+                f"failed to load source transcript {source_id!r}: {exc}"
+            ) from exc
+
+        metadata = payload.get("_alano_cut")
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                f"source transcript {source_id!r} has no canonical provenance"
+            )
+        provider = metadata.get("transcription_provider")
+        config_data = metadata.get("config")
+        config_sha256 = metadata.get("config_sha256")
+        if not isinstance(config_data, dict) or not isinstance(config_sha256, str):
+            raise ValueError(
+                f"source transcript {source_id!r} has incomplete provider provenance"
+            )
+        try:
+            if provider == WHISPERX_TRANSCRIPTION_PROVIDER:
+                config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(**config_data)
+            elif provider == ELEVENLABS_TRANSCRIPTION_PROVIDER:
+                config = ElevenLabsConfig(**config_data)
+            else:
+                raise ValueError(f"unsupported provider {provider!r}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"source transcript {source_id!r} has invalid provider config: {exc}"
+            ) from exc
+        if config.sha256 != config_sha256:
+            raise ValueError(
+                f"source transcript {source_id!r} has a stale provider config hash"
+            )
+        profiles[(str(provider), config.sha256)] = config
+
+    if len(profiles) != 1:
+        rendered = ", ".join(
+            f"{provider}/{config_sha[:12]}" for provider, config_sha in sorted(profiles)
+        )
+        raise ValueError(
+            "all EDL source transcripts must share one provider/configuration "
+            f"before preview QC (found {rendered})"
+        )
+    (provider, _config_sha256), config = next(iter(profiles.items()))
+    return provider, config
 
 
 def whisper_cpp_json_to_transcript(data: dict[str, Any]) -> dict[str, Any]:
@@ -1554,11 +1645,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--provider",
-        choices=("whisperx", "elevenlabs", "local-whisper", "auto"),
-        default="whisperx",
+        choices=("configured", "whisperx", "elevenlabs", "local-whisper", "auto"),
+        default="configured",
         help=(
-            "Preview transcription backend. WhisperX is normative. 'auto' is a "
-            "deprecated alias for WhisperX and never falls back to unaligned ASR."
+            "Workspace transcription backend by default. 'auto' remains a "
+            "deprecated alias for WhisperX and never falls back automatically."
         ),
     )
     args = ap.parse_args()
@@ -1610,6 +1701,29 @@ def main() -> None:
         print(f"Error: refined EDL not found at: {edl_path or edit_dir / 'edl.json'}", file=sys.stderr)
         sys.exit(1)
 
+    transcripts_dir = (
+        args.transcripts.resolve() if args.transcripts else edit_dir / "transcripts"
+    )
+    source_profile: tuple[str, WhisperXConfig | ElevenLabsConfig] | None = None
+    # Contextual preview QC must never regenerate a configuration from only the
+    # current settings.  The transcript files selected by the EDL are the
+    # source of truth for settings that change words/timings.
+    if (
+        transcript_data is None
+        and args.mock_transcript is None
+        and context_requested
+        and args.provider != "local-whisper"
+    ):
+        assert edl_path is not None
+        try:
+            source_profile = load_source_transcription_profile(
+                json.loads(edl_path.read_text(encoding="utf-8")),
+                transcripts_dir,
+            )
+        except Exception as exc:
+            print(f"Error: cannot bind preview transcription to sources: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     if transcript_data is None:
         if args.mock_transcript:
             mock_path = args.mock_transcript.resolve()
@@ -1619,12 +1733,71 @@ def main() -> None:
             transcript_data = json.loads(mock_path.read_text(encoding="utf-8"))
         else:
             try:
-                if args.provider == "local-whisper":
-                    transcript_data = LocalWhisperCppProvider().transcribe(wav_path)
-                elif args.provider == "elevenlabs":
-                    transcript_data = ElevenLabsScribeProvider().transcribe(wav_path)
+                configured = (
+                    resolve_settings(edit_dir)
+                    if args.provider == "configured"
+                    else None
+                )
+                effective_provider = configured.provider if configured else args.provider
+                configured_canonical_provider = (
+                    WHISPERX_TRANSCRIPTION_PROVIDER
+                    if effective_provider in {PROVIDER_WHISPERX, "auto"}
+                    else ELEVENLABS_TRANSCRIPTION_PROVIDER
+                    if effective_provider == PROVIDER_ELEVENLABS
+                    else None
+                )
+                if source_profile is not None:
+                    source_provider, source_config = source_profile
+                    if configured_canonical_provider != source_provider:
+                        raise ValueError(
+                            "requested preview provider does not match source "
+                            f"transcripts ({configured_canonical_provider!r} vs "
+                            f"{source_provider!r}); reconfigure or re-transcribe sources"
+                        )
+                    effective_provider = (
+                        PROVIDER_WHISPERX
+                        if source_provider == WHISPERX_TRANSCRIPTION_PROVIDER
+                        else PROVIDER_ELEVENLABS
+                    )
                 else:
-                    transcript_data = PROVIDER.transcribe(wav_path)
+                    source_config = None
+
+                if effective_provider == "local-whisper":
+                    transcript_data = LocalWhisperCppProvider().transcribe(wav_path)
+                elif effective_provider == PROVIDER_ELEVENLABS:
+                    transcript_data = ElevenLabsScribeProvider(
+                        source_config
+                        if isinstance(source_config, ElevenLabsConfig)
+                        else ElevenLabsConfig(language=configured.language if configured else "pt")
+                    ).transcribe(wav_path)
+                else:
+                    if isinstance(source_config, WhisperXConfig):
+                        transcript_data = WhisperXTranscriptProvider(source_config).transcribe(wav_path)
+                    elif configured and configured.provider == PROVIDER_WHISPERX:
+                        mode = configured.diarization
+                        transcript_data = WhisperXTranscriptProvider(
+                            WhisperXConfig(
+                                language=configured.language,
+                                diarization_mode=mode,
+                                vad_method=(
+                                    "pyannote"
+                                    if mode == DIARIZATION_COMMUNITY_1
+                                    else "silero"
+                                ),
+                                diarization_model=(
+                                    DEFAULT_DIARIZATION_MODEL
+                                    if mode == DIARIZATION_COMMUNITY_1
+                                    else None
+                                ),
+                                diarization_model_revision=(
+                                    DEFAULT_DIARIZATION_MODEL_REVISION
+                                    if mode == DIARIZATION_COMMUNITY_1
+                                    else None
+                                ),
+                            )
+                        ).transcribe(wav_path)
+                    else:
+                        transcript_data = PROVIDER.transcribe(wav_path)
             except Exception as e:
                 print(f"Error: failed during transcription: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -1659,7 +1832,6 @@ def main() -> None:
     if context_requested:
         assert edl_path is not None
         map_path = args.timeline_map.resolve() if args.timeline_map else edit_dir / "preview_timeline.json"
-        transcripts_dir = args.transcripts.resolve() if args.transcripts else edit_dir / "transcripts"
         try:
             edl_data = json.loads(edl_path.read_text(encoding="utf-8"))
             timeline_map_data = json.loads(map_path.read_text(encoding="utf-8"))

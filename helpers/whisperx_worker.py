@@ -1006,16 +1006,25 @@ def _validate_config(config: object) -> dict[str, Any]:
         raise ValueError("configuration must be a JSON object")
     if config.get("device", "cuda") != "cuda":
         raise ValueError("the normative WhisperX worker requires device='cuda'")
-    if config.get("diarization_model", DIARIZATION_MODEL) != DIARIZATION_MODEL:
-        raise ValueError(f"diarization_model must be {DIARIZATION_MODEL}")
+    diarization_mode = config.get("diarization_mode", "community-1")
+    if diarization_mode not in {"community-1", "none"}:
+        raise ValueError("diarization_mode must be 'community-1' or 'none'")
+    if diarization_mode == "community-1":
+        if config.get("diarization_model", DIARIZATION_MODEL) != DIARIZATION_MODEL:
+            raise ValueError(f"diarization_model must be {DIARIZATION_MODEL}")
+    elif config.get("diarization_model") is not None:
+        raise ValueError("diarization_model must be null when diarization is disabled")
     batch_size = config.get("batch_size", 2)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
     beam_size = config.get("beam_size", 5)
     if not isinstance(beam_size, int) or isinstance(beam_size, bool) or beam_size < 1:
         raise ValueError("beam_size must be a positive integer")
-    if config.get("vad_method", "pyannote") != "pyannote":
-        raise ValueError("the normative worker requires Pyannote VAD")
+    expected_vad = "pyannote" if diarization_mode == "community-1" else "silero"
+    if config.get("vad_method", expected_vad) != expected_vad:
+        raise ValueError(
+            f"vad_method must be {expected_vad!r} for diarization_mode={diarization_mode!r}"
+        )
     if not str(config.get("semantic_verifier_model") or "").strip():
         raise ValueError("semantic_verifier_model is required")
     if config.get("semantic_fusion_mode") != "guarded_union":
@@ -1026,12 +1035,18 @@ def _validate_config(config: object) -> dict[str, Any]:
         )
     if not _normalized_words(config.get("recording_cues")):
         raise ValueError("recording_cues must contain at least one cue")
-    for key in (
+    revision_keys = [
         "asr_model_revision",
         "semantic_verifier_revision",
         "align_model_revision",
-        "diarization_model_revision",
-    ):
+    ]
+    if diarization_mode == "community-1":
+        revision_keys.append("diarization_model_revision")
+    elif config.get("diarization_model_revision") is not None:
+        raise ValueError(
+            "diarization_model_revision must be null when diarization is disabled"
+        )
+    for key in revision_keys:
         if not str(config.get(key) or "").strip():
             raise ValueError(f"{key} is required for reproducible local transcription")
     for key in ("num_speakers", "min_speakers", "max_speakers"):
@@ -1040,6 +1055,8 @@ def _validate_config(config: object) -> dict[str, Any]:
             not isinstance(value, int) or isinstance(value, bool) or value < 1
         ):
             raise ValueError(f"{key} must be a positive integer")
+        if diarization_mode == "none" and value is not None:
+            raise ValueError(f"{key} requires speaker diarization")
     if config.get("num_speakers") is not None and (
         config.get("min_speakers") is not None or config.get("max_speakers") is not None
     ):
@@ -1057,15 +1074,16 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     import whisperx
     from faster_whisper import WhisperModel
     from huggingface_hub import snapshot_download
-    from pyannote.audio import Pipeline
 
     if not torch.cuda.is_available() or "+cpu" in torch.__version__:
         raise RuntimeError("CUDA PyTorch is required; CPU fallback is disabled")
     if torch.cuda.get_device_capability(0) < (7, 0):
         raise RuntimeError("the detected NVIDIA GPU does not support efficient float16 inference")
 
+    diarization_mode = str(config.get("diarization_mode") or "community-1")
+    diarization_enabled = diarization_mode == "community-1"
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if not token:
+    if diarization_enabled and not token:
         raise RuntimeError("HF_TOKEN is required for Community-1 diarization")
 
     asr_model = str(config.get("asr_model") or "large-v3")
@@ -1086,7 +1104,9 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
         if token
     } or set(DEFAULT_RECORDING_CUES)
     align_model_revision = str(config["align_model_revision"])
-    diarization_model_revision = str(config["diarization_model_revision"])
+    diarization_model_revision = (
+        str(config["diarization_model_revision"]) if diarization_enabled else None
+    )
     cache_root = Path(
         config.get("model_cache_dir")
         or (Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AlanoCut" / "models")
@@ -1101,6 +1121,16 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     peak_vram: dict[str, int] = {}
     effective_compute = requested_compute
     semantic_recoveries: list[dict[str, Any]] = []
+
+    vad_model = None
+    if not diarization_enabled:
+        try:
+            from helpers.pinned_silero import load_pinned_silero
+        except ModuleNotFoundError as exc:
+            if exc.name != "helpers":
+                raise
+            from pinned_silero import load_pinned_silero
+        vad_model = load_pinned_silero(cache_root)
 
     stage_started = time.perf_counter()
     model = None
@@ -1121,7 +1151,8 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
                 "cuda",
                 compute_type=effective_compute,
                 language=language,
-                vad_method="pyannote",
+                vad_model=vad_model,
+                vad_method=str(config.get("vad_method") or "pyannote"),
                 asr_options={
                     "beam_size": beam_size,
                     "best_of": beam_size,
@@ -1140,7 +1171,8 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
                 "cuda",
                 compute_type=effective_compute,
                 language=language,
-                vad_method="pyannote",
+                vad_model=vad_model,
+                vad_method=str(config.get("vad_method") or "pyannote"),
                 asr_options={
                     "beam_size": beam_size,
                     "best_of": beam_size,
@@ -1220,12 +1252,14 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
     stage_started = time.perf_counter()
     align_model = None
     try:
-        align_snapshot = snapshot_download(
-            repo_id=str(align_model_name),
-            revision=align_model_revision,
-            cache_dir=str(cache_root / "alignment"),
-            token=token,
-        )
+        align_download_args = {
+            "repo_id": str(align_model_name),
+            "revision": align_model_revision,
+            "cache_dir": str(cache_root / "alignment"),
+        }
+        if token:
+            align_download_args["token"] = token
+        align_snapshot = snapshot_download(**align_download_args)
         align_model, align_metadata = whisperx.load_align_model(
             language_code=detected_language,
             device="cuda",
@@ -1270,44 +1304,51 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
             del align_model
         _gpu_cleanup(torch)
     phase_seconds["alignment"] = round(time.perf_counter() - stage_started, 3)
-    stage_started = time.perf_counter()
-    diarization_pipeline = None
-    try:
-        diarization_pipeline = Pipeline.from_pretrained(
-            DIARIZATION_MODEL,
-            revision=diarization_model_revision,
-            token=token,
-            cache_dir=str(cache_root / "pyannote"),
-        )
-        if diarization_pipeline is None:
-            raise RuntimeError("Community-1 could not be loaded; verify model access")
-        diarization_pipeline.to(torch.device("cuda"))
-        waveform = torch.from_numpy(audio[None, :])
-        kwargs = {
-            key: config.get(key)
-            for key in ("num_speakers", "min_speakers", "max_speakers")
-            if config.get(key) is not None
-        }
-        diarization_output = diarization_pipeline(
-            {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs
-        )
-        exclusive = getattr(diarization_output, "exclusive_speaker_diarization", None)
-        annotation = (
-            exclusive
-            if exclusive is not None
-            else getattr(diarization_output, "speaker_diarization", None)
-        )
-        if annotation is None:
-            raise RuntimeError("Community-1 returned no speaker diarization")
-        turns = _annotation_turns(annotation)
-        if not turns:
-            raise RuntimeError("Community-1 returned no speaker turns")
-        peak_vram["diarization"] = int(torch.cuda.max_memory_allocated())
-    finally:
-        if diarization_pipeline is not None:
-            del diarization_pipeline
-        _gpu_cleanup(torch)
-    phase_seconds["diarization"] = round(time.perf_counter() - stage_started, 3)
+    turns: list[dict[str, Any]] = []
+    exclusive = None
+    if diarization_enabled:
+        stage_started = time.perf_counter()
+        diarization_pipeline = None
+        try:
+            from pyannote.audio import Pipeline
+
+            diarization_pipeline = Pipeline.from_pretrained(
+                DIARIZATION_MODEL,
+                revision=diarization_model_revision,
+                token=token,
+                cache_dir=str(cache_root / "pyannote"),
+            )
+            if diarization_pipeline is None:
+                raise RuntimeError("Community-1 could not be loaded; verify model access")
+            diarization_pipeline.to(torch.device("cuda"))
+            waveform = torch.from_numpy(audio[None, :])
+            kwargs = {
+                key: config.get(key)
+                for key in ("num_speakers", "min_speakers", "max_speakers")
+                if config.get(key) is not None
+            }
+            diarization_output = diarization_pipeline(
+                {"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs
+            )
+            exclusive = getattr(diarization_output, "exclusive_speaker_diarization", None)
+            annotation = (
+                exclusive
+                if exclusive is not None
+                else getattr(diarization_output, "speaker_diarization", None)
+            )
+            if annotation is None:
+                raise RuntimeError("Community-1 returned no speaker diarization")
+            turns = _annotation_turns(annotation)
+            if not turns:
+                raise RuntimeError("Community-1 returned no speaker turns")
+            peak_vram["diarization"] = int(torch.cuda.max_memory_allocated())
+        finally:
+            if diarization_pipeline is not None:
+                del diarization_pipeline
+            _gpu_cleanup(torch)
+        phase_seconds["diarization"] = round(time.perf_counter() - stage_started, 3)
+    else:
+        phase_seconds["diarization"] = 0.0
 
     return {
         "worker_schema_version": 2,
@@ -1320,7 +1361,7 @@ def run(audio_path: Path, config: dict[str, Any]) -> dict[str, Any]:
             "asr": asr_model,
             "semantic_verifier": semantic_verifier_model,
             "alignment": align_model_name,
-            "diarization": DIARIZATION_MODEL,
+            "diarization": DIARIZATION_MODEL if diarization_enabled else None,
         },
         "model_revisions": {
             "asr": asr_model_revision,

@@ -1,12 +1,8 @@
-"""Transcribe one source with the local CUDA WhisperX stack.
+"""Transcribe one source with its explicit workspace provider profile.
 
-The normative path is:
-
-``faster-whisper large-v3 -> WhisperX forced alignment -> Community-1 diarization``
-
-ElevenLabs remains an explicit compatibility provider, but it is never an
-automatic fallback: losing forced alignment or local diarization must be a
-visible operator decision.
+WhisperX is CUDA-only and emits forced-aligned word timestamps, optionally
+with Community-1 speakers. ElevenLabs Scribe is normalized from provider word
+timestamps. The two providers never silently fall back into one another.
 """
 
 from __future__ import annotations
@@ -26,11 +22,16 @@ import requests
 try:
     from helpers.transcription_contract import (
         DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_DIARIZATION_MODEL_REVISION,
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         TranscriptContractError,
         WhisperXConfig,
+        ElevenLabsConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
+        convert_elevenlabs_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -41,16 +42,26 @@ try:
         ensure_no_secret_fields,
         load_env_value,
     )
+    from helpers.transcription_settings import (
+        PROVIDER_ELEVENLABS,
+        PROVIDER_WHISPERX,
+        resolve_settings,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
     from transcription_contract import (  # type: ignore[no-redef]
         DEFAULT_DIARIZATION_MODEL,
+        DEFAULT_DIARIZATION_MODEL_REVISION,
         DEFAULT_PORTUGUESE_ALIGN_MODEL,
         DEFAULT_PORTUGUESE_HOTWORDS,
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         TranscriptContractError,
         WhisperXConfig,
+        ElevenLabsConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
+        convert_elevenlabs_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -60,6 +71,11 @@ except ModuleNotFoundError as exc:
         WhisperXProvider,
         ensure_no_secret_fields,
         load_env_value,
+    )
+    from transcription_settings import (  # type: ignore[no-redef]
+        PROVIDER_ELEVENLABS,
+        PROVIDER_WHISPERX,
+        resolve_settings,
     )
 
 
@@ -106,7 +122,7 @@ def call_scribe(
     language: str | None = None,
     num_speakers: int | None = None,
 ) -> dict[str, Any]:
-    """Compatibility adapter for explicit ElevenLabs use."""
+    """Call the explicitly selected ElevenLabs Scribe provider."""
     data: dict[str, str] = {
         "model_id": "scribe_v1",
         "diarize": "true",
@@ -141,23 +157,17 @@ def _scribe_transcript(
     api_key: str,
     language: str | None,
     num_speakers: int | None,
+    config: ElevenLabsConfig,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="alano_cut_scribe_") as temp_dir:
         audio = Path(temp_dir) / f"{source.stem}.wav"
         extract_audio(source, audio)
         payload = call_scribe(audio, api_key, language, num_speakers)
-    binding = payload.get("_alano_cut")
-    if not isinstance(binding, dict):
-        binding = {}
-        payload["_alano_cut"] = binding
-    binding.update(
-        {
-            "schema_version": 0,
-            "transcription_provider": "elevenlabs_scribe_compatibility",
-            "source_sha256": sha256_file(source),
-        }
+    return convert_elevenlabs_result(
+        payload,
+        config=config,
+        source_sha256=sha256_file(source),
     )
-    return payload
 
 
 def transcribe_one(
@@ -169,8 +179,8 @@ def transcribe_one(
     verbose: bool = True,
     force: bool = False,
     *,
-    provider: str = "whisperx",
-    config: WhisperXConfig | None = None,
+    provider: str = "configured",
+    config: WhisperXConfig | ElevenLabsConfig | None = None,
     runtime_python: Path | None = None,
 ) -> Path:
     """Transcribe a source and return its canonical transcript path."""
@@ -179,12 +189,47 @@ def transcribe_one(
     transcripts_dir.mkdir(parents=True, exist_ok=True)
     output = transcripts_dir / f"{source.stem}.json"
     source_hash = sha256_file(source)
+    selected_settings = None
+    if provider == "configured":
+        selected_settings = resolve_settings(edit_dir)
+        provider = selected_settings.provider
+        language = (
+            None
+            if selected_settings.language.casefold() == "auto"
+            else selected_settings.language
+        )
 
     if provider == "whisperx":
-        effective_config = config or WhisperXConfig(
-            language=language,
-            num_speakers=num_speakers,
-        )
+        if config is None:
+            diarization_mode = (
+                selected_settings.diarization
+                if selected_settings is not None
+                else DIARIZATION_COMMUNITY_1
+            )
+            effective_config = WhisperXConfig(
+                language=language,
+                diarization_mode=diarization_mode,
+                vad_method=(
+                    "pyannote"
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else "silero"
+                ),
+                diarization_model=(
+                    DEFAULT_DIARIZATION_MODEL
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                diarization_model_revision=(
+                    DEFAULT_DIARIZATION_MODEL_REVISION
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                num_speakers=num_speakers,
+            )
+        else:
+            effective_config = config
+        if not isinstance(effective_config, WhisperXConfig):
+            raise ValueError("WhisperX provider requires WhisperXConfig")
         if output.exists() and not force and is_cache_valid(
             output, source_sha256=source_hash, config=effective_config
         ):
@@ -200,21 +245,15 @@ def transcribe_one(
                     )
             return output
     elif provider == "elevenlabs":
-        effective_config = None
-        if output.exists() and not force:
-            try:
-                existing = json.loads(output.read_text(encoding="utf-8"))
-                metadata = existing.get("_alano_cut", {})
-                if (
-                    metadata.get("transcription_provider")
-                    == "elevenlabs_scribe_compatibility"
-                    and metadata.get("source_sha256") == source_hash
-                ):
-                    if verbose:
-                        print(f"cached: {output.name} (ElevenLabs compatibility)")
-                    return output
-            except (OSError, json.JSONDecodeError, AttributeError):
-                pass
+        effective_config = config or ElevenLabsConfig(language=language)
+        if not isinstance(effective_config, ElevenLabsConfig):
+            raise ValueError("ElevenLabs provider requires ElevenLabsConfig")
+        if output.exists() and not force and is_cache_valid(
+            output, source_sha256=source_hash, config=effective_config
+        ):
+            if verbose:
+                print(f"cached: {output.name} (source + ElevenLabs config match)")
+            return output
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
 
@@ -234,12 +273,13 @@ def transcribe_one(
             api_key=api_key or load_api_key(),
             language=language,
             num_speakers=num_speakers,
+            config=effective_config,
         )
     ensure_no_secret_fields(payload)
     write_json_atomic(output, payload)
 
     pending_acoustic: list[dict[str, Any]] = []
-    if provider == "whisperx":
+    if provider in {"whisperx", "elevenlabs"}:
         try:
             pending_acoustic = validate_provisional_normative_transcript(payload)
         except TranscriptContractError as error:
@@ -278,7 +318,7 @@ def transcribe_one(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Transcribe audio/video with CUDA WhisperX and Community-1"
+        description="Transcribe audio/video with the selected Alano Cut provider"
     )
     parser.add_argument("source", type=Path, help="Audio or video source")
     parser.add_argument(
@@ -289,9 +329,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("whisperx", "elevenlabs"),
-        default="whisperx",
-        help="Normative local provider or explicit compatibility provider",
+        choices=("configured", "whisperx", "elevenlabs"),
+        default="configured",
+        help="Workspace provider by default, or an explicit audited override",
     )
     parser.add_argument("--language", default="pt", help="Language code (default: pt)")
     parser.add_argument("--model", default="large-v3", help="faster-whisper model")
@@ -304,6 +344,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--diarization-model",
         default=DEFAULT_DIARIZATION_MODEL,
         choices=(DEFAULT_DIARIZATION_MODEL,),
+    )
+    parser.add_argument(
+        "--diarization",
+        choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE),
+        default=None,
+        help="WhisperX speaker mode (default: workspace setting)",
     )
     parser.add_argument(
         "--batch-size",
@@ -331,31 +377,54 @@ def main() -> int:
     if not source.is_file():
         print(f"source not found: {source}", file=sys.stderr)
         return 1
-    language = None if str(args.language).lower() == "auto" else args.language
-    min_speakers = args.speaker_range[0] if args.speaker_range else None
-    max_speakers = args.speaker_range[1] if args.speaker_range else None
     try:
-        config = WhisperXConfig(
-            model=args.model,
-            language=language,
-            compute_type=args.compute_type,
-            batch_size=args.batch_size,
-            beam_size=args.beam_size,
-            initial_prompt=args.initial_prompt if language == "pt" else None,
-            hotwords=args.hotwords if language == "pt" else None,
-            align_model=args.align_model if language == "pt" else None,
-            diarization_model=args.diarization_model,
-            num_speakers=args.num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
+        resolved_settings = (
+            resolve_settings(source.parent) if args.provider == "configured" else None
         )
+        provider = resolved_settings.provider if resolved_settings else args.provider
+        configured_language = resolved_settings.language if resolved_settings else args.language
+        language = None if str(configured_language).lower() == "auto" else configured_language
+        min_speakers = args.speaker_range[0] if args.speaker_range else None
+        max_speakers = args.speaker_range[1] if args.speaker_range else None
+        if provider == PROVIDER_WHISPERX:
+            diarization_mode = (
+                args.diarization
+                or (resolved_settings.diarization if resolved_settings else DIARIZATION_COMMUNITY_1)
+            )
+            config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(
+                model=args.model,
+                language=language,
+                compute_type=args.compute_type,
+                batch_size=args.batch_size,
+                beam_size=args.beam_size,
+                initial_prompt=args.initial_prompt if language == "pt" else None,
+                hotwords=args.hotwords if language == "pt" else None,
+                align_model=args.align_model if language == "pt" else None,
+                vad_method=("pyannote" if diarization_mode == DIARIZATION_COMMUNITY_1 else "silero"),
+                diarization_mode=diarization_mode,
+                diarization_model=(
+                    args.diarization_model
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                diarization_model_revision=(
+                    DEFAULT_DIARIZATION_MODEL_REVISION
+                    if diarization_mode == DIARIZATION_COMMUNITY_1
+                    else None
+                ),
+                num_speakers=args.num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+        else:
+            config = ElevenLabsConfig(language=language)
         transcribe_one(
             source,
             (args.edit_dir or source.parent / "edit").resolve(),
             language=language,
             num_speakers=args.num_speakers,
             force=args.force,
-            provider=args.provider,
+            provider=provider,
             config=config,
             runtime_python=args.runtime_python,
         )

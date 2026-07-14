@@ -8,9 +8,10 @@ Keep these rules in context throughout the run.
 - Never write session output inside the repo folder.
 - Never cut inside a word.
 - Do not trust ASR boundary timestamps alone when a cut feels tight; validate against waveform energy too.
-- Source and preview transcription must use the local CUDA WhisperX stack: faster-whisper, forced alignment, and Pyannote Community-1 exclusive diarization.
-- Every normative transcript word must have a positive forced-aligned interval and canonical `speaker_id`; CPU fallback, unaligned Whisper, and silent provider fallback are prohibited.
-- Use canonical WhisperX JSON word timestamps when trimming inside a packed phrase.
+- Source and preview transcription must use the same provider/configuration declared in workspace `alanocut.json`; silent provider fallback is prohibited.
+- WhisperX is CUDA-only and requires forced-aligned words. Community-1 speakers are preferred; explicit `none` diarization is allowed with no speaker IDs and must be recorded as reduced precision. ElevenLabs requires provider word timestamps and provider diarization.
+- Every normative transcript word must have a positive timed interval; CPU fallback, unaligned Whisper, missing selected-provider timing, and silent provider fallback are prohibited.
+- Use canonical provider JSON word timestamps when trimming inside a packed phrase.
 - `takes_packed.md` is the primary reading view, but not the final edit.
 - The transcript is the map. The LLM is the editor.
 - Use LLM editorial judgment, not deterministic scoring algorithms.

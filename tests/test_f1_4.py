@@ -158,6 +158,10 @@ def test_alanocut_init_smoke(tmp_path):
     """Verify that alanocut init runs and sets up the workspace."""
     env = os.environ.copy()
     env["USERPROFILE"] = str(tmp_path / "home")
+    env["APPDATA"] = str(tmp_path / "appdata")
+    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+    env["ELEVENLABS_API_KEY"] = "test-key"
+    env["ALANOCUT_SKIP_CREDENTIAL_VALIDATION"] = "1"
     (tmp_path / "home").mkdir()
     
     workspace = tmp_path / "workspace"
@@ -166,7 +170,10 @@ def test_alanocut_init_smoke(tmp_path):
     ps_script = Path("bin/alanocut.ps1").absolute()
     
     res = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script), "init"],
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script),
+            "init", "--provider", "elevenlabs", "--non-interactive",
+        ],
         cwd=str(workspace),
         env=env,
         capture_output=True,
@@ -182,6 +189,7 @@ def test_alanocut_init_smoke(tmp_path):
     assert (workspace / "pyproject.toml").exists()
     assert (workspace / ".gitignore").exists()
     assert (workspace / "config.json").exists()
+    assert (workspace / "alanocut.json").exists()
     assert (workspace / ".agents").exists()
     assert (workspace / "raw_video").exists()
     assert (workspace / "raw_video/edit").exists()
@@ -197,4 +205,3 @@ def test_alanocut_update_smoke():
     )
     # It might warn about gh CLI, but should exit with 0 if it skips or succeeds
     assert res.returncode == 0, f"alanocut update failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
-

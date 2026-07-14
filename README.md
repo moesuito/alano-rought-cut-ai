@@ -13,7 +13,7 @@ The agent instructions use a capability-routed dual protocol. Capable agents rea
 
 - **Identifies and cuts out filler words** (`umm`, `uh`, false starts) and dead space between takes.
 - **Infers the video type and rough-cut structure** from the transcript before editing, instead of assuming a fixed format.
-- **Transcribes locally on NVIDIA CUDA** with faster-whisper `large-v3`, WhisperX forced word alignment, and Pyannote Community-1 exclusive speaker diarization.
+- **Uses an explicit transcription provider per workspace**: local CUDA WhisperX/faster-whisper (with optional Community-1 diarization) or ElevenLabs Scribe with provider word timestamps.
 - **Compares repeated takes by meaning and delivery**, choosing the best version of each narrative beat.
 - **Turns every internal lexical gap strictly above 300ms into a jump cut**, with exact 300ms retention and narrow reasoned overrides for intentional pauses.
 - **Validates tight cuts against waveform energy**, so ASR timestamp drift does not become the only boundary signal.
@@ -35,6 +35,10 @@ irm https://raw.githubusercontent.com/moesuito/alano-rought-cut-ai/main/install.
 ```
 
 *Note: Restart your terminal/IDE after installation to load the updated `PATH` environment variables.*
+
+The terminal wizard asks which provider to use on the first installation. See
+[the transcription setup guide](docs/TRANSCRIPTION_SETUP.md) for the two
+profiles, credentials, model cache, disk requirement, and headless flags.
 
 ## Updating
 
@@ -67,22 +71,26 @@ This will:
 2. Copy the helper scripts plus `AGENTS.md` and `.agents/` modular editing rules into your directory.
 3. Automatically register the editing skill for Claude Code (`~/.claude/skills/video-use`) and Gemini (`~/.gemini/config/skills/video-use`) pointing to your current folder.
 
+Before writing any project file, `alanocut init` asks which transcription
+provider this workspace will use. It saves the choice in `alanocut.json` and
+keeps keys only in the global Alano Cut `.env`; credentials are never copied
+into the workspace.
+
 After running `init`:
 1. Drop your raw video files inside `raw_video/`.
-2. Accept the Community-1 terms on Hugging Face and configure `HF_TOKEN` in the generated `.env` file. The token is never placed in argv, transcripts, reports, or Git.
-3. Optionally add editing context in `raw_video/edit/USER_BRIEF.md` (target duration, audience, must keep/cut, pacing).
-4. Open your AI agent (like Claude Code or Gemini), read `AGENTS.md`, and say: *"edit these clips"* or *"make a rough cut"*.
+2. Optionally add editing context in `raw_video/edit/USER_BRIEF.md` (target duration, audience, must keep/cut, pacing).
+3. Open your AI agent (like Claude Code or Gemini), read `AGENTS.md`, and say: *"edit these clips"* or *"make a rough cut"*.
 
 
 ## How it works
 
 The agent uses an audio-only evidence stack for word-boundary precision:
 
-1. **Source transcripts**: a shared Python 3.12 runtime runs faster-whisper `large-v3` on CUDA, WhisperX forced alignment, and `pyannote/speaker-diarization-community-1`. A pinned, windowed `small` verifier may recover recording cues only after two-window consensus; ordinary verifier text is never copied. Canonical schema-v1 transcripts require a positive aligned interval and speaker on every word. A transcript with only auditable unattributed acoustic components is cached provisionally until the EDL interval audit; selected short inter-word residuals must also be cleared by the independent preview transcription. Packed takes remain the model's primary editorial reading view.
+1. **Source transcripts**: each workspace chooses one canonical provider. WhisperX runs `faster-whisper large-v3` on CUDA with forced word alignment and optionally Community-1 speakers; the no-diarization profile uses pinned Silero VAD and keeps speaker IDs empty. ElevenLabs Scribe uses its provider word timestamps and diarization. Both produce schema-v2 transcripts bound to the provider, configuration and source hash. A pinned, windowed `small` verifier may recover recording cues only in the local path after two-window consensus; ordinary verifier text is never copied. Packed takes remain the model's primary editorial reading view.
 2. **Exact boundary refinement**: `refine_edl_boundaries.py` first splits every canonical consecutive-word gap strictly above 300ms, then combines lexical anchors, raw max-per-channel waveform evidence, and RNNoise to write exact `source_in_frame` / `source_out_frame` values and a hash-bound report.
 3. **Dry preview and audio QC**: `render.py` creates PCM16/48 kHz stereo `preview.wav` plus `preview_timeline.json`; `preview_audio_qc.py` validates every entry/join for inactivity, attack/tail safety, residual activity, clipping, and pops.
 4. **Content coverage**: `semantic_qc.py` validates `metadata.required_beats` against words actually selected from source transcripts.
-5. **Join transcript QC**: the preview is always re-transcribed by the same local aligned/diarized stack and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join, audits the fixed internal-silence contract, and uses global similarity/recall only as supplemental evidence.
+5. **Join transcript QC**: the preview is always re-transcribed by the exact provider/configuration recorded by the EDL's selected source transcripts and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join, audits the fixed internal-silence contract, and uses global similarity/recall only as supplemental evidence.
 6. **Readiness and XML**: `verify_edit_ready.py` must return exit code 0 for the exact current artifacts before the agent calls `edl_to_fcpxml.py`.
 
 `timeline_view.py` and `validate_edl_boundaries.py` are legacy manual diagnostics outside the agent workflow and are scheduled for removal in v0.5.0.
@@ -90,7 +98,7 @@ The agent uses an audio-only evidence stack for word-boundary precision:
 ## Pipeline
 
 ```
-Local CUDA WhisperX -> Pack -> Editorial EDL -> Refine exact frames -> WAV/map -> Audio QC -> Semantic QC
+Configured provider -> Pack -> Editorial EDL -> Refine exact frames -> WAV/map -> Audio QC -> Semantic QC
                                       ^                                      |
                                       |                                      v
                                       +-- EDL change <- Persist preview transcript/hash -> Join transcript QC -> Readiness(0) -> XML
@@ -114,6 +122,7 @@ The protocols differ only in context strategy. Core invariants, workflow, step m
 - Switched workflow to be audio-only (`preview.wav` and `preview_timeline.json`), rejecting `.mp4` visual renders.
 - Made boundary refinement, audio QC, required-beat QC, persisted preview transcription, and join-centric transcript QC mandatory and hash-bound.
 - Made every internal lexical gap strictly above 300ms an automatic, readiness-enforced jump cut.
+- Added guided multi-provider setup, secret-free workspace profiles, optional Community-1 diarization, and canonical ElevenLabs Scribe transcripts.
 - Marked `timeline_view.py` as legacy, scheduled for removal in v0.5.0.
 
 ## What shipped in v0.3.0
@@ -127,12 +136,12 @@ The protocols differ only in context strategy. Core invariants, workflow, step m
 ```powershell
 alanocut setup-transcription
 alanocut transcription-doctor
-.venv\Scripts\python.exe helpers\transcribe_batch.py raw_video --provider whisperx --language pt --model large-v3 --batch-size 2
+.venv\Scripts\python.exe helpers\transcribe_batch.py raw_video --provider configured --language pt --model large-v3 --batch-size 2
 .venv\Scripts\python.exe helpers\refine_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --report raw_video\edit\edl_boundary_qc.json
 .venv\Scripts\python.exe helpers\render.py raw_video\edit\edl.json -o raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
 .venv\Scripts\python.exe helpers\preview_audio_qc.py raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json --edl raw_video\edit\edl.json --output raw_video\edit\preview_audio_qc.json
 .venv\Scripts\python.exe helpers\semantic_qc.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --output raw_video\edit\edl_semantic_qc.json
-.venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\preview.wav --provider whisperx --audio raw_video\edit\preview.wav --edl raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --timeline-map raw_video\edit\preview_timeline.json --transcript-output raw_video\edit\transcripts\preview.json --output raw_video\edit\preview_transcript_qc.json
+.venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\preview.wav --provider configured --audio raw_video\edit\preview.wav --edl raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --timeline-map raw_video\edit\preview_timeline.json --transcript-output raw_video\edit\transcripts\preview.json --output raw_video\edit\preview_transcript_qc.json
 .venv\Scripts\python.exe helpers\verify_edit_ready.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --boundary-report raw_video\edit\edl_boundary_qc.json --audio-report raw_video\edit\preview_audio_qc.json --semantic-report raw_video\edit\edl_semantic_qc.json --transcript-report raw_video\edit\preview_transcript_qc.json --audio raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
 .venv\Scripts\python.exe helpers\edl_to_fcpxml.py raw_video\edit\edl.json -o raw_video\edit\timeline.xml --timeline-name "reels 35_cadastro_alano-cut"
 .venv\Scripts\python.exe helpers\fcpxml_to_edl.py raw_video\edit\timeline_fix.xml -o raw_video\edit\timeline_fix_from_xml.edl.json --media-root raw_video

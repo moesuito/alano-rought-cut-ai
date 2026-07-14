@@ -32,11 +32,11 @@ Read:
 Inputs:
 - source media files
 - passing `alanocut transcription-doctor`
-- `HF_TOKEN` for the accepted Community-1 model
+- workspace `alanocut.json` profile and only its required global credential
 
 Outputs:
 - `edit/transcripts/<source>.json`
-- 100% forced-aligned words with Community-1 speaker IDs
+- provider-bound timed words (forced-aligned for WhisperX; Scribe timestamps for ElevenLabs)
 - updated `edit/run_state.md`
 
 Next:
@@ -197,7 +197,7 @@ These criteria apply identically to Protocol A and Protocol B. Finish only when:
 
 - every intended source is inventoried and accounted for;
 - every editorially relevant source has a readable transcript or a documented exclusion reason;
-- every included source and preview transcript uses the canonical WhisperX schema, matching hashes/configuration, 100% forced-aligned word timing, and Community-1 diarization;
+- every included source and preview transcript uses the canonical provider schema, matching hashes/configuration and complete word timing; WhisperX uses forced alignment and Community-1 speakers when that selected profile enables diarization;
 - the EDL is coherent, duration-checked, structurally valid, declares `sequence_fps` and `required_beats`, and uses refined exact-frame ranges;
 - every join is represented in both preview audio QC and timed preview transcript QC;
 - no unresolved boundary review, uncut canonical internal silence above 300ms, excessive entry silence, tight first-word attack, orphan cue/token, crossed join, missing beat, or stale hash remains;

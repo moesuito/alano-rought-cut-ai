@@ -1969,11 +1969,20 @@ def main() -> None:
             sys.exit(1)
 
     source_transcripts_for_qc: dict[str, dict[str, object]] = {}
+    source_provider_bindings: set[tuple[object, object]] = set()
     for source_id in sources:
         t_path = transcripts_dir / f"{source_id}.json"
         try:
             source_transcript = json.loads(t_path.read_text(encoding="utf-8"))
             source_transcripts_for_qc[source_id] = source_transcript
+            source_binding = source_transcript.get("_alano_cut")
+            if isinstance(source_binding, dict):
+                source_provider_bindings.add(
+                    (
+                        source_binding.get("transcription_provider"),
+                        source_binding.get("config_sha256"),
+                    )
+                )
             selected_intervals = [
                 (
                     frame_to_sample(int(item["source_in_frame"]), edl_fps) / 48000.0,
@@ -1993,8 +2002,8 @@ def main() -> None:
                 )
         except (OSError, json.JSONDecodeError, TranscriptContractError) as error:
             print(
-                f"FATAL: Source transcript {source_id} is not a canonical, "
-                f"forced-aligned, diarized WhisperX transcript: {error}"
+                f"FATAL: Source transcript {source_id} is not a canonical "
+                f"provider-bound transcript: {error}"
             )
             stale = True
         current_t_hash = compute_sha256(t_path)
@@ -2004,6 +2013,12 @@ def main() -> None:
             stale = True
 
     # D. Preview Transcript QC
+    if len(source_provider_bindings) != 1:
+        print(
+            "FATAL: Source transcripts do not share one provider/configuration; "
+            "retranscribe the workspace with its selected provider."
+        )
+        stale = True
     if transcript_data.get("edl_hash") != current_edl_hash:
         print("STALE: Preview transcript QC report EDL hash mismatch. Re-run preview transcript QC.")
         stale = True
@@ -2053,10 +2068,21 @@ def main() -> None:
                 validate_normative_transcript(sidecar_data)
             except TranscriptContractError as error:
                 print(
-                    "FATAL: Preview sidecar is not a canonical, forced-aligned, "
-                    f"diarized WhisperX transcript: {error}"
+                    "FATAL: Preview sidecar is not a canonical provider-bound "
+                    f"transcript: {error}"
                 )
                 stale = True
+            if isinstance(binding, dict) and source_provider_bindings:
+                preview_binding = (
+                    binding.get("transcription_provider"),
+                    binding.get("config_sha256"),
+                )
+                if preview_binding not in source_provider_bindings:
+                    print(
+                        "STALE: Preview transcript provider/configuration does not "
+                        "match the source transcripts. Re-run preview QC."
+                    )
+                    stale = True
             if not isinstance(binding, dict) or binding.get("source_sha256") != current_wav_hash:
                 print("STALE: Preview transcript source hash does not match current WAV.")
                 stale = True
@@ -2095,7 +2121,7 @@ def main() -> None:
             sys.exit(1)
     else:
         print(
-            "FATAL: Preview transcript QC must reference a persisted WhisperX "
+            "FATAL: Preview transcript QC must reference a persisted provider-bound "
             "sidecar; transcript='generated' is not independently verifiable."
         )
         sys.exit(1)

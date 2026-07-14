@@ -1,4 +1,4 @@
-"""Canonical, dependency-free transcript contract for the local WhisperX stack.
+"""Canonical, dependency-free transcript contract for every transcription provider.
 
 This module intentionally does not import WhisperX, faster-whisper, Pyannote,
 Torch, or Pandas.  Runtime adapters hand their plain-Python results to
@@ -21,8 +21,18 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
-TRANSCRIPT_SCHEMA_VERSION = 1
-TRANSCRIPTION_PROVIDER = "whisperx_faster_whisper"
+TRANSCRIPT_SCHEMA_VERSION = 2
+WHISPERX_TRANSCRIPTION_PROVIDER = "whisperx_faster_whisper"
+ELEVENLABS_TRANSCRIPTION_PROVIDER = "elevenlabs_scribe"
+# Backward-compatible public name used throughout the local-provider tests.
+TRANSCRIPTION_PROVIDER = WHISPERX_TRANSCRIPTION_PROVIDER
+SUPPORTED_TRANSCRIPTION_PROVIDERS = {
+    WHISPERX_TRANSCRIPTION_PROVIDER,
+    ELEVENLABS_TRANSCRIPTION_PROVIDER,
+}
+DIARIZATION_COMMUNITY_1 = "community-1"
+DIARIZATION_NONE = "none"
+DIARIZATION_PROVIDER = "provider"
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 DEFAULT_PORTUGUESE_ALIGN_MODEL = (
     "jonatasgrosman/wav2vec2-large-xlsr-53-portuguese"
@@ -81,8 +91,9 @@ class WhisperXConfig:
     vad_method: str = "pyannote"
     align_model: str | None = DEFAULT_PORTUGUESE_ALIGN_MODEL
     align_model_revision: str | None = DEFAULT_ALIGN_MODEL_REVISION
-    diarization_model: str = DEFAULT_DIARIZATION_MODEL
+    diarization_model: str | None = DEFAULT_DIARIZATION_MODEL
     diarization_model_revision: str | None = DEFAULT_DIARIZATION_MODEL_REVISION
+    diarization_mode: str = DIARIZATION_COMMUNITY_1
     num_speakers: int | None = None
     min_speakers: int | None = None
     max_speakers: int | None = None
@@ -101,7 +112,6 @@ class WhisperXConfig:
             "device",
             "compute_type",
             "vad_method",
-            "diarization_model",
         ):
             if not str(getattr(self, name)).strip():
                 raise TranscriptContractError(f"config.{name} must not be empty")
@@ -109,13 +119,28 @@ class WhisperXConfig:
             raise TranscriptContractError(
                 "config.device must be 'cuda'; CPU fallback is disabled"
             )
-        if self.vad_method != "pyannote":
+        if self.diarization_mode not in {DIARIZATION_COMMUNITY_1, DIARIZATION_NONE}:
             raise TranscriptContractError(
-                "config.vad_method must be 'pyannote'"
+                "config.diarization_mode must be 'community-1' or 'none'"
             )
-        if self.diarization_model != DEFAULT_DIARIZATION_MODEL:
+        expected_vad = "pyannote" if self.diarization_mode == DIARIZATION_COMMUNITY_1 else "silero"
+        if self.vad_method != expected_vad:
+            raise TranscriptContractError(
+                f"config.vad_method must be {expected_vad!r} for "
+                f"diarization_mode={self.diarization_mode!r}"
+            )
+        if self.diarization_mode == DIARIZATION_COMMUNITY_1 and (
+            self.diarization_model != DEFAULT_DIARIZATION_MODEL
+        ):
             raise TranscriptContractError(
                 f"config.diarization_model must be {DEFAULT_DIARIZATION_MODEL}"
+            )
+        if self.diarization_mode == DIARIZATION_NONE and (
+            self.diarization_model is not None
+            or self.diarization_model_revision is not None
+        ):
+            raise TranscriptContractError(
+                "config.diarization_model and revision must be null when diarization is disabled"
             )
         if self.batch_size < 1:
             raise TranscriptContractError("config.batch_size must be positive")
@@ -152,6 +177,35 @@ class WhisperXConfig:
         return config_hash(self)
 
 
+@dataclass(frozen=True, slots=True)
+class ElevenLabsConfig:
+    """Output-affecting Scribe settings; credentials are intentionally absent."""
+
+    model: str = "scribe_v1"
+    language: str | None = "pt"
+    diarize: bool = True
+    tag_audio_events: bool = True
+    timestamps_granularity: str = "word"
+    diarization_mode: str = DIARIZATION_PROVIDER
+
+    def __post_init__(self) -> None:
+        if self.model != "scribe_v1":
+            raise TranscriptContractError("ElevenLabs config.model must be 'scribe_v1'")
+        if self.diarize is not True or self.diarization_mode != DIARIZATION_PROVIDER:
+            raise TranscriptContractError("ElevenLabs provider diarization must be enabled")
+        if self.timestamps_granularity != "word":
+            raise TranscriptContractError(
+                "ElevenLabs timestamps_granularity must be 'word'"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return config_hash(self)
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         encoded = json.dumps(
@@ -166,10 +220,16 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return encoded.encode("utf-8")
 
 
-def config_hash(config: WhisperXConfig | Mapping[str, Any]) -> str:
+def config_hash(
+    config: WhisperXConfig | ElevenLabsConfig | Mapping[str, Any],
+) -> str:
     """Return the deterministic SHA-256 of a runtime configuration."""
 
-    value = config.to_dict() if isinstance(config, WhisperXConfig) else dict(config)
+    value = (
+        config.to_dict()
+        if isinstance(config, (WhisperXConfig, ElevenLabsConfig))
+        else dict(config)
+    )
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
@@ -348,7 +408,7 @@ def convert_whisperx_result(
     source_sha256: str | None = None,
     max_overlap_seconds: float = 0.25,
 ) -> dict[str, Any]:
-    """Convert an aligned WhisperX result into Alano Cut transcript schema v1.
+    """Convert an aligned WhisperX result into canonical Alano Cut schema v2.
 
     Every input word must carry forced-alignment timestamps.  Missing timing is
     a fatal contract error; words are never silently dropped or approximated.
@@ -363,8 +423,13 @@ def convert_whisperx_result(
 
     resolved_source_hash = _resolve_source_hash(source_path, source_sha256)
     diarization = _convert_diarization(diarization_turns)
-    if not diarization:
+    diarization_required = config.diarization_mode == DIARIZATION_COMMUNITY_1
+    if diarization_required and not diarization:
         raise TranscriptContractError("Community-1 returned no diarization turns")
+    if not diarization_required and diarization:
+        raise TranscriptContractError(
+            "diarization turns must be empty when diarization is disabled"
+        )
     input_segments = result.get("segments")
     if not isinstance(input_segments, list):
         raise TranscriptContractError("WhisperX result.segments must be a list")
@@ -411,13 +476,17 @@ def convert_whisperx_result(
             explicit_speaker = normalize_speaker_id(
                 word.get("speaker", word.get("speaker_id"))
             )
-            overlap_speaker = _speaker_for_interval(
-                start, end, diarization, max_gap_seconds=0.0
+            overlap_speaker = (
+                _speaker_for_interval(start, end, diarization, max_gap_seconds=0.0)
+                if diarization_required
+                else None
             )
-            speaker = explicit_speaker or overlap_speaker or _speaker_for_interval(
-                start, end, diarization
+            speaker = (
+                explicit_speaker
+                or overlap_speaker
+                or (_speaker_for_interval(start, end, diarization) if diarization_required else None)
             )
-            if speaker is None:
+            if diarization_required and speaker is None:
                 raise TranscriptContractError(
                     f"segments[{segment_index}].words[{word_index}] has no diarized speaker"
                 )
@@ -438,6 +507,8 @@ def convert_whisperx_result(
                     else "turn_overlap"
                     if overlap_speaker is not None
                     else "bounded_gap"
+                    if diarization_required
+                    else "disabled"
                 ),
                 "score": score,
                 "timing_source": timing_source,
@@ -526,12 +597,167 @@ def convert_whisperx_result(
     return transcript
 
 
+def convert_elevenlabs_result(
+    result: Mapping[str, Any],
+    *,
+    config: ElevenLabsConfig,
+    source_path: str | os.PathLike[str] | None = None,
+    source_sha256: str | None = None,
+    max_overlap_seconds: float = 0.25,
+) -> dict[str, Any]:
+    """Normalize Scribe word timestamps and speaker labels into schema v2."""
+
+    if not isinstance(result, Mapping):
+        raise TranscriptContractError("ElevenLabs result must be a mapping")
+    resolved_source_hash = _resolve_source_hash(source_path, source_sha256)
+    raw_words = result.get("words")
+    if not isinstance(raw_words, list):
+        raise TranscriptContractError("ElevenLabs result.words must be a list")
+
+    words: list[dict[str, Any]] = []
+    for index, raw_word in enumerate(raw_words):
+        if not isinstance(raw_word, Mapping):
+            raise TranscriptContractError(f"words[{index}] must be a record")
+        word_type = str(raw_word.get("type") or "word")
+        if word_type != "word":
+            continue
+        text = str(raw_word.get("text") or "").strip()
+        if not text:
+            continue
+        start, end = _validate_interval(
+            raw_word.get("start"), raw_word.get("end"), f"words[{index}]"
+        )
+        speaker = normalize_speaker_id(raw_word.get("speaker_id", raw_word.get("speaker")))
+        if config.diarize and speaker is None:
+            raise TranscriptContractError(
+                f"words[{index}] has no ElevenLabs speaker label"
+            )
+        words.append(
+            {
+                "text": text,
+                "start": start,
+                "end": end,
+                "type": "word",
+                "speaker_id": speaker,
+                "speaker_assignment": "provider_word_label",
+                "score": None,
+                "timing_source": "provider_word_timestamp",
+            }
+        )
+    if not words:
+        raise TranscriptContractError("ElevenLabs result contains no timed lexical words")
+    _validate_word_order(words, max_overlap_seconds=max_overlap_seconds, field="words")
+
+    segments: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    current_speaker: str | None = None
+    for word in words:
+        speaker = word["speaker_id"]
+        if current and (speaker != current_speaker or word["start"] - current[-1]["end"] >= 0.5):
+            segments.append(
+                {
+                    "id": len(segments),
+                    "start": current[0]["start"],
+                    "end": current[-1]["end"],
+                    "text": " ".join(item["text"] for item in current),
+                    "speaker_id": current_speaker,
+                    "words": [item.copy() for item in current],
+                }
+            )
+            current = []
+        if not current:
+            current_speaker = speaker
+        current.append(word)
+    if current:
+        segments.append(
+            {
+                "id": len(segments),
+                "start": current[0]["start"],
+                "end": current[-1]["end"],
+                "text": " ".join(item["text"] for item in current),
+                "speaker_id": current_speaker,
+                "words": [item.copy() for item in current],
+            }
+        )
+
+    diarization: list[dict[str, Any]] = []
+    for segment in segments:
+        speaker = segment["speaker_id"]
+        if speaker is None:
+            continue
+        if (
+            diarization
+            and diarization[-1]["speaker_id"] == speaker
+            and float(segment["start"]) <= float(diarization[-1]["end"]) + 0.05
+        ):
+            diarization[-1]["end"] = segment["end"]
+        else:
+            diarization.append(
+                {
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "speaker_id": speaker,
+                }
+            )
+
+    language_code = str(result.get("language_code") or config.language or "").strip()
+    if not language_code:
+        raise TranscriptContractError("ElevenLabs result has no language")
+    text = str(result.get("text") or "").strip() or " ".join(
+        word["text"] for word in words
+    )
+    transcript: dict[str, Any] = {
+        "text": text,
+        "language_code": language_code,
+        "words": words,
+        "segments": segments,
+        "diarization": diarization,
+        "_alano_cut": {
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+            "transcription_provider": ELEVENLABS_TRANSCRIPTION_PROVIDER,
+            "source_sha256": resolved_source_hash,
+            "config": config.to_dict(),
+            "config_sha256": config.sha256,
+            "word_count": len(words),
+            "timed_word_count": len(words),
+            "timed_word_coverage": 1.0,
+            "models": {
+                "asr": config.model,
+                "semantic_verifier": None,
+                "alignment": None,
+                "diarization": "elevenlabs_scribe",
+            },
+            "model_revisions": {
+                "asr": config.model,
+                "semantic_verifier": None,
+                "alignment": None,
+                "diarization": "provider",
+            },
+            "runtime": {"service": "elevenlabs", "device": "cloud"},
+            "alignment": {
+                "status": "pass",
+                "mode": "provider_word_timestamps",
+                "timed_word_coverage": 1.0,
+            },
+            "diarization_status": {
+                "status": "pass",
+                "mode": DIARIZATION_PROVIDER,
+                "model": "elevenlabs_scribe",
+                "exclusive": False,
+                "turn_count": len(diarization),
+            },
+        },
+    }
+    validate_transcript(transcript, max_overlap_seconds=max_overlap_seconds)
+    return transcript
+
+
 def validate_transcript(
     transcript: Mapping[str, Any],
     *,
     max_overlap_seconds: float = 0.25,
 ) -> None:
-    """Validate schema v1, including normative 100% forced-aligned coverage."""
+    """Validate provider-neutral schema v2 and complete word timing coverage."""
 
     if not isinstance(transcript, Mapping):
         raise TranscriptContractError("transcript must be a mapping")
@@ -540,7 +766,8 @@ def validate_transcript(
         raise TranscriptContractError("transcript._alano_cut must be a record")
     if metadata.get("schema_version") != TRANSCRIPT_SCHEMA_VERSION:
         raise TranscriptContractError("unsupported transcript schema_version")
-    if metadata.get("transcription_provider") != TRANSCRIPTION_PROVIDER:
+    provider = metadata.get("transcription_provider")
+    if provider not in SUPPORTED_TRANSCRIPTION_PROVIDERS:
         raise TranscriptContractError("unexpected transcription provider")
     source_hash = metadata.get("source_sha256")
     if not isinstance(source_hash, str) or not _SHA256_RE.fullmatch(source_hash):
@@ -550,6 +777,14 @@ def validate_transcript(
         raise TranscriptContractError("transcript config must be a record")
     if metadata.get("config_sha256") != config_hash(config_value):
         raise TranscriptContractError("transcript config hash mismatch")
+    diarization_mode = config_value.get("diarization_mode")
+    if provider == WHISPERX_TRANSCRIPTION_PROVIDER and diarization_mode not in {
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
+    }:
+        raise TranscriptContractError("invalid WhisperX diarization mode")
+    if provider == ELEVENLABS_TRANSCRIPTION_PROVIDER and diarization_mode != DIARIZATION_PROVIDER:
+        raise TranscriptContractError("invalid ElevenLabs diarization mode")
 
     words = transcript.get("words")
     if not isinstance(words, list) or not words:
@@ -564,8 +799,19 @@ def validate_transcript(
         if word.get("timing_source") not in {
             "forced_alignment",
             "forced_alignment_acoustic",
+            "provider_word_timestamp",
         }:
+            raise TranscriptContractError(f"words[{index}] timing_source is invalid")
+        if provider == WHISPERX_TRANSCRIPTION_PROVIDER and not str(
+            word.get("timing_source")
+        ).startswith("forced_alignment"):
             raise TranscriptContractError(f"words[{index}] is not forced-aligned")
+        if provider == ELEVENLABS_TRANSCRIPTION_PROVIDER and (
+            word.get("timing_source") != "provider_word_timestamp"
+        ):
+            raise TranscriptContractError(
+                f"words[{index}] is not bound to provider word timestamps"
+            )
         if word.get("timing_source") == "forced_alignment_acoustic":
             forced_start, forced_end = _validate_interval(
                 word.get("forced_alignment_start"),
@@ -575,16 +821,24 @@ def validate_transcript(
             if forced_end <= forced_start:
                 raise TranscriptContractError(f"words[{index}] has invalid forced evidence")
         speaker = word.get("speaker_id")
-        if speaker is None:
+        if speaker is None and diarization_mode != DIARIZATION_NONE:
             raise TranscriptContractError(f"words[{index}] has no diarized speaker")
-        if normalize_speaker_id(speaker) != speaker:
+        if speaker is not None and normalize_speaker_id(speaker) != speaker:
             raise TranscriptContractError(f"words[{index}] speaker_id is not canonical")
         if word.get("speaker_assignment") not in {
             "word_label",
             "turn_overlap",
             "bounded_gap",
+            "provider_word_label",
+            "disabled",
         }:
             raise TranscriptContractError(f"words[{index}] speaker_assignment is invalid")
+        if diarization_mode == DIARIZATION_NONE and (
+            speaker is not None or word.get("speaker_assignment") != "disabled"
+        ):
+            raise TranscriptContractError(
+                f"words[{index}] must not carry a speaker when diarization is disabled"
+            )
         score = word.get("score")
         if score is not None:
             score_value = _finite_number(score, f"words[{index}].score", non_negative=False)
@@ -622,9 +876,17 @@ def validate_transcript(
         raise TranscriptContractError("segment words do not match flattened transcript words")
 
     diarization = transcript.get("diarization")
-    if not isinstance(diarization, list) or not diarization:
-        raise TranscriptContractError("transcript diarization must be a non-empty list")
-    _convert_diarization(diarization)
+    if not isinstance(diarization, list):
+        raise TranscriptContractError("transcript diarization must be a list")
+    if diarization_mode == DIARIZATION_NONE:
+        if diarization:
+            raise TranscriptContractError(
+                "transcript diarization must be empty when disabled"
+            )
+    else:
+        if not diarization:
+            raise TranscriptContractError("transcript diarization must be a non-empty list")
+        _convert_diarization(diarization)
 
 
 def analyze_alignment_quality(
@@ -697,7 +959,7 @@ def analyze_alignment_quality(
 def validate_normative_transcript(
     transcript: Mapping[str, Any], *, max_overlap_seconds: float = 0.25
 ) -> None:
-    """Validate the full local CUDA/model binding required by the workflow."""
+    """Validate the complete provider-specific runtime/model binding."""
     validate_transcript(transcript, max_overlap_seconds=max_overlap_seconds)
     metadata = transcript["_alano_cut"]
     config = metadata["config"]
@@ -710,19 +972,46 @@ def validate_normative_transcript(
     acoustic_timing = metadata.get("acoustic_timing")
     if not isinstance(models, Mapping):
         raise TranscriptContractError("transcript models binding is missing")
+    if metadata.get("transcription_provider") == ELEVENLABS_TRANSCRIPTION_PROVIDER:
+        if config.get("model") != "scribe_v1" or models.get("asr") != "scribe_v1":
+            raise TranscriptContractError("ElevenLabs Scribe model binding is invalid")
+        if not isinstance(runtime, Mapping) or (
+            runtime.get("service") != "elevenlabs" or runtime.get("device") != "cloud"
+        ):
+            raise TranscriptContractError("ElevenLabs service binding is invalid")
+        if not isinstance(alignment, Mapping) or (
+            alignment.get("status") != "pass"
+            or alignment.get("mode") != "provider_word_timestamps"
+            or alignment.get("timed_word_coverage") != 1.0
+        ):
+            raise TranscriptContractError("ElevenLabs word timestamp binding is invalid")
+        if not isinstance(diarization_status, Mapping) or (
+            diarization_status.get("status") != "pass"
+            or diarization_status.get("mode") != DIARIZATION_PROVIDER
+            or diarization_status.get("model") != "elevenlabs_scribe"
+            or diarization_status.get("turn_count") != len(transcript["diarization"])
+        ):
+            raise TranscriptContractError("ElevenLabs diarization binding is invalid")
+        return
+
+    diarization_mode = config.get("diarization_mode")
+    diarization_enabled = diarization_mode == DIARIZATION_COMMUNITY_1
     if models.get("asr") != config.get("model"):
         raise TranscriptContractError("ASR model binding does not match config")
     if models.get("semantic_verifier") != config.get("semantic_verifier_model"):
         raise TranscriptContractError("semantic verifier model binding does not match config")
     if models.get("alignment") != config.get("align_model"):
         raise TranscriptContractError("alignment model binding does not match config")
-    if models.get("diarization") != DEFAULT_DIARIZATION_MODEL:
-        raise TranscriptContractError("Community-1 model binding is missing")
+    expected_diarization_model = DEFAULT_DIARIZATION_MODEL if diarization_enabled else None
+    if models.get("diarization") != expected_diarization_model:
+        raise TranscriptContractError("local diarization model binding is invalid")
     expected_revisions = {
         "asr": config.get("model_revision"),
         "semantic_verifier": config.get("semantic_verifier_revision"),
         "alignment": config.get("align_model_revision"),
-        "diarization": config.get("diarization_model_revision"),
+        "diarization": (
+            config.get("diarization_model_revision") if diarization_enabled else None
+        ),
     }
     if not isinstance(model_revisions, Mapping) or dict(model_revisions) != expected_revisions:
         raise TranscriptContractError("model revision binding does not match config")
@@ -731,8 +1020,9 @@ def validate_normative_transcript(
     expected_versions = {
         "whisperx": config.get("whisperx_version"),
         "faster_whisper": config.get("faster_whisper_version"),
-        "pyannote_audio": config.get("pyannote_audio_version"),
     }
+    if diarization_enabled:
+        expected_versions["pyannote_audio"] = config.get("pyannote_audio_version")
     for key, expected in expected_versions.items():
         if expected is None or runtime.get(key) != expected:
             raise TranscriptContractError(f"runtime {key} version does not match config")
@@ -761,13 +1051,26 @@ def validate_normative_transcript(
         )
     if computed_alignment_quality["status"] != "pass":
         raise TranscriptContractError("forced-alignment quality requires review")
-    if not isinstance(diarization_status, Mapping) or (
-        diarization_status.get("status") != "pass"
-        or diarization_status.get("model") != DEFAULT_DIARIZATION_MODEL
-        or diarization_status.get("exclusive") is not True
-        or diarization_status.get("turn_count") != len(transcript["diarization"])
+    if diarization_enabled:
+        if not isinstance(diarization_status, Mapping) or (
+            diarization_status.get("status") != "pass"
+            or diarization_status.get("mode") != DIARIZATION_COMMUNITY_1
+            or diarization_status.get("model") != DEFAULT_DIARIZATION_MODEL
+            or diarization_status.get("exclusive") is not True
+            or diarization_status.get("turn_count") != len(transcript["diarization"])
+        ):
+            raise TranscriptContractError(
+                "Community-1 exclusive diarization binding is invalid"
+            )
+    elif not isinstance(diarization_status, Mapping) or (
+        diarization_status.get("status") != "disabled"
+        or diarization_status.get("mode") != DIARIZATION_NONE
+        or diarization_status.get("model") is not None
+        or diarization_status.get("exclusive") is not False
+        or diarization_status.get("turn_count") != 0
+        or transcript["diarization"] != []
     ):
-        raise TranscriptContractError("Community-1 exclusive diarization binding is invalid")
+        raise TranscriptContractError("disabled diarization binding is invalid")
     if not isinstance(semantic_verification, Mapping) or (
         semantic_verification.get("status") != "pass"
         or semantic_verification.get("mode") != config.get("semantic_fusion_mode")
@@ -928,7 +1231,7 @@ def is_cache_valid(
     cache: Mapping[str, Any] | str | os.PathLike[str],
     *,
     source_sha256: str,
-    config: WhisperXConfig,
+    config: WhisperXConfig | ElevenLabsConfig,
 ) -> bool:
     """Return true for a strict or scopeable-provisional bound cache."""
 
@@ -944,7 +1247,12 @@ def is_cache_valid(
             return False
         if metadata.get("schema_version") != TRANSCRIPT_SCHEMA_VERSION:
             return False
-        if metadata.get("transcription_provider") != TRANSCRIPTION_PROVIDER:
+        expected_provider = (
+            WHISPERX_TRANSCRIPTION_PROVIDER
+            if isinstance(config, WhisperXConfig)
+            else ELEVENLABS_TRANSCRIPTION_PROVIDER
+        )
+        if metadata.get("transcription_provider") != expected_provider:
             return False
         if metadata.get("source_sha256") != source_sha256.lower():
             return False
@@ -1016,12 +1324,19 @@ __all__ = [
     "DEFAULT_PORTUGUESE_INITIAL_PROMPT",
     "DEFAULT_PORTUGUESE_ALIGN_MODEL",
     "DEFAULT_SEMANTIC_FUSION_REVISION",
+    "DIARIZATION_COMMUNITY_1",
+    "DIARIZATION_NONE",
+    "DIARIZATION_PROVIDER",
+    "ELEVENLABS_TRANSCRIPTION_PROVIDER",
     "TRANSCRIPT_SCHEMA_VERSION",
     "TRANSCRIPTION_PROVIDER",
+    "WHISPERX_TRANSCRIPTION_PROVIDER",
+    "ElevenLabsConfig",
     "TranscriptContractError",
     "WhisperXConfig",
     "config_hash",
     "convert_whisperx_result",
+    "convert_elevenlabs_result",
     "analyze_alignment_quality",
     "is_cache_valid",
     "normalize_speaker_id",

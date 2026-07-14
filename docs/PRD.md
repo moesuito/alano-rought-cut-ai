@@ -14,12 +14,13 @@ Alano Cut is a transcript-driven rough-cut harness for talking-head and course f
 
 ## Requirements
 
-### CUT-00 — Local aligned and diarized transcription
+### CUT-00 — Provider-bound transcription
 
-- WHEN source or preview audio is transcribed THEN the normative system SHALL run faster-whisper `large-v3`, WhisperX forced word alignment, and `pyannote/speaker-diarization-community-1` locally with NVIDIA CUDA.
-- Every lexical word SHALL have a positive forced-aligned interval and canonical speaker ID; missing timing, missing diarization, CPU fallback, legacy provider caches, and silent provider fallback SHALL block the workflow.
-- Transcript caches SHALL be bound to source SHA-256, canonical schema, provider, models, runtime versions, and configuration SHA-256.
-- Hugging Face credentials SHALL remain local and SHALL NOT appear in argv, transcripts, reports, logs, exceptions, or Git.
+- WHEN source or preview audio is transcribed THEN the workspace-selected provider SHALL be used for both. WhisperX SHALL run `faster-whisper large-v3` with forced word alignment on NVIDIA CUDA; ElevenLabs SHALL use Scribe word timestamps and provider diarization.
+- WhisperX Community-1 diarization is preferred and available with an accepted Hugging Face gate. The explicit local no-diarization profile SHALL keep CUDA and word alignment while recording missing speaker IDs as reduced precision.
+- Every lexical word SHALL have a positive provider-bound interval; missing selected-provider timing, CPU fallback for WhisperX, legacy/mismatched caches, and silent provider fallback SHALL block the workflow.
+- Transcript caches SHALL be bound to source SHA-256, canonical schema, provider, models/runtime settings, and configuration SHA-256.
+- Hugging Face and ElevenLabs credentials SHALL remain global and SHALL NOT appear in argv, workspace config, transcripts, reports, logs, exceptions, or Git.
 
 ### CUT-01 — Rough-cut XML
 
@@ -59,5 +60,5 @@ Alano Cut is a transcript-driven rough-cut harness for talking-head and course f
 
 - 2026-07-11 - Development harness introduced; v0.4.0 audio boundary refinement planned.
 - 2026-07-13 - Join-centric audio/transcript QC and the fail-closed v0.4.0 workflow made normative.
-- 2026-07-13 - Local CUDA WhisperX/faster-whisper with Community-1 exclusive diarization became the normative transcription source.
+- 2026-07-14 - Explicit workspace profiles for WhisperX (Community-1 or no diarization) and ElevenLabs Scribe became the normative transcription routing contract.
 - 2026-07-13 - Internal lexical gaps strictly above 300ms became deterministic jump cuts with fail-closed readiness validation.

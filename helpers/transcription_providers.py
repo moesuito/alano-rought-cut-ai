@@ -1,9 +1,10 @@
 """Transcription providers shared by source and preview workflows.
 
-WhisperX is the normative provider.  Its heavy ML stack runs in a dedicated
-CUDA runtime and receives the Hugging Face token only through its environment.
+WhisperX is the local CUDA provider. Its heavy ML stack runs in a dedicated
+runtime and receives a Hugging Face token only when Community-1 is selected.
 The lightweight caller never places credentials in argv, JSON, reports, or
-exceptions.
+exceptions. ElevenLabs is normalized by ``transcribe.py`` into the same
+canonical transcript contract.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ try:
     from helpers.transcription_contract import (
         TranscriptContractError,
         WhisperXConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
         analyze_alignment_quality,
         convert_whisperx_result,
         sha256_file,
@@ -28,12 +31,15 @@ try:
     )
     from helpers.transcript_audio_snap import refine_aligned_result
     from helpers.whisperx_runtime import locate_runtime_python
+    from helpers.transcription_settings import global_env_path
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
     from transcription_contract import (  # type: ignore[no-redef]
         TranscriptContractError,
         WhisperXConfig,
+        DIARIZATION_COMMUNITY_1,
+        DIARIZATION_NONE,
         analyze_alignment_quality,
         convert_whisperx_result,
         sha256_file,
@@ -42,6 +48,7 @@ except ModuleNotFoundError as exc:
     )
     from transcript_audio_snap import refine_aligned_result  # type: ignore[no-redef]
     from whisperx_runtime import locate_runtime_python  # type: ignore[no-redef]
+    from transcription_settings import global_env_path  # type: ignore[no-redef]
 
 
 class TranscriptionProviderError(RuntimeError):
@@ -64,6 +71,9 @@ def _env_candidates(start: Path | None = None) -> list[Path]:
         if candidate not in seen:
             candidates.append(candidate)
             seen.add(candidate)
+    shared = global_env_path().resolve()
+    if shared not in seen:
+        candidates.append(shared)
     return candidates
 
 
@@ -108,6 +118,7 @@ def whisperx_worker_config(config: WhisperXConfig) -> dict[str, Any]:
         "align_model_revision": config.align_model_revision,
         "diarization_model": config.diarization_model,
         "diarization_model_revision": config.diarization_model_revision,
+        "diarization_mode": config.diarization_mode,
         "num_speakers": config.num_speakers,
         "min_speakers": config.min_speakers,
         "max_speakers": config.max_speakers,
@@ -116,7 +127,7 @@ def whisperx_worker_config(config: WhisperXConfig) -> dict[str, Any]:
 
 
 class WhisperXProvider:
-    """CUDA WhisperX + forced alignment + Community-1 diarization provider."""
+    """CUDA WhisperX with forced alignment and optional Community-1 speakers."""
 
     def __init__(
         self,
@@ -140,7 +151,7 @@ class WhisperXProvider:
         token = load_env_value("HF_TOKEN", start=source.parent) or load_env_value(
             "HUGGING_FACE_HUB_TOKEN", start=source.parent
         )
-        if not token:
+        if self.config.diarization_mode == DIARIZATION_COMMUNITY_1 and not token:
             raise TranscriptionProviderError(
                 "HF_TOKEN is not configured; Community-1 diarization is mandatory"
             )
@@ -165,7 +176,10 @@ class WhisperXProvider:
                 encoding="utf-8",
             )
             environment = os.environ.copy()
-            environment["HF_TOKEN"] = token
+            if token:
+                environment["HF_TOKEN"] = token
+            else:
+                environment.pop("HF_TOKEN", None)
             environment.pop("HUGGING_FACE_HUB_TOKEN", None)
             try:
                 completed = self.runner(
@@ -204,13 +218,21 @@ class WhisperXProvider:
             "asr": self.config.model,
             "semantic_verifier": self.config.semantic_verifier_model,
             "alignment": self.config.align_model,
-            "diarization": self.config.diarization_model,
+            "diarization": (
+                self.config.diarization_model
+                if self.config.diarization_mode == DIARIZATION_COMMUNITY_1
+                else None
+            ),
         }
         expected_revisions = {
             "asr": self.config.model_revision,
             "semantic_verifier": self.config.semantic_verifier_revision,
             "alignment": self.config.align_model_revision,
-            "diarization": self.config.diarization_model_revision,
+            "diarization": (
+                self.config.diarization_model_revision
+                if self.config.diarization_mode == DIARIZATION_COMMUNITY_1
+                else None
+            ),
         }
         if raw.get("models") != expected_models:
             raise TranscriptionProviderError("WhisperX worker model binding mismatch")
@@ -279,9 +301,18 @@ class WhisperXProvider:
                     **alignment_quality,
                 },
                 "diarization_status": {
-                    "status": "pass",
+                    "status": (
+                        "pass"
+                        if self.config.diarization_mode == DIARIZATION_COMMUNITY_1
+                        else "disabled"
+                    ),
+                    "mode": self.config.diarization_mode,
                     "model": (raw.get("models") or {}).get("diarization"),
-                    "exclusive": raw.get("diarization_exclusive") is True,
+                    "exclusive": (
+                        raw.get("diarization_exclusive") is True
+                        if self.config.diarization_mode == DIARIZATION_COMMUNITY_1
+                        else False
+                    ),
                     "turn_count": len(transcript["diarization"]),
                 },
                 "performance": {
@@ -290,7 +321,10 @@ class WhisperXProvider:
                 },
             }
         )
-        if metadata["diarization_status"]["exclusive"] is not True:
+        if (
+            self.config.diarization_mode == DIARIZATION_COMMUNITY_1
+            and metadata["diarization_status"]["exclusive"] is not True
+        ):
             raise TranscriptionProviderError(
                 "Community-1 did not expose exclusive speaker diarization"
             )

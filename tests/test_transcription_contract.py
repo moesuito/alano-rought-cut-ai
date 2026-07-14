@@ -160,6 +160,7 @@ def canonical_transcript() -> dict:
             },
             "diarization_status": {
                 "status": "pass",
+                "mode": "community-1",
                 "model": cfg.diarization_model,
                 "exclusive": True,
                 "turn_count": len(transcript["diarization"]),

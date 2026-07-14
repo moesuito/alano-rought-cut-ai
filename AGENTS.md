@@ -16,6 +16,19 @@ After Step 01, `edit/...` in these docs means `<videos_dir>/edit/...`.
 - No animations.
 - No Remotion, Manim, HyperFrames, YouTube download, publishing, or finishing features.
 
+## Transcription Profile
+
+- Read `alanocut.json` before Step 02. It is the explicit provider contract for
+  this workspace; never infer, replace, or silently fall back to another
+  provider.
+- `whisperx` requires CUDA and forced word alignment. `community-1` speaker
+  diarization is preferred; the explicit `none` mode is allowed but has no
+  speaker IDs and must be recorded as a reduced-precision decision.
+- `elevenlabs` uses canonical Scribe word timestamps and provider diarization.
+- Source and preview transcripts must use the same provider/configuration and
+  be hash-bound. Credentials are global-only and must never be copied into the
+  workspace, argv, transcripts, reports, or Git.
+
 ## Choose The Operating Protocol
 
 Use Protocol A by default. Use Protocol B only when the runtime is genuinely context-constrained.

@@ -14,6 +14,15 @@ Use the capable-agent protocol by default. Treat ChatGPT, Codex, Claude Code, Cl
 
 For both protocols, treat core invariants, workflow, step modules, gates, helpers, artifacts, QC, and completion criteria as one shared normative standard.
 
-Before editorial selection, source transcripts must come from the passing local CUDA WhisperX/faster-whisper/Community-1 stack with 100% forced-aligned, speaker-diarized words. After editorial selection, the mandatory product chain is: refine exact boundaries -> render dry WAV/map -> audio QC -> required-beat semantic QC -> force and persist a canonical local WhisperX preview transcript with its WAV hash -> join-centric preview transcript QC -> readiness exit code 0 -> XML. Missing, stale, review, or failed evidence blocks the agent before XML.
+Before editorial selection, read the workspace `alanocut.json` and use its one
+configured provider for both source and preview transcripts. Local WhisperX
+requires CUDA and forced-aligned words; Community-1 speakers are preferred but
+the explicit no-diarization profile is allowed. ElevenLabs Scribe requires
+provider word timestamps and diarization. No provider may silently fall back.
+After editorial selection, the mandatory product chain is: refine exact
+boundaries -> render dry WAV/map -> audio QC -> required-beat semantic QC ->
+force and persist a canonical provider-bound preview transcript with its WAV
+hash -> join-centric preview transcript QC -> readiness exit code 0 -> XML.
+Missing, stale, review, or failed evidence blocks the agent before XML.
 
 Keep the hard scope: rough cut only. The agent-facing QA path is audio-only: no fades, video frames, visual inspection, or final render. `timeline_view.py` is a legacy manual diagnostic outside the workflow and is scheduled for removal in v0.5.0. Deliver `<videos_dir>/edit/timeline.xml`; do not add finishing features or create a final high-quality render.
