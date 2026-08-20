@@ -20,6 +20,7 @@ Updated: 2026-07-13
 | F1.5 | Fail-closed exact-frame/map/readiness hardening. | completed |
 | F1.6 | Adaptive lexical/acoustic boundary selection and rejected-neighbor guards. | completed |
 | F1.7 | Join-centric audio/transcript QC and mandatory product-workflow integration. | in progress |
+| F1.8 | Acoustic out-point snapping & ASR over-estimation correction. | planned |
 
 ## Later
 

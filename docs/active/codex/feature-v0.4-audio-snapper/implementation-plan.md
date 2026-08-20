@@ -20,6 +20,7 @@
 5. F1.5 — fail-closed pipeline integration, timed-transcript enforcement, and rational XML/WAV parity.
 6. F1.6 — adaptive lexical/acoustic boundary selection, rejected-neighbor guarding, and local confidence.
 7. F1.7 — join-centric audio/transcript QC plus mandatory product-workflow integration.
+8. F1.8 — acoustic out-point snapping and ASR over-estimation correction.
 
 The tasks are sequential because they share the timing and EDL contract. Every task creates one local commit; the ORCHESTRATOR reviews it before activating the next task.
 
