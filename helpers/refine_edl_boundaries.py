@@ -1244,9 +1244,21 @@ def main() -> None:
         t_offset_raw = comp_end_raw if has_end_raw else float(last_word["end"])
         t_offset_rnn = comp_end_rnn if has_end_rnn else float(last_word["end"])
 
-        # Default: prefer raw tail over RNNoise tail
+        # Prefer the acoustic speech offset. If raw includes post-speech noise/artifacts
+        # that extend past RNNoise clean speech decay (with silence >= 150ms after rnn decay),
+        # prefer the clean RNNoise speech offset.
         if has_end_raw and has_end_rnn:
-            t_offset = max(comp_end_raw, comp_end_rnn)
+            if comp_end_raw > comp_end_rnn and (comp_end_raw - comp_end_rnn) >= 0.15:
+                idx_rnn_decay = int(comp_end_rnn * 1000 / 5.0)
+                idx_rnn_check = int(min(comp_end_raw, comp_end_rnn + 0.30) * 1000 / 5.0)
+                if idx_rnn_decay < len(activity_rnn) and not np.any(activity_rnn[idx_rnn_decay:idx_rnn_check]):
+                    t_offset = comp_end_rnn
+                    if "rnnoise_post_speech_noise_filtered" not in end_notes:
+                        end_notes.append("rnnoise_post_speech_noise_filtered")
+                else:
+                    t_offset = max(comp_end_raw, comp_end_rnn)
+            else:
+                t_offset = max(comp_end_raw, comp_end_rnn)
         elif has_end_raw:
             t_offset = comp_end_raw
         elif has_end_rnn:
@@ -1660,8 +1672,27 @@ def main() -> None:
 
         # Determine end sweep stability
         if baseline_end_ok and len(F_out_raw_vals) == 3:
+            spread_raw_out = max(F_out_raw_vals) - min(F_out_raw_vals)
+            spread_rnn_out = max(F_out_rnn_vals) - min(F_out_rnn_vals)
             spread_out = max(F_out_raw_vals + F_out_rnn_vals) - min(F_out_raw_vals + F_out_rnn_vals)
             sweep_end_ok = True
+
+            # If raw VAD caught post-speech noise/decay artifacts (comp_end_raw > comp_end_rnn)
+            # but RNNoise is stable and isolated the true speech offset (spread_rnn_out <= 2):
+            if (
+                has_end_rnn
+                and comp_end_raw > comp_end_rnn
+                and (comp_end_raw - comp_end_rnn) >= 0.15
+                and spread_rnn_out <= 2
+            ):
+                idx_rnn_decay = int(comp_end_rnn * 1000 / 5.0)
+                idx_rnn_check = int(min(comp_end_raw, comp_end_rnn + 0.30) * 1000 / 5.0)
+                if idx_rnn_decay < len(activity_rnn) and not np.any(activity_rnn[idx_rnn_decay:idx_rnn_check]):
+                    t_offset = comp_end_rnn
+                    F_out = time_to_frame(t_offset, fps, "ceil") + 2
+                    spread_out = spread_rnn_out
+                    if "rnnoise_post_speech_noise_filtered" not in end_notes:
+                        end_notes.append("rnnoise_post_speech_noise_filtered")
         else:
             spread_out = 9999
             sweep_end_ok = False
