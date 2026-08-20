@@ -93,7 +93,51 @@ def load_api_key() -> str:
     return value
 
 
-def extract_audio(video_path: Path, dest: Path) -> None:
+def extract_audio(video_path: Path, dest: Path, denoise: bool = True) -> None:
+    """Extract 16kHz mono audio for transcription with optional DeepFilterNet 3 pre-denoising."""
+    if denoise:
+        try:
+            from helpers.audio_analysis import denoise_deepfilternet, is_deepfilternet_available
+        except ImportError:
+            try:
+                from audio_analysis import denoise_deepfilternet, is_deepfilternet_available
+            except ImportError:
+                is_deepfilternet_available = lambda: False
+                denoise_deepfilternet = lambda s, **kw: None
+
+        if is_deepfilternet_available():
+            temp_48k = dest.with_suffix(".tmp48k.pcm")
+            cmd_48k = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(video_path),
+                "-vn", "-ac", "1", "-ar", "48000",
+                "-f", "s16le", str(temp_48k)
+            ]
+            completed = subprocess.run(cmd_48k, check=False, capture_output=True, text=True)
+            if completed.returncode == 0 and temp_48k.exists():
+                try:
+                    import numpy as np
+                    samples_48k = np.fromfile(temp_48k, dtype=np.int16)
+                    denoised_48k = denoise_deepfilternet(samples_48k, atten_lim_db=100.0)
+                    if denoised_48k is not None:
+                        temp_denoised_48k = dest.with_suffix(".tmp_df48k.pcm")
+                        denoised_48k.tofile(temp_denoised_48k)
+                        cmd_resample = [
+                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                            "-f", "s16le", "-ac", "1", "-ar", "48000",
+                            "-i", str(temp_denoised_48k),
+                            "-ar", "16000",
+                            "-c:a", "pcm_s16le",
+                            str(dest)
+                        ]
+                        res = subprocess.run(cmd_resample, check=False, capture_output=True, text=True)
+                        if res.returncode == 0 and dest.exists():
+                            return
+                finally:
+                    for p in [temp_48k, dest.with_suffix(".tmp_df48k.pcm")]:
+                        if p.exists():
+                            p.unlink()
+
     command = [
         "ffmpeg",
         "-y",
