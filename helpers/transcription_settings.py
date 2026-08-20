@@ -1,8 +1,8 @@
 """Persistent, secret-free transcription settings for Alano Cut.
 
-The global file stores the user's preferred profile.  Every initialized
+The global file stores the user's preferred profile. Every initialized
 workspace receives its own explicit ``alanocut.json`` so source and preview
-transcription never depend on an implicit provider default.  Credentials stay
+transcription never depend on an implicit provider default. Credentials stay
 in ``.env`` and are deliberately absent from this module's schema.
 """
 
@@ -21,15 +21,15 @@ WORKSPACE_SETTINGS_NAME = "alanocut.json"
 USER_SETTINGS_NAME = "user-settings.json"
 INSTALL_DIR_NAME = "alano-rought-cut-ai"
 
-PROVIDER_WHISPERX = "whisperx"
-PROVIDER_ELEVENLABS = "elevenlabs"
-PROVIDER_ASSEMBLYAI = "assemblyai"
 PROVIDER_VULKAN = "whisper-vulkan"
+PROVIDER_ASSEMBLYAI = "assemblyai"
+PROVIDER_ELEVENLABS = "elevenlabs"
+PROVIDER_WHISPERX = "whisperx"  # Deprecated legacy alias
+
 SUPPORTED_PROVIDERS = (
-    PROVIDER_WHISPERX,
-    PROVIDER_ELEVENLABS,
-    PROVIDER_ASSEMBLYAI,
     PROVIDER_VULKAN,
+    PROVIDER_ASSEMBLYAI,
+    PROVIDER_ELEVENLABS,
 )
 
 DIARIZATION_COMMUNITY_1 = "community-1"
@@ -48,29 +48,24 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TranscriptionSettings:
-    provider: str = PROVIDER_WHISPERX
+    provider: str = PROVIDER_VULKAN
     language: str = "pt"
-    device: str = "cuda"
+    device: str = "vulkan"
     diarization: str = DIARIZATION_COMMUNITY_1
 
     def __post_init__(self) -> None:
+        if self.provider == PROVIDER_WHISPERX:
+            raise SettingsError(
+                "WhisperX (CUDA-only) has been replaced by the unified Whisper Large Vulkan + DirectML runtime. "
+                "Please configure provider='whisper-vulkan'."
+            )
         if self.provider not in SUPPORTED_PROVIDERS:
             raise SettingsError(f"unsupported transcription provider: {self.provider}")
         if not str(self.language).strip():
             raise SettingsError("transcription language must not be empty")
         if self.diarization not in SUPPORTED_DIARIZATION:
             raise SettingsError(f"unsupported diarization mode: {self.diarization}")
-        if self.provider == PROVIDER_WHISPERX:
-            if self.device != "cuda":
-                raise SettingsError("local WhisperX requires device='cuda'")
-            if self.diarization not in {
-                DIARIZATION_COMMUNITY_1,
-                DIARIZATION_NONE,
-            }:
-                raise SettingsError(
-                    "WhisperX diarization must be 'community-1' or 'none'"
-                )
-        elif self.provider == PROVIDER_VULKAN:
+        if self.provider == PROVIDER_VULKAN:
             if self.device != "vulkan":
                 raise SettingsError("Vulkan Whisper requires device='vulkan'")
             if self.diarization not in {
@@ -87,16 +82,16 @@ class TranscriptionSettings:
                 raise SettingsError(f"{self.provider} device must be 'cloud'")
 
     @classmethod
-    def whisperx(
+    def vulkan(
         cls,
         *,
         diarization: str = DIARIZATION_COMMUNITY_1,
         language: str = "pt",
     ) -> "TranscriptionSettings":
         return cls(
-            provider=PROVIDER_WHISPERX,
+            provider=PROVIDER_VULKAN,
             language=language,
-            device="cuda",
+            device="vulkan",
             diarization=diarization,
         )
 
@@ -116,20 +111,6 @@ class TranscriptionSettings:
             language=language,
             device="cloud",
             diarization=DIARIZATION_PROVIDER,
-        )
-
-    @classmethod
-    def vulkan(
-        cls,
-        *,
-        diarization: str = DIARIZATION_COMMUNITY_1,
-        language: str = "pt",
-    ) -> "TranscriptionSettings":
-        return cls(
-            provider=PROVIDER_VULKAN,
-            language=language,
-            device="vulkan",
-            diarization=diarization,
         )
 
     def to_dict(self) -> dict[str, str]:
@@ -174,11 +155,25 @@ def _decode_settings(payload: object, *, source: Path) -> TranscriptionSettings:
     if not isinstance(transcription, Mapping):
         raise SettingsError(f"settings transcription object is missing: {source}")
     try:
+        provider = str(transcription.get("provider") or "")
+        # Automatic upgrade from deprecated whisperx
+        if provider == PROVIDER_WHISPERX:
+            provider = PROVIDER_VULKAN
+            device = "vulkan"
+            diarization = (
+                DIARIZATION_COMMUNITY_1
+                if transcription.get("diarization") == DIARIZATION_COMMUNITY_1
+                else DIARIZATION_NONE
+            )
+        else:
+            device = str(transcription.get("device") or "")
+            diarization = str(transcription.get("diarization") or "")
+
         return TranscriptionSettings(
-            provider=str(transcription.get("provider") or ""),
+            provider=provider,
             language=str(transcription.get("language") or ""),
-            device=str(transcription.get("device") or ""),
-            diarization=str(transcription.get("diarization") or ""),
+            device=device,
+            diarization=diarization,
         )
     except (TypeError, SettingsError) as exc:
         raise SettingsError(f"invalid transcription settings in {source}: {exc}") from exc

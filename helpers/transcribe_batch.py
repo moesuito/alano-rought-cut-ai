@@ -10,37 +10,25 @@ from pathlib import Path
 try:
     from helpers.transcribe import transcribe_one
     from helpers.transcription_contract import (
-        DEFAULT_DIARIZATION_MODEL,
-        DEFAULT_DIARIZATION_MODEL_REVISION,
-        DEFAULT_PORTUGUESE_ALIGN_MODEL,
-        DEFAULT_PORTUGUESE_HOTWORDS,
-        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
-        WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
         VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
-    from helpers.transcription_settings import resolve_settings
+    from helpers.transcription_settings import PROVIDER_VULKAN, resolve_settings
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
     from transcribe import transcribe_one  # type: ignore[no-redef]
     from transcription_contract import (  # type: ignore[no-redef]
-        DEFAULT_DIARIZATION_MODEL,
-        DEFAULT_DIARIZATION_MODEL_REVISION,
-        DEFAULT_PORTUGUESE_ALIGN_MODEL,
-        DEFAULT_PORTUGUESE_HOTWORDS,
-        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
-        WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
         VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
-    from transcription_settings import resolve_settings  # type: ignore[no-redef]
+    from transcription_settings import PROVIDER_VULKAN, resolve_settings  # type: ignore[no-redef]
 
 
 MEDIA_EXTENSIONS = {
@@ -88,38 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-dir", type=Path, default=None)
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "whisper-vulkan"),
+        choices=("configured", "whisper-vulkan", "vulkan", "assemblyai", "elevenlabs"),
         default="configured",
     )
     parser.add_argument("--language", default="pt")
-    parser.add_argument("--model", default="large-v3")
-    parser.add_argument("--align-model", default=DEFAULT_PORTUGUESE_ALIGN_MODEL)
-    parser.add_argument(
-        "--diarization-model",
-        default=DEFAULT_DIARIZATION_MODEL,
-        choices=(DEFAULT_DIARIZATION_MODEL,),
-    )
     parser.add_argument(
         "--diarization",
         choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE),
         default=None,
     )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=2,
-        help="WhisperX GPU batch size (default: 2 for 6 GB VRAM)",
-    )
-    parser.add_argument("--beam-size", type=int, default=5)
-    parser.add_argument("--initial-prompt", default=DEFAULT_PORTUGUESE_INITIAL_PROMPT)
-    parser.add_argument("--hotwords", default=DEFAULT_PORTUGUESE_HOTWORDS)
-    parser.add_argument(
-        "--compute-type", choices=("float16", "int8_float16"), default="float16"
-    )
     speaker_group = parser.add_mutually_exclusive_group()
     speaker_group.add_argument("--num-speakers", type=int, default=None)
     speaker_group.add_argument("--speaker-range", nargs=2, type=int, metavar=("MIN", "MAX"))
-    parser.add_argument("--runtime-python", type=Path, default=None)
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser
@@ -145,51 +113,19 @@ def main() -> int:
         provider = settings.provider if settings else args.provider
         configured_language = settings.language if settings else args.language
         language = None if str(configured_language).lower() == "auto" else configured_language
-        min_speakers = args.speaker_range[0] if args.speaker_range else None
-        max_speakers = args.speaker_range[1] if args.speaker_range else None
-        if provider == "whisperx":
+        if provider in {"whisper-vulkan", "vulkan", "whisperx", PROVIDER_VULKAN}:
             diarization_mode = (
                 args.diarization
                 or (settings.diarization if settings else DIARIZATION_COMMUNITY_1)
-            )
-            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig = WhisperXConfig(
-                model=args.model,
-                language=language,
-                compute_type=args.compute_type,
-                batch_size=args.batch_size,
-                beam_size=args.beam_size,
-                initial_prompt=args.initial_prompt if language == "pt" else None,
-                hotwords=args.hotwords if language == "pt" else None,
-                align_model=args.align_model if language == "pt" else None,
-                vad_method=("pyannote" if diarization_mode == DIARIZATION_COMMUNITY_1 else "silero"),
-                diarization_mode=diarization_mode,
-                diarization_model=(
-                    args.diarization_model
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                diarization_model_revision=(
-                    DEFAULT_DIARIZATION_MODEL_REVISION
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                num_speakers=args.num_speakers,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-            )
-        elif provider == "elevenlabs":
-            config = ElevenLabsConfig(language=language)
-        elif provider == "assemblyai":
-            config = AssemblyAIConfig(language_code=language or "pt")
-        elif provider in {"whisper-vulkan", "vulkan"}:
-            diarization_mode = (
-                args.diarization
-                or (resolved_settings.diarization if resolved_settings else DIARIZATION_NONE)
             )
             config = VulkanWhisperConfig(
                 language=language or "pt",
                 diarization_mode=diarization_mode,
             )
+        elif provider == "elevenlabs":
+            config = ElevenLabsConfig(language=language)
+        elif provider == "assemblyai":
+            config = AssemblyAIConfig(language_code=language or "pt")
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
     except Exception as error:
@@ -197,11 +133,8 @@ def main() -> int:
         return 1
 
     edit_dir = (args.edit_dir or sources_dir / "edit").resolve()
-    execution_mode = (
-        "GPU concurrency=1" if provider == "whisperx" else "cloud API sequential mode"
-    )
     print(
-        f"found {len(sources)} source(s); provider={provider}; {execution_mode}",
+        f"found {len(sources)} source(s); provider={provider}",
         flush=True,
     )
     started = time.perf_counter()
@@ -217,7 +150,6 @@ def main() -> int:
                 force=args.force,
                 provider=provider,
                 config=config,
-                runtime_python=args.runtime_python,
             )
         except Exception as error:
             failures.append((source, f"{type(error).__name__}: {error}"))

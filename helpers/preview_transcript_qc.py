@@ -602,7 +602,7 @@ class LocalWhisperCppProvider(TranscriptProvider):
 
 
 # Global normative provider that can still be patched by public tests.
-PROVIDER: TranscriptProvider = WhisperXTranscriptProvider()
+PROVIDER: TranscriptProvider = VulkanWhisperTranscriptProvider()
 
 
 def compute_sha256(path: Path) -> str:
@@ -1836,12 +1836,12 @@ def main() -> None:
                             f"{source_provider!r}); reconfigure or re-transcribe sources"
                         )
                     effective_provider = (
-                        PROVIDER_WHISPERX
-                        if source_provider == WHISPERX_TRANSCRIPTION_PROVIDER
+                        PROVIDER_ELEVENLABS
+                        if source_provider == ELEVENLABS_TRANSCRIPTION_PROVIDER
                         else (
-                            PROVIDER_ELEVENLABS
-                            if source_provider == ELEVENLABS_TRANSCRIPTION_PROVIDER
-                            else PROVIDER_ASSEMBLYAI
+                            PROVIDER_ASSEMBLYAI
+                            if source_provider == ASSEMBLYAI_TRANSCRIPTION_PROVIDER
+                            else PROVIDER_VULKAN
                         )
                     )
                 else:
@@ -1861,40 +1861,14 @@ def main() -> None:
                         if isinstance(source_config, AssemblyAIConfig)
                         else AssemblyAIConfig(language_code=configured.language if configured else "pt")
                     ).transcribe(wav_path)
-                elif effective_provider in {PROVIDER_VULKAN, "whisper-vulkan", "vulkan"}:
+                elif effective_provider in {PROVIDER_VULKAN, "whisper-vulkan", "vulkan", PROVIDER_WHISPERX, "whisperx"}:
                     transcript_data = VulkanWhisperTranscriptProvider(
                         source_config
                         if isinstance(source_config, VulkanWhisperConfig)
                         else VulkanWhisperConfig(language=configured.language if configured else "pt")
                     ).transcribe(wav_path)
                 else:
-                    if isinstance(source_config, WhisperXConfig):
-                        transcript_data = WhisperXTranscriptProvider(source_config).transcribe(wav_path)
-                    elif configured and configured.provider == PROVIDER_WHISPERX:
-                        mode = configured.diarization
-                        transcript_data = WhisperXTranscriptProvider(
-                            WhisperXConfig(
-                                language=configured.language,
-                                diarization_mode=mode,
-                                vad_method=(
-                                    "pyannote"
-                                    if mode == DIARIZATION_COMMUNITY_1
-                                    else "silero"
-                                ),
-                                diarization_model=(
-                                    DEFAULT_DIARIZATION_MODEL
-                                    if mode == DIARIZATION_COMMUNITY_1
-                                    else None
-                                ),
-                                diarization_model_revision=(
-                                    DEFAULT_DIARIZATION_MODEL_REVISION
-                                    if mode == DIARIZATION_COMMUNITY_1
-                                    else None
-                                ),
-                            )
-                        ).transcribe(wav_path)
-                    else:
-                        transcript_data = PROVIDER.transcribe(wav_path)
+                    transcript_data = PROVIDER.transcribe(wav_path)
             except Exception as e:
                 print(f"Error: failed during transcription: {e}", file=sys.stderr)
                 sys.exit(1)

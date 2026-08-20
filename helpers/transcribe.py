@@ -1,8 +1,8 @@
 """Transcribe one source with its explicit workspace provider profile.
 
-WhisperX is CUDA-only and emits forced-aligned word timestamps, optionally
-with Community-1 speakers. ElevenLabs Scribe is normalized from provider word
-timestamps. The two providers never silently fall back into one another.
+Local transcription uses Whisper Large Vulkan for word timestamps + Pyannote ONNX
+via DirectML for speaker diarization + DeepFilterNet 3 for neural noise reduction.
+Cloud transcription uses AssemblyAI or ElevenLabs Scribe.
 """
 
 from __future__ import annotations
@@ -21,13 +21,7 @@ import requests
 
 try:
     from helpers.transcription_contract import (
-        DEFAULT_DIARIZATION_MODEL,
-        DEFAULT_DIARIZATION_MODEL_REVISION,
-        DEFAULT_PORTUGUESE_ALIGN_MODEL,
-        DEFAULT_PORTUGUESE_HOTWORDS,
-        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         TranscriptContractError,
-        WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
         VulkanWhisperConfig,
@@ -42,7 +36,6 @@ try:
         write_json_atomic,
     )
     from helpers.transcription_providers import (
-        WhisperXProvider,
         ensure_no_secret_fields,
         load_env_value,
     )
@@ -50,20 +43,13 @@ try:
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_VULKAN,
-        PROVIDER_WHISPERX,
         resolve_settings,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
     from transcription_contract import (  # type: ignore[no-redef]
-        DEFAULT_DIARIZATION_MODEL,
-        DEFAULT_DIARIZATION_MODEL_REVISION,
-        DEFAULT_PORTUGUESE_ALIGN_MODEL,
-        DEFAULT_PORTUGUESE_HOTWORDS,
-        DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         TranscriptContractError,
-        WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
         VulkanWhisperConfig,
@@ -78,7 +64,6 @@ except ModuleNotFoundError as exc:
         write_json_atomic,
     )
     from transcription_providers import (  # type: ignore[no-redef]
-        WhisperXProvider,
         ensure_no_secret_fields,
         load_env_value,
     )
@@ -86,37 +71,50 @@ except ModuleNotFoundError as exc:
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_VULKAN,
-        PROVIDER_WHISPERX,
         resolve_settings,
     )
 
 
-SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
-
-
 class TranscriptionReviewRequired(RuntimeError):
-    """The transcript was persisted for audit but is unsafe for editing."""
+    """Raised when timing analysis requires editorial review."""
 
 
-def load_api_key() -> str:
-    value = load_env_value("ELEVENLABS_API_KEY")
-    if not value:
-        raise RuntimeError("ELEVENLABS_API_KEY not found in .env or environment")
-    return value
+def is_deepfilternet_available() -> bool:
+    """Check if DeepFilterNet neural denoiser is available."""
+    try:
+        import df.enhance  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
-def extract_audio(video_path: Path, dest: Path, denoise: bool = True) -> None:
-    """Extract 16kHz mono audio for transcription with optional DeepFilterNet 3 pre-denoising."""
+def denoise_deepfilternet(
+    samples_48k: Any,
+    atten_lim_db: float = 100.0,
+) -> Any | None:
+    """Apply DeepFilterNet 3 speech enhancement at 48kHz."""
+    try:
+        import torch
+        from df.enhance import enhance, init_df
+
+        model, df_state, _ = init_df()
+        audio = torch.from_numpy(samples_48k).float().unsqueeze(0) / 32768.0
+        enhanced = enhance(model, df_state, audio, atten_lim_db=atten_lim_db)
+        enhanced = (enhanced.squeeze(0).clamp(-1.0, 1.0) * 32767.0).short().cpu().numpy()
+        return enhanced
+    except Exception:
+        return None
+
+
+def extract_audio(
+    video_path: Path,
+    dest: Path,
+    *,
+    denoise: bool = True,
+) -> None:
+    """Extract audio from video file to 16kHz mono 16-bit PCM WAV."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if denoise:
-        try:
-            from helpers.audio_analysis import denoise_deepfilternet, is_deepfilternet_available
-        except ImportError:
-            try:
-                from audio_analysis import denoise_deepfilternet, is_deepfilternet_available
-            except ImportError:
-                is_deepfilternet_available = lambda: False
-                denoise_deepfilternet = lambda s, **kw: None
-
         if is_deepfilternet_available():
             temp_48k = dest.with_suffix(".tmp48k.pcm")
             cmd_48k = [
@@ -178,52 +176,19 @@ def call_scribe(
     language: str | None = None,
     num_speakers: int | None = None,
 ) -> dict[str, Any]:
-    """Call the explicitly selected ElevenLabs Scribe provider."""
-    data: dict[str, str] = {
-        "model_id": "scribe_v1",
-        "diarize": "true",
-        "tag_audio_events": "true",
-        "timestamps_granularity": "word",
-    }
-    if language:
+    url = "https://api.elevenlabs.io/v1/speech-to-text"
+    headers = {"xi-api-key": api_key, "User-Agent": "AlanoCut/0.4"}
+    data: dict[str, Any] = {"model_id": "scribe_v1", "tag_audio_events": "false"}
+    if language is not None:
         data["language_code"] = language
-    if num_speakers:
+    if num_speakers is not None:
         data["num_speakers"] = str(num_speakers)
     with audio_path.open("rb") as handle:
-        response = requests.post(
-            SCRIBE_URL,
-            headers={"xi-api-key": api_key},
-            files={"file": (audio_path.name, handle, "audio/wav")},
-            data=data,
-            timeout=1800,
-        )
+        files = {"file": (audio_path.name, handle, "audio/wav")}
+        response = requests.post(url, headers=headers, data=data, files=files, timeout=600)
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Scribe returned HTTP {response.status_code}; response body omitted"
-        )
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("Scribe returned a non-object response")
-    return payload
-
-
-def _scribe_transcript(
-    source: Path,
-    *,
-    api_key: str,
-    language: str | None,
-    num_speakers: int | None,
-    config: ElevenLabsConfig,
-) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="alano_cut_scribe_") as temp_dir:
-        audio = Path(temp_dir) / f"{source.stem}.wav"
-        extract_audio(source, audio)
-        payload = call_scribe(audio, api_key, language, num_speakers)
-    return convert_elevenlabs_result(
-        payload,
-        config=config,
-        source_sha256=sha256_file(source),
-    )
+        raise RuntimeError(f"ElevenLabs Scribe returned HTTP {response.status_code}")
+    return response.json()
 
 
 def call_assemblyai(
@@ -232,23 +197,20 @@ def call_assemblyai(
     language: str | None = None,
     num_speakers: int | None = None,
 ) -> dict[str, Any]:
-    """Call the explicitly selected AssemblyAI provider."""
-    headers = {"authorization": api_key}
-    # 1. Upload audio
+    headers = {"authorization": api_key, "User-Agent": "AlanoCut/0.4"}
     with audio_path.open("rb") as handle:
         upload_resp = requests.post(
             "https://api.assemblyai.com/v2/upload",
             headers=headers,
             data=handle,
-            timeout=600,
+            timeout=300,
         )
     if upload_resp.status_code != 200:
-        raise RuntimeError(f"AssemblyAI upload returned HTTP {upload_resp.status_code}")
+        raise RuntimeError(f"AssemblyAI audio upload returned HTTP {upload_resp.status_code}")
     upload_url = upload_resp.json().get("upload_url")
     if not upload_url:
         raise RuntimeError("AssemblyAI upload did not return an upload_url")
 
-    # 2. Submit job
     transcript_req: dict[str, Any] = {
         "audio_url": upload_url,
         "speaker_labels": True,
@@ -272,7 +234,6 @@ def call_assemblyai(
     if not transcript_id:
         raise RuntimeError("AssemblyAI did not return a transcript id")
 
-    # 3. Poll
     while True:
         poll_resp = requests.get(
             f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
@@ -288,6 +249,25 @@ def call_assemblyai(
         if status == "error":
             raise RuntimeError(f"AssemblyAI transcription failed: {data.get('error')}")
         time.sleep(2)
+
+
+def _scribe_transcript(
+    source: Path,
+    *,
+    api_key: str,
+    language: str | None,
+    num_speakers: int | None,
+    config: ElevenLabsConfig,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="alano_cut_scribe_") as temp_dir:
+        audio = Path(temp_dir) / f"{source.stem}.wav"
+        extract_audio(source, audio)
+        payload = call_scribe(audio, api_key, language, num_speakers)
+    return convert_elevenlabs_result(
+        payload,
+        config=config,
+        source_sha256=sha256_file(source),
+    )
 
 
 def _assemblyai_transcript(
@@ -352,6 +332,13 @@ def _vulkan_transcript(
     )
 
 
+def load_api_key() -> str:
+    key = load_env_value("ELEVENLABS_API_KEY")
+    if not key:
+        raise RuntimeError("ELEVENLABS_API_KEY is not set in environment or nearest .env")
+    return key
+
+
 def transcribe_one(
     video: Path,
     edit_dir: Path,
@@ -362,7 +349,7 @@ def transcribe_one(
     force: bool = False,
     *,
     provider: str = "configured",
-    config: WhisperXConfig | ElevenLabsConfig | None = None,
+    config: VulkanWhisperConfig | ElevenLabsConfig | AssemblyAIConfig | None = None,
     runtime_python: Path | None = None,
 ) -> Path:
     """Transcribe a source and return its canonical transcript path."""
@@ -381,50 +368,24 @@ def transcribe_one(
             else selected_settings.language
         )
 
-    if provider == "whisperx":
-        if config is None:
-            diarization_mode = (
-                selected_settings.diarization
-                if selected_settings is not None
-                else DIARIZATION_COMMUNITY_1
-            )
-            effective_config = WhisperXConfig(
-                language=language,
-                diarization_mode=diarization_mode,
-                vad_method=(
-                    "pyannote"
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else "silero"
-                ),
-                diarization_model=(
-                    DEFAULT_DIARIZATION_MODEL
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                diarization_model_revision=(
-                    DEFAULT_DIARIZATION_MODEL_REVISION
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                num_speakers=num_speakers,
-            )
-        else:
-            effective_config = config
-        if not isinstance(effective_config, WhisperXConfig):
-            raise ValueError("WhisperX provider requires WhisperXConfig")
+    if provider in {"whisperx", "whisper-vulkan", "vulkan", PROVIDER_VULKAN}:
+        provider = PROVIDER_VULKAN
+        diarization_mode = (
+            selected_settings.diarization
+            if selected_settings is not None
+            else DIARIZATION_COMMUNITY_1
+        )
+        effective_config = config or VulkanWhisperConfig(
+            language=language or "pt",
+            diarization_mode=diarization_mode,
+        )
+        if not isinstance(effective_config, VulkanWhisperConfig):
+            raise ValueError("Vulkan Whisper provider requires VulkanWhisperConfig")
         if output.exists() and not force and is_cache_valid(
             output, source_sha256=source_hash, config=effective_config
         ):
             if verbose:
-                print(f"cached: {output.name} (source + WhisperX config match)")
-                cached_payload = json.loads(output.read_text(encoding="utf-8"))
-                pending = validate_provisional_normative_transcript(cached_payload)
-                if pending:
-                    print(
-                        f"audit pending: {len(pending)} acoustic component(s) "
-                        "must be outside the eventual EDL selection",
-                        flush=True,
-                    )
+                print(f"cached: {output.name} (source + Vulkan config match)")
             return output
     elif provider == "elevenlabs":
         effective_config = config or ElevenLabsConfig(language=language)
@@ -446,24 +407,6 @@ def transcribe_one(
             if verbose:
                 print(f"cached: {output.name} (source + AssemblyAI config match)")
             return output
-    elif provider in {"whisper-vulkan", "vulkan"}:
-        diarization_mode = (
-            selected_settings.diarization
-            if selected_settings is not None
-            else DIARIZATION_NONE
-        )
-        effective_config = config or VulkanWhisperConfig(
-            language=language or "pt",
-            diarization_mode=diarization_mode,
-        )
-        if not isinstance(effective_config, VulkanWhisperConfig):
-            raise ValueError("Vulkan Whisper provider requires VulkanWhisperConfig")
-        if output.exists() and not force and is_cache_valid(
-            output, source_sha256=source_hash, config=effective_config
-        ):
-            if verbose:
-                print(f"cached: {output.name} (source + Vulkan config match)")
-            return output
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
 
@@ -471,12 +414,13 @@ def transcribe_one(
         replacement = " replacing stale/legacy cache" if output.exists() else ""
         print(f"transcribing {source.name} with {provider}{replacement}", flush=True)
     started = time.perf_counter()
-    if provider == "whisperx":
-        payload = WhisperXProvider(
-            effective_config,
-            runtime_python=runtime_python,
-            analysis_dir=edit_dir.resolve() / "audio_analysis",
-        ).transcribe(source)
+
+    if provider == PROVIDER_VULKAN:
+        payload = _vulkan_transcript(
+            source,
+            language=language,
+            config=effective_config,
+        )
     elif provider == "elevenlabs":
         payload = _scribe_transcript(
             source,
@@ -496,32 +440,26 @@ def transcribe_one(
             num_speakers=num_speakers,
             config=effective_config,
         )
-    elif provider in {"whisper-vulkan", "vulkan"}:
-        payload = _vulkan_transcript(
-            source,
-            language=language,
-            config=effective_config,
-        )
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
+
     ensure_no_secret_fields(payload)
     write_json_atomic(output, payload)
 
     pending_acoustic: list[dict[str, Any]] = []
-    if provider in {"whisperx", "elevenlabs", "assemblyai", "whisper-vulkan", "vulkan"}:
-        try:
-            pending_acoustic = validate_provisional_normative_transcript(payload)
-        except TranscriptContractError as error:
-            alignment = payload.get("_alano_cut", {}).get("alignment", {})
-            acoustic = payload.get("_alano_cut", {}).get("acoustic_timing", {})
-            count = (
-                int(alignment.get("blocking_outlier_count") or 0)
-                + int(acoustic.get("blocking_outlier_count") or 0)
-            )
-            raise TranscriptionReviewRequired(
-                f"transcription timing gate requires review ({count} blocking outlier(s)): "
-                f"{error}; audit transcript saved at {output}"
-            ) from error
+    try:
+        pending_acoustic = validate_provisional_normative_transcript(payload)
+    except TranscriptContractError as error:
+        alignment = payload.get("_alano_cut", {}).get("alignment", {})
+        acoustic = payload.get("_alano_cut", {}).get("acoustic_timing", {})
+        count = (
+            int(alignment.get("blocking_outlier_count") or 0)
+            + int(acoustic.get("blocking_outlier_count") or 0)
+        )
+        raise TranscriptionReviewRequired(
+            f"transcription timing gate requires review ({count} blocking outlier(s)): "
+            f"{error}; audit transcript saved at {output}"
+        ) from error
 
     if verbose:
         elapsed = time.perf_counter() - started
@@ -558,44 +496,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "whisper-vulkan"),
+        choices=("configured", "whisper-vulkan", "vulkan", "assemblyai", "elevenlabs"),
         default="configured",
         help="Workspace provider by default, or an explicit audited override",
     )
     parser.add_argument("--language", default="pt", help="Language code (default: pt)")
-    parser.add_argument("--model", default="large-v3", help="faster-whisper model")
-    parser.add_argument(
-        "--align-model",
-        default=DEFAULT_PORTUGUESE_ALIGN_MODEL,
-        help="Forced-alignment model (default: Portuguese XLSR-53)",
-    )
-    parser.add_argument(
-        "--diarization-model",
-        default=DEFAULT_DIARIZATION_MODEL,
-        choices=(DEFAULT_DIARIZATION_MODEL,),
-    )
     parser.add_argument(
         "--diarization",
         choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE),
         default=None,
-        help="WhisperX speaker mode (default: workspace setting)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=2,
-        help="WhisperX GPU batch size (default: 2 for 6 GB VRAM)",
-    )
-    parser.add_argument("--beam-size", type=int, default=5)
-    parser.add_argument("--initial-prompt", default=DEFAULT_PORTUGUESE_INITIAL_PROMPT)
-    parser.add_argument("--hotwords", default=DEFAULT_PORTUGUESE_HOTWORDS)
-    parser.add_argument(
-        "--compute-type", choices=("float16", "int8_float16"), default="float16"
+        help="Speaker diarization mode (default: workspace setting)",
     )
     speaker_group = parser.add_mutually_exclusive_group()
     speaker_group.add_argument("--num-speakers", type=int, default=None)
     speaker_group.add_argument("--speaker-range", nargs=2, type=int, metavar=("MIN", "MAX"))
-    parser.add_argument("--runtime-python", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -613,51 +527,19 @@ def main() -> int:
         provider = resolved_settings.provider if resolved_settings else args.provider
         configured_language = resolved_settings.language if resolved_settings else args.language
         language = None if str(configured_language).lower() == "auto" else configured_language
-        min_speakers = args.speaker_range[0] if args.speaker_range else None
-        max_speakers = args.speaker_range[1] if args.speaker_range else None
-        if provider == PROVIDER_WHISPERX:
+        if provider in {PROVIDER_VULKAN, "vulkan", "whisper-vulkan", "whisperx"}:
             diarization_mode = (
                 args.diarization
                 or (resolved_settings.diarization if resolved_settings else DIARIZATION_COMMUNITY_1)
-            )
-            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig = WhisperXConfig(
-                model=args.model,
-                language=language,
-                compute_type=args.compute_type,
-                batch_size=args.batch_size,
-                beam_size=args.beam_size,
-                initial_prompt=args.initial_prompt if language == "pt" else None,
-                hotwords=args.hotwords if language == "pt" else None,
-                align_model=args.align_model if language == "pt" else None,
-                vad_method=("pyannote" if diarization_mode == DIARIZATION_COMMUNITY_1 else "silero"),
-                diarization_mode=diarization_mode,
-                diarization_model=(
-                    args.diarization_model
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                diarization_model_revision=(
-                    DEFAULT_DIARIZATION_MODEL_REVISION
-                    if diarization_mode == DIARIZATION_COMMUNITY_1
-                    else None
-                ),
-                num_speakers=args.num_speakers,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
-            )
-        elif provider == PROVIDER_ELEVENLABS:
-            config = ElevenLabsConfig(language=language)
-        elif provider == PROVIDER_ASSEMBLYAI:
-            config = AssemblyAIConfig(language_code=language or "pt")
-        elif provider in {PROVIDER_VULKAN, "vulkan"}:
-            diarization_mode = (
-                args.diarization
-                or (resolved_settings.diarization if resolved_settings else DIARIZATION_NONE)
             )
             config = VulkanWhisperConfig(
                 language=language or "pt",
                 diarization_mode=diarization_mode,
             )
+        elif provider == PROVIDER_ELEVENLABS:
+            config = ElevenLabsConfig(language=language)
+        elif provider == PROVIDER_ASSEMBLYAI:
+            config = AssemblyAIConfig(language_code=language or "pt")
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
         transcribe_one(
@@ -668,18 +550,15 @@ def main() -> int:
             force=args.force,
             provider=provider,
             config=config,
-            runtime_python=args.runtime_python,
         )
     except TranscriptionReviewRequired as error:
         print(f"transcription review required: {error}", file=sys.stderr)
         return 2
     except Exception as error:
-        # Provider errors are designed not to contain credentials.  Avoid a
-        # traceback here so third-party request objects cannot dump headers.
         print(f"transcription failed ({type(error).__name__}): {error}", file=sys.stderr)
         return 1
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

@@ -1,6 +1,6 @@
 """Interactive, reusable setup wizard for Alano Cut transcription profiles.
 
-PowerShell owns bootstrap/update mechanics.  This module owns all provider
+PowerShell owns bootstrap/update mechanics. This module owns all provider
 choices so install, configure, and workspace initialization follow the same
 auditable path without duplicating credential logic.
 """
@@ -27,7 +27,6 @@ try:
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_VULKAN,
-        PROVIDER_WHISPERX,
         SettingsError,
         TranscriptionSettings,
         global_env_path,
@@ -36,7 +35,6 @@ try:
         workspace_settings_path,
         write_settings_atomic,
     )
-    from helpers.whisperx_runtime import RuntimeContractError, locate_runtime_python
     from helpers.gpu_detection import detect_recommended_runtime
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
@@ -47,7 +45,6 @@ except ModuleNotFoundError as exc:
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_VULKAN,
-        PROVIDER_WHISPERX,
         SettingsError,
         TranscriptionSettings,
         global_env_path,
@@ -56,18 +53,7 @@ except ModuleNotFoundError as exc:
         workspace_settings_path,
         write_settings_atomic,
     )
-    from whisperx_runtime import RuntimeContractError, locate_runtime_python  # type: ignore[no-redef]
     from gpu_detection import detect_recommended_runtime  # type: ignore[no-redef]
-
-
-MODEL_PAGE = "https://huggingface.co/pyannote/speaker-diarization-community-1"
-TOKEN_PAGE = "https://huggingface.co/settings/tokens"
-HF_CONFIG_URL = (
-    "https://huggingface.co/pyannote/speaker-diarization-community-1/resolve/"
-    "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee/config.yaml"
-)
-MIN_FREE_GIB = 12
-RECOMMENDED_FREE_GIB = 18
 
 
 class WizardError(RuntimeError):
@@ -98,169 +84,91 @@ def _set_env_value(name: str, value: str, path: Path | None = None) -> None:
     destination = path or global_env_path()
     destination.parent.mkdir(parents=True, exist_ok=True)
     existing = destination.read_text(encoding="utf-8-sig").splitlines() if destination.exists() else []
-    updated: list[str] = []
     found = False
-    for line in existing:
-        if "=" in line and line.split("=", 1)[0].strip() == name:
-            if not found:
-                updated.append(f"{name}={value}")
+    new_lines: list[str] = []
+    for raw in existing:
+        if "=" in raw and not raw.lstrip().startswith("#"):
+            key, _ = raw.split("=", 1)
+            if key.strip() == name:
+                new_lines.append(f"{name}={value.strip()}")
                 found = True
-        else:
-            updated.append(line)
+                continue
+        new_lines.append(raw)
     if not found:
-        updated.append(f"{name}={value}")
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            dir=destination.parent,
-            prefix=destination.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write("\n".join(updated) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        os.replace(temporary, destination)
-        temporary = None
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
-
-
-def _print_choices(title: str, options: list[tuple[str, str]], selected: int) -> None:
-    print()
-    print(title)
-    for index, (label, detail) in enumerate(options):
-        marker = "[x]" if index == selected else "[ ]"
-        print(f"  {marker} {label}")
-        print(f"    {detail}")
+        new_lines.append(f"{name}={value.strip()}")
+    destination.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 def choose(
-    title: str,
-    options: list[tuple[str, str]],
-    *,
+    prompt: str,
+    options: Sequence[tuple[str, str]],
     default: int = 0,
+    *,
+    input_func: Callable[[str], str] = input,
     non_interactive: bool = False,
-    input_fn: Callable[[str], str] = input,
 ) -> int:
-    """Render a radio-style menu with deterministic numeric fallback."""
-
+    """Render an accessible [ ]-style single choice selector."""
+    if not options:
+        raise ValueError("options must not be empty")
     if non_interactive:
-        return default
-    _print_choices(title, options, default)
+        return max(0, min(default, len(options) - 1))
+    print(prompt)
+    for index, (title, description) in enumerate(options, start=1):
+        marker = "[*]" if (index - 1) == default else "[ ]"
+        print(f"  {index}. {marker} {title}")
+        if description:
+            print(f"         {description}")
     while True:
-        answer = input_fn(f"Escolha [1-{len(options)}] (Enter = {default + 1}): ").strip()
-        if not answer:
+        try:
+            raw = input_func(f"Escolha uma opção [1-{len(options)}] (padrão: {default + 1}): ").strip()
+        except EOFError:
             return default
-        if answer.isdigit() and 1 <= int(answer) <= len(options):
-            return int(answer) - 1
-        print("Escolha inválida. Informe o número de uma opção.")
-
-
-def confirm(prompt: str, *, default: bool, non_interactive: bool) -> bool:
-    if non_interactive:
-        return default
-    marker = "S/n" if default else "s/N"
-    while True:
-        answer = input(f"{prompt} [{marker}]: ").strip().casefold()
-        if not answer:
+        if not raw:
             return default
-        if answer in {"s", "sim", "y", "yes"}:
-            return True
-        if answer in {"n", "nao", "não", "no"}:
-            return False
-        print("Responda sim ou não.")
+        try:
+            val = int(raw)
+            if 1 <= val <= len(options):
+                return val - 1
+        except ValueError:
+            pass
+        print(f"Opção inválida. Digite um número de 1 a {len(options)}.")
 
 
-def validate_hf_token(token: str) -> None:
-    request = urllib.request.Request(HF_CONFIG_URL, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            if response.status != 200:
-                raise WizardError("o token não possui acesso ao Community-1")
-    except urllib.error.HTTPError as exc:
-        raise WizardError(
-            "não foi possível acessar o Community-1; aceite o gate e use um token Read/fine-grained válido"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise WizardError(f"não foi possível validar o Hugging Face: {exc.reason}") from exc
-
-
-def validate_elevenlabs_key(key: str) -> None:
-    request = urllib.request.Request(
+def validate_elevenlabs_key(api_key: str) -> None:
+    req = urllib.request.Request(
         "https://api.elevenlabs.io/v1/user",
-        headers={"xi-api-key": key},
+        headers={"xi-api-key": api_key, "User-Agent": "AlanoCut-Setup/0.4"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             if response.status != 200:
-                raise WizardError("a API key da ElevenLabs foi recusada")
+                raise WizardError(f"ElevenLabs retornou HTTP {response.status}")
     except urllib.error.HTTPError as exc:
-        raise WizardError("a API key da ElevenLabs foi recusada") from exc
-    except urllib.error.URLError as exc:
-        raise WizardError(f"não foi possível validar a ElevenLabs: {exc.reason}") from exc
+        raise WizardError(f"chave ElevenLabs inválida (HTTP {exc.code})") from exc
+    except Exception as exc:
+        raise WizardError(f"não foi possível validar a chave ElevenLabs: {exc}") from exc
 
 
-def validate_assemblyai_key(key: str) -> None:
-    request = urllib.request.Request(
-        "https://api.assemblyai.com/v2/transcript?limit=1",
-        headers={"authorization": key, "User-Agent": "AlanoCut/0.4.0"},
+def validate_assemblyai_key(api_key: str) -> None:
+    req = urllib.request.Request(
+        "https://api.assemblyai.com/v2/account",
+        headers={"authorization": api_key, "User-Agent": "AlanoCut-Setup/0.4"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            if response.status not in {200, 201}:
-                raise WizardError("a API key da AssemblyAI foi recusada")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status != 200:
+                raise WizardError(f"AssemblyAI retornou HTTP {response.status}")
     except urllib.error.HTTPError as exc:
-        raise WizardError("a API key da AssemblyAI foi recusada") from exc
-    except urllib.error.URLError as exc:
-        raise WizardError(f"não foi possível validar a AssemblyAI: {exc.reason}") from exc
+        raise WizardError(f"chave AssemblyAI inválida (HTTP {exc.code})") from exc
+    except Exception as exc:
+        raise WizardError(f"não foi possível validar a chave AssemblyAI: {exc}") from exc
 
 
-def _check_space(*, non_interactive: bool) -> None:
-    target = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-    free_gib = shutil.disk_usage(target).free / (1024**3)
-    if free_gib < MIN_FREE_GIB:
-        raise WizardError(
-            f"espaço insuficiente em {target.drive or target}: {free_gib:.1f} GiB livres; "
-            f"são necessários pelo menos {MIN_FREE_GIB} GiB"
-        )
-    if free_gib < RECOMMENDED_FREE_GIB:
-        if not confirm(
-            f"Há {free_gib:.1f} GiB livres. O perfil local recomenda {RECOMMENDED_FREE_GIB} GiB. Continuar?",
-            default=False,
-            non_interactive=non_interactive,
-        ):
-            raise WizardError("configuração cancelada por falta de espaço recomendado")
-
-
-def _helper_path(name: str) -> Path:
-    helper = Path(__file__).resolve().with_name(name)
-    if not helper.is_file():
-        raise WizardError(f"helper ausente da instalação: {helper}")
-    return helper
-
-
-def _run_helper(arguments: list[str], *, python: str | Path | None = None) -> None:
-    completed = subprocess.run([str(python or sys.executable), *arguments], check=False)
-    if completed.returncode != 0:
-        raise WizardError("a configuração do runtime/modelos falhou; veja o diagnóstico acima")
-
-
-def _runtime_python() -> Path:
-    """Find the heavy shared interpreter only after the bootstrap has completed."""
-
-    try:
-        return locate_runtime_python()
-    except RuntimeContractError as exc:
-        raise WizardError(f"runtime CUDA indisponível: {exc}") from exc
-
-
-def provision(settings: TranscriptionSettings, *, non_interactive: bool) -> None:
+def provision(
+    settings: TranscriptionSettings,
+    *,
+    non_interactive: bool = False,
+) -> None:
     if settings.provider == PROVIDER_ELEVENLABS:
         key = _read_env_value("ELEVENLABS_API_KEY")
         if not key:
@@ -311,38 +219,7 @@ def provision(settings: TranscriptionSettings, *, non_interactive: bool) -> None
             ensure_diarization_models()
         return
 
-    print(
-        "O perfil WhisperX local reserva aproximadamente 16 GiB entre runtime e modelos "
-        "(18 GiB livres recomendados). Ele opera somente em CUDA; não há fallback em CPU."
-    )
-    _check_space(non_interactive=non_interactive)
-    if settings.diarization == DIARIZATION_COMMUNITY_1:
-        print()
-        print("Para usar o Pyannote Community-1:")
-        print(f"  1. Abra {MODEL_PAGE} e aceite as condições do modelo.")
-        print(f"  2. Crie um token Read ou fine-grained em {TOKEN_PAGE}.")
-        print("  3. Cole um token cuja conta já tenha acesso ao gate.")
-        token = _read_env_value("HF_TOKEN") or _read_env_value("HUGGING_FACE_HUB_TOKEN")
-        if not token:
-            if non_interactive:
-                raise WizardError("HF_TOKEN é obrigatório para Community-1 no modo não interativo")
-            token = getpass.getpass("Cole o Hugging Face access token (entrada oculta): ").strip()
-        if not token:
-            raise WizardError("nenhum token Hugging Face foi informado")
-        if not os.environ.get("ALANOCUT_SKIP_CREDENTIAL_VALIDATION"):
-            validate_hf_token(token)
-        _set_env_value("HF_TOKEN", token)
-        os.environ["HF_TOKEN"] = token
-
-    print("\nConfigurando runtime CUDA compartilhado. Isso pode levar alguns minutos...")
-    _run_helper([str(_helper_path("whisperx_runtime.py")), "setup"])
-    runtime_python = _runtime_python()
-    profile = settings.diarization
-    print("Baixando os modelos selecionados para o cache compartilhado...")
-    _run_helper(
-        [str(_helper_path("transcription_models.py")), "prefetch", "--profile", profile],
-        python=runtime_python,
-    )
+    raise WizardError(f"provider não suportado: {settings.provider}")
 
 
 def doctor(settings: TranscriptionSettings) -> dict[str, object]:
@@ -380,21 +257,11 @@ def doctor(settings: TranscriptionSettings) -> dict[str, object]:
             if dml_doc.get("status") != "pass":
                 doc["status"] = "unhealthy"
         return doc
-    runtime = _helper_path("whisperx_runtime.py")
-    models = _helper_path("transcription_models.py")
-    runtime_result = subprocess.run([sys.executable, str(runtime), "doctor"], check=False)
-    try:
-        runtime_python = _runtime_python()
-    except WizardError:
-        runtime_python = None
-    model_result = subprocess.run(
-        [str(runtime_python or sys.executable), str(models), "doctor", "--profile", settings.diarization],
-        check=False,
-    )
+
     return {
-        "status": "pass" if runtime_result.returncode == 0 and model_result.returncode == 0 else "unhealthy",
+        "status": "unhealthy",
         "provider": settings.provider,
-        "diarization": settings.diarization,
+        "error": "unknown provider",
     }
 
 
@@ -408,15 +275,12 @@ def select_settings(
     if provider:
         selected_provider = provider
     else:
-        hw_info = detect_recommended_runtime()
-        rec = hw_info.get("recommended_runtime", "cuda")
         if default:
             default_provider = default.provider
         else:
-            default_provider = PROVIDER_WHISPERX if rec == "cuda" else PROVIDER_VULKAN
+            default_provider = PROVIDER_VULKAN
 
         provider_map = [
-            PROVIDER_WHISPERX,
             PROVIDER_VULKAN,
             PROVIDER_ASSEMBLYAI,
             PROVIDER_ELEVENLABS,
@@ -427,12 +291,8 @@ def select_settings(
             "Qual provider de transcrição deseja utilizar?",
             [
                 (
-                    f"WhisperX local (CUDA){' — Recomendado (NVIDIA detectada)' if rec == 'cuda' else ''}",
-                    "Executa em NVIDIA CUDA com forced alignment e Pyannote.",
-                ),
-                (
-                    f"Whisper Large Vulkan (Local){' — Recomendado (GPU AMD/Intel detectada)' if rec == 'vulkan' else ''}",
-                    "Executa acelerado por GPU via Vulkan em AMD Radeon, Intel Arc/Iris, etc.",
+                    "Whisper Local (GPU Vulkan / DirectML) — Recomendado (NVIDIA / AMD / Intel)",
+                    "Executa offline na GPU via Vulkan + DirectML com timestamps de palavras e Pyannote.",
                 ),
                 (
                     "AssemblyAI (Cloud)",
@@ -450,13 +310,13 @@ def select_settings(
 
     if selected_provider == PROVIDER_ELEVENLABS:
         if diarization is not None:
-            raise WizardError("--diarization só pode ser usado com o provider whisperx")
+            raise WizardError("--diarization só pode ser usado com o provider whisper-vulkan")
         return TranscriptionSettings.elevenlabs(
             language=default.language if default else "pt"
         )
     if selected_provider == PROVIDER_ASSEMBLYAI:
         if diarization is not None:
-            raise WizardError("--diarization só pode ser usado com o provider whisperx")
+            raise WizardError("--diarization só pode ser usado com o provider whisper-vulkan")
         return TranscriptionSettings.assemblyai(
             language=default.language if default else "pt"
         )
@@ -467,7 +327,7 @@ def select_settings(
             default_diar_idx = (
                 0
                 if (default and default.provider == PROVIDER_VULKAN and default.diarization == DIARIZATION_COMMUNITY_1)
-                else 1
+                else 0
             )
             diar_choice = choose(
                 "Deseja habilitar Diarização Local (identificação de múltiplos locutores)?",
@@ -491,121 +351,124 @@ def select_settings(
             diarization=selected_diarization,
             language=default.language if default else "pt",
         )
-    if selected_provider != PROVIDER_WHISPERX:
-        raise WizardError(f"provider não suportado: {selected_provider}")
 
-    if diarization:
-        selected_diarization = diarization
-    else:
-        default_diarization = (
-            default.diarization
-            if default and default.provider == PROVIDER_WHISPERX
-            else DIARIZATION_COMMUNITY_1
-        )
-        selected_diarization = (
-            DIARIZATION_COMMUNITY_1
-            if choose(
-                "Deseja separar os speakers?",
-                [
-                    (
-                        "Pyannote Community-1 — Recomendado",
-                        "Separa speakers; exige gate e token Hugging Face.",
-                    ),
-                    (
-                        "Sem diarização",
-                        "Mantém WhisperX/alinhamento, mas sem identificação de speakers.",
-                    ),
-                ],
-                default=0 if default_diarization == DIARIZATION_COMMUNITY_1 else 1,
-                non_interactive=non_interactive,
-            )
-            == 0
-            else DIARIZATION_NONE
-        )
-    return TranscriptionSettings.whisperx(
-        diarization=selected_diarization,
-        language=default.language if default else "pt",
-    )
+    raise WizardError(f"provider não suportado: {selected_provider}")
 
 
-def _existing_default(workspace: Path | None) -> TranscriptionSettings | None:
-    candidates = [workspace_settings_path(workspace)] if workspace else []
-    candidates.append(user_settings_path())
-    for path in candidates:
-        if path.is_file():
-            try:
-                return read_settings(path)
-            except SettingsError:
-                continue
-    return None
+def run_init(
+    workspace: Path,
+    *,
+    provider: str | None = None,
+    diarization: str | None = None,
+    settings_output: Path | None = None,
+    non_interactive: bool = False,
+) -> TranscriptionSettings:
+    workspace = workspace.expanduser().resolve()
+    existing: TranscriptionSettings | None = None
+    workspace_file = workspace_settings_path(workspace)
+    if workspace_file.is_file():
+        existing = read_settings(workspace_file)
+    elif user_settings_path().is_file():
+        existing = read_settings(user_settings_path())
 
-
-def run_wizard(args: argparse.Namespace) -> Path:
-    workspace = Path(args.workspace).resolve() if args.workspace else None
-    default = _existing_default(workspace)
-    non_interactive = bool(args.non_interactive)
-    if non_interactive and not args.provider and default is None:
-        raise WizardError("--provider é obrigatório em modo não interativo sem configuração prévia")
-    reuse_existing = (
-        args.command in {"install", "setup"}
-        and default is not None
-        and args.provider is None
-        and args.diarization is None
-    )
-    settings = default if reuse_existing else select_settings(
-        default=default,
-        provider=args.provider,
-        diarization=args.diarization,
+    settings = select_settings(
+        default=existing,
+        provider=provider,
+        diarization=diarization,
         non_interactive=non_interactive,
     )
-    if settings is None:
-        raise WizardError("nenhum provider foi selecionado")
     provision(settings, non_interactive=non_interactive)
-    if args.settings_output:
-        destination = Path(args.settings_output).resolve()
-    elif workspace:
-        destination = workspace_settings_path(workspace)
+    if settings_output:
+        write_settings_atomic(settings_output, settings)
     else:
-        destination = user_settings_path()
-    return write_settings_atomic(destination, settings)
+        workspace.mkdir(parents=True, exist_ok=True)
+        write_settings_atomic(workspace_file, settings)
+    if not user_settings_path().is_file():
+        write_settings_atomic(user_settings_path(), settings)
+    return settings
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Configure Alano Cut transcription")
-    parser.add_argument("command", choices=("install", "configure", "init", "setup", "doctor", "migrate"))
-    parser.add_argument("--workspace", type=Path, default=None)
-    parser.add_argument("--settings-output", type=Path, default=None)
-    parser.add_argument("--provider", choices=(PROVIDER_WHISPERX, PROVIDER_VULKAN, PROVIDER_ELEVENLABS, PROVIDER_ASSEMBLYAI))
-    parser.add_argument("--diarization", choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE))
-    parser.add_argument("--non-interactive", action="store_true")
-    return parser
+def run_configure(
+    *,
+    workspace: Path | None = None,
+    provider: str | None = None,
+    diarization: str | None = None,
+    non_interactive: bool = False,
+) -> TranscriptionSettings:
+    existing: TranscriptionSettings | None = None
+    target_file = workspace_settings_path(workspace) if workspace else user_settings_path()
+    if target_file.is_file():
+        existing = read_settings(target_file)
+    elif user_settings_path().is_file():
+        existing = read_settings(user_settings_path())
+
+    settings = select_settings(
+        default=existing,
+        provider=provider,
+        diarization=diarization,
+        non_interactive=non_interactive,
+    )
+    provision(settings, non_interactive=non_interactive)
+    write_settings_atomic(target_file, settings)
+    print(f"Configuração salva em {target_file}")
+    return settings
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = argparse.ArgumentParser(description="Alano Cut transcription setup wizard")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_cmd = subparsers.add_parser("init", help="Initialize workspace settings")
+    init_cmd.add_argument("workspace_pos", nargs="?", type=Path, default=None, help="Workspace directory")
+    init_cmd.add_argument("--workspace", dest="workspace", type=Path, default=None, help="Workspace directory")
+    init_cmd.add_argument("--settings-output", type=Path, default=None, help="Path to write settings JSON")
+    init_cmd.add_argument("--provider", choices=[PROVIDER_VULKAN, PROVIDER_ASSEMBLYAI, PROVIDER_ELEVENLABS, "whisperx"])
+    init_cmd.add_argument("--diarization", choices=[DIARIZATION_COMMUNITY_1, DIARIZATION_NONE])
+    init_cmd.add_argument("--non-interactive", action="store_true")
+
+    cfg_cmd = subparsers.add_parser("configure", help="Configure user or workspace settings")
+    cfg_cmd.add_argument("--workspace", type=Path, help="Optional workspace directory")
+    cfg_cmd.add_argument("--provider", choices=[PROVIDER_VULKAN, PROVIDER_ASSEMBLYAI, PROVIDER_ELEVENLABS, "whisperx"])
+    cfg_cmd.add_argument("--diarization", choices=[DIARIZATION_COMMUNITY_1, DIARIZATION_NONE])
+    cfg_cmd.add_argument("--non-interactive", action="store_true")
+
+    doc_cmd = subparsers.add_parser("doctor", help="Run provider health checks")
+    doc_cmd.add_argument("--workspace", type=Path, help="Optional workspace to inspect")
+
+    args = parser.parse_args(argv)
     try:
+        if args.command == "init":
+            target_ws = args.workspace or args.workspace_pos or Path.cwd()
+            run_init(
+                target_ws,
+                provider=args.provider,
+                diarization=args.diarization,
+                settings_output=args.settings_output,
+                non_interactive=args.non_interactive,
+            )
+            return 0
+        if args.command == "configure":
+            run_configure(
+                workspace=args.workspace,
+                provider=args.provider,
+                diarization=args.diarization,
+                non_interactive=args.non_interactive,
+            )
+            return 0
         if args.command == "doctor":
-            default = _existing_default(Path(args.workspace).resolve() if args.workspace else None)
-            if default is None:
-                raise WizardError("nenhum provider configurado; execute `alanocut configure`")
-            result = doctor(default)
-            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-            return 0 if result.get("status") == "pass" else 2
-        if args.command == "migrate" and user_settings_path().is_file():
-            default = _existing_default(None)
-            if default is not None:
-                result = doctor(default)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-                if result.get("status") == "pass":
-                    return 0
-                print("A configuração existente precisa ser reparada; abrindo o setup guiado.")
-        destination = run_wizard(args)
-        print(f"Configuração salva em {destination}")
-        return 0
-    except (WizardError, SettingsError) as exc:
-        print(f"Setup falhou: {exc}", file=sys.stderr)
+            current = (
+                read_settings(workspace_settings_path(args.workspace))
+                if args.workspace
+                else read_settings(user_settings_path())
+            )
+            report = doctor(current)
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 0 if report.get("status") == "pass" else 1
+    except Exception as exc:
+        print(f"erro na configuração: {exc}", file=sys.stderr)
         return 1
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

@@ -1,29 +1,12 @@
 # Alano Rough Cut AI Assistant Installer for Windows
 
 param(
-    [ValidateSet("whisperx", "whisper-vulkan", "elevenlabs", "assemblyai")][string]$Provider,
-    [ValidateSet("community-1", "none")][string]$Diarization,
+    [ValidateSet("whisper-vulkan", "elevenlabs", "assemblyai")][string]$Provider = "whisper-vulkan",
+    [ValidateSet("community-1", "none")][string]$Diarization = "community-1",
     [switch]$NonInteractive
 )
 
 $ErrorActionPreference = "Stop"
-
-function Detect-GpuRuntime {
-    # Check NVIDIA / CUDA
-    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-        $NvidiaCheck = & nvidia-smi 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            return "cuda"
-        }
-    }
-    $Gpus = (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
-    foreach ($Gpu in $Gpus) {
-        if ($Gpu.Name -match "NVIDIA|GeForce|RTX|GTX|Quadro|Tesla") {
-            return "cuda"
-        }
-    }
-    return "vulkan"
-}
 
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "         Installing Alano Rough Cut AI Assistant...       " -ForegroundColor Green
@@ -145,7 +128,7 @@ if (!(Test-Path $VenvDir)) {
 }
 
 $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
-Write-Host "Installing project dependencies (PyTorch, DeepFilterNet 3, Pillow, NumPy, Requests)..." -ForegroundColor Cyan
+Write-Host "Installing project dependencies (PyTorch, DeepFilterNet 3, ONNX DirectML, SciPy, Pillow, NumPy, Requests)..." -ForegroundColor Cyan
 & $PipPath install -e $InstallDir
 
 $PythonPath = Join-Path $VenvDir "Scripts\python.exe"
@@ -158,25 +141,14 @@ try {
     Write-Host "Note: DeepFilterNet 3 model cache will initialize on first run." -ForegroundColor Yellow
 }
 
-# 5. Hardware auto-detection & Provider setup
-if (!$Provider) {
-    $Detected = Detect-GpuRuntime
-    if ($Detected -eq "cuda") {
-        Write-Host "Detected NVIDIA GPU with CUDA support. Defaulting to WhisperX (Local)." -ForegroundColor Green
-        $Provider = "whisperx"
-    } else {
-        Write-Host "No NVIDIA CUDA detected (AMD/Intel/Vulkan GPU). Defaulting to Whisper Large Vulkan (Local)." -ForegroundColor Cyan
-        $Provider = "whisper-vulkan"
-    }
-}
-
+# 5. Provider setup
 $WizardPath = Join-Path $InstallDir "helpers\setup_wizard.py"
 if (!(Test-Path $WizardPath)) {
     Write-Error "Setup wizard is missing: $WizardPath"
     exit 1
 }
-$WizardArgs = @($WizardPath, "install", "--provider", $Provider)
-if ($Diarization -and $Provider -eq "whisperx") { $WizardArgs += @("--diarization", $Diarization) }
+$WizardArgs = @($WizardPath, "configure", "--provider", $Provider)
+if ($Diarization) { $WizardArgs += @("--diarization", $Diarization) }
 if ($NonInteractive) { $WizardArgs += "--non-interactive" }
 & $PythonPath @WizardArgs
 if ($LASTEXITCODE -ne 0) {

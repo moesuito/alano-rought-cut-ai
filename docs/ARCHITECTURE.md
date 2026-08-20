@@ -5,21 +5,22 @@ Updated: 2026-07-11
 
 ## Overview
 
-The runtime is a Python/FFmpeg helper suite directed by the product `AGENTS.md` and modular `.agents/` workflow. Each workspace explicitly selects local CUDA WhisperX or ElevenLabs Scribe for source and preview transcription; EDL JSON is the editable editorial contract; FCP7/XMEML is the final deliverable.
+The runtime is a Python/FFmpeg helper suite directed by the product `AGENTS.md` and modular `.agents/` workflow. Each workspace explicitly selects local GPU Whisper (Vulkan + DirectML), AssemblyAI, or ElevenLabs Scribe for source and preview transcription; EDL JSON is the editable editorial contract; FCP7/XMEML is the final deliverable.
 
 ## Stack
 
-- Python 3.10+ with `numpy`, `requests`, and `pillow`.
-- Shared Python 3.12 runtime on C: with WhisperX 3.8.6, faster-whisper 1.2.1, Pyannote 4.0.7, and PyTorch 2.8 CUDA 12.8.
-- FFmpeg/ffprobe for media extraction, raw/RNNoise audio analysis, and XML source metadata.
+- Python 3.10+ with `numpy<2.0`, `requests`, `torch`, `torchaudio`, `deepfilternet`, `onnxruntime-directml`, `scipy`, `scikit-learn`.
+- Universal GPU runtime on Windows: `whisper.cpp` (Vulkan) for word timestamps + Pyannote ONNX (DirectML) for speaker diarization + DeepFilterNet 3 for neural pre-filtering.
+- Works out-of-the-box across NVIDIA GeForce/RTX, AMD Radeon, and Intel Arc/Iris GPUs without requiring 16 GB CUDA-only virtual environments.
+- FFmpeg/ffprobe for media extraction, audio analysis, and XML source metadata.
 - PowerShell installer and `alanocut` CLI for Windows workspace bootstrap/update.
 
 ## Modules
 
 - `helpers/transcription_contract.py` — dependency-free canonical schema, fingerprints, cache validation, and atomic persistence.
 - `helpers/transcription_settings.py` and `helpers/setup_wizard.py` — secret-free global/workspace profiles and the interactive provider setup.
-- `helpers/whisperx_runtime.py`, `helpers/whisperx_worker.py`, and `helpers/transcription_providers.py` — pinned CUDA runtime, isolated heavy worker, forced alignment, optional Community-1 diarization, and pinned Silero VAD for the no-diarization profile.
-- `helpers/transcribe*.py` — canonical source transcripts for WhisperX and ElevenLabs Scribe.
+- `helpers/vulkan_runtime.py` and `helpers/directml_diarization.py` — universal local GPU acceleration across Vulkan and DirectML.
+- `helpers/transcribe*.py` — canonical source transcripts for Whisper Vulkan, AssemblyAI, and ElevenLabs Scribe.
 - `helpers/pack_transcripts.py` — compact editorial reading view.
 - `helpers/refine_edl_boundaries.py` — in-place lexical/acoustic refinement to exact rational source frames.
 - `helpers/render.py` — dry PCM preview WAV and cumulative timeline map.
