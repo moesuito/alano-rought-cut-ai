@@ -443,8 +443,8 @@ def convert_edl_to_xml(
             ET.SubElement(t_rate, "ntsc").text = seq_ntsc
 
             effect = ET.SubElement(trans_item, "effect")
-            ET.SubElement(effect, "name").text = "Cross Fade (+3dB)"
-            ET.SubElement(effect, "effectid").text = "CrossFade3dB"
+            ET.SubElement(effect, "name").text = "Constant Power"
+            ET.SubElement(effect, "effectid").text = "ConstantPower"
             ET.SubElement(effect, "effecttype").text = "transition"
             ET.SubElement(effect, "mediatype").text = "audio"
 
@@ -465,19 +465,23 @@ def convert_edl_to_xml(
         s_track1 = ET.SubElement(clipitem_a1, "sourcetrack")
         ET.SubElement(s_track1, "mediatype").text = "audio"
         ET.SubElement(s_track1, "trackindex").text = "1"
+        # True 1-based child position on each track
+        v_child_idx = len(video_track)
+        a1_child_idx = len(audio_track1)
+
         # ------------------ LINK VIDEO & AUDIO TOGETHER ------------------
         for item in [clipitem_v, clipitem_a1]:
             l_v = ET.SubElement(item, "link")
             ET.SubElement(l_v, "linkclipref").text = clip_v_id
             ET.SubElement(l_v, "mediatype").text = "video"
             ET.SubElement(l_v, "trackindex").text = "1"
-            ET.SubElement(l_v, "clipindex").text = str(idx)
+            ET.SubElement(l_v, "clipindex").text = str(v_child_idx)
 
             l_a1 = ET.SubElement(item, "link")
             ET.SubElement(l_a1, "linkclipref").text = clip_a1_id
             ET.SubElement(l_a1, "mediatype").text = "audio"
             ET.SubElement(l_a1, "trackindex").text = "1"
-            ET.SubElement(l_a1, "clipindex").text = str(idx)
+            ET.SubElement(l_a1, "clipindex").text = str(a1_child_idx)
 
         start_timeline_frame = end_timeline_frame
 

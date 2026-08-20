@@ -512,7 +512,7 @@ def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace):
     xml_content = xml_path.read_text(encoding="utf-8")
 
     assert "<transitionitem>" in xml_content
-    assert "<effectid>CrossFade3dB</effectid>" in xml_content
+    assert "<effectid>ConstantPower</effectid>" in xml_content
     assert "<alignment>center</alignment>" in xml_content
     assert "<start>13</start>" in xml_content
     assert "<end>17</end>" in xml_content
