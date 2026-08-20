@@ -207,6 +207,17 @@ def provision(
         res = setup_vulkan()
         if res.get("status") != "pass":
             raise WizardError(f"Falha na configuração do runtime Vulkan: {res}")
+        print("Verificando modelo Wav2Vec2 para Forced Alignment...")
+        try:
+            from helpers.forced_alignment import ensure_wav2vec2_onnx
+        except ModuleNotFoundError:
+            try:
+                from forced_alignment import ensure_wav2vec2_onnx
+            except ModuleNotFoundError:
+                ensure_wav2vec2_onnx = None
+        if ensure_wav2vec2_onnx is not None:
+            ensure_wav2vec2_onnx()
+
         if settings.diarization != DIARIZATION_NONE:
             print("Baixando modelos ONNX do Pyannote para diarização DirectML...")
             try:
@@ -244,6 +255,15 @@ def doctor(settings: TranscriptionSettings) -> dict[str, object]:
             except ModuleNotFoundError:
                 return {"status": "unhealthy", "provider": settings.provider, "error": "helper missing"}
         doc = doctor_vulkan()
+        
+        # Check Wav2Vec2 forced alignment
+        try:
+            from helpers.forced_alignment import get_onnx_model_path
+            fa_exists = get_onnx_model_path().is_file()
+        except Exception:
+            fa_exists = False
+        doc["checks"]["wav2vec2_forced_alignment"] = {"status": "pass" if fa_exists else "unhealthy", "cached": fa_exists}
+
         if settings.diarization != DIARIZATION_NONE:
             try:
                 from helpers.directml_diarization import doctor as doctor_dml

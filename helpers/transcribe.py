@@ -296,10 +296,10 @@ def _vulkan_transcript(
     config: VulkanWhisperConfig,
 ) -> dict[str, Any]:
     try:
-        from helpers.vulkan_runtime import transcribe_raw_audio
+        from helpers.vulkan_runtime import parse_whisper_cpp_tokens_to_words, transcribe_raw_audio
     except ModuleNotFoundError:
         try:
-            from vulkan_runtime import transcribe_raw_audio
+            from vulkan_runtime import parse_whisper_cpp_tokens_to_words, transcribe_raw_audio
         except ModuleNotFoundError:
             raise RuntimeError("Vulkan runtime helper not found")
 
@@ -324,8 +324,38 @@ def _vulkan_transcript(
             language=language or "pt",
             model_name=config.model,
         )
+
+        words = parse_whisper_cpp_tokens_to_words(raw_json)
+        
+        # Wav2Vec2 CTC Forced Alignment on DirectML GPU
+        try:
+            from helpers.forced_alignment import Wav2Vec2Aligner
+        except ModuleNotFoundError:
+            try:
+                from forced_alignment import Wav2Vec2Aligner
+            except ModuleNotFoundError:
+                Wav2Vec2Aligner = None
+
+        if Wav2Vec2Aligner is not None and len(words) > 0:
+            try:
+                import subprocess
+                import numpy as np
+
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(audio),
+                    "-ar", "16000", "-ac", "1",
+                    "-f", "f32le", "-"
+                ]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+                samples = np.frombuffer(proc.stdout, dtype=np.float32)
+                aligner = Wav2Vec2Aligner()
+                words = aligner.align_full_transcript(samples, words)
+            except Exception as exc:
+                print(f"[Warning] Forced alignment fallback: {exc}", file=sys.stderr)
+
     return convert_vulkan_whisper_result(
-        raw_json,
+        words,
         config=config,
         diarization=diarization_turns,
         source_sha256=sha256_file(source),

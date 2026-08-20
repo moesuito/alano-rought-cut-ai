@@ -350,8 +350,8 @@ def convert_edl_to_xml(
         else:
             source_path = (edl_path.parent / source_path_raw).resolve()
 
-        start_sec = float(r["start"])
-        end_sec = float(r["end"])
+        start_sec = float(r.get("start", r.get("source_in", 0.0)))
+        end_sec = float(r.get("end", r.get("source_out", 0.0)))
 
         metadata = get_video_metadata(source_path)
         is_wav = source_path.suffix.lower() == ".wav"
