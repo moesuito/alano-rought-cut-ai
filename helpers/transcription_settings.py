@@ -23,7 +23,12 @@ INSTALL_DIR_NAME = "alano-rought-cut-ai"
 
 PROVIDER_WHISPERX = "whisperx"
 PROVIDER_ELEVENLABS = "elevenlabs"
-SUPPORTED_PROVIDERS = (PROVIDER_WHISPERX, PROVIDER_ELEVENLABS)
+PROVIDER_ASSEMBLYAI = "assemblyai"
+SUPPORTED_PROVIDERS = (
+    PROVIDER_WHISPERX,
+    PROVIDER_ELEVENLABS,
+    PROVIDER_ASSEMBLYAI,
+)
 
 DIARIZATION_COMMUNITY_1 = "community-1"
 DIARIZATION_NONE = "none"
@@ -65,9 +70,9 @@ class TranscriptionSettings:
                 )
         else:
             if self.diarization != DIARIZATION_PROVIDER:
-                raise SettingsError("ElevenLabs must use provider diarization")
+                raise SettingsError(f"{self.provider} must use provider diarization")
             if self.device != "cloud":
-                raise SettingsError("ElevenLabs device must be 'cloud'")
+                raise SettingsError(f"{self.provider} device must be 'cloud'")
 
     @classmethod
     def whisperx(
@@ -87,6 +92,15 @@ class TranscriptionSettings:
     def elevenlabs(cls, *, language: str = "pt") -> "TranscriptionSettings":
         return cls(
             provider=PROVIDER_ELEVENLABS,
+            language=language,
+            device="cloud",
+            diarization=DIARIZATION_PROVIDER,
+        )
+
+    @classmethod
+    def assemblyai(cls, *, language: str = "pt") -> "TranscriptionSettings":
+        return cls(
+            provider=PROVIDER_ASSEMBLYAI,
             language=language,
             device="cloud",
             diarization=DIARIZATION_PROVIDER,
@@ -221,6 +235,7 @@ __all__ = [
     "DIARIZATION_COMMUNITY_1",
     "DIARIZATION_NONE",
     "DIARIZATION_PROVIDER",
+    "PROVIDER_ASSEMBLYAI",
     "PROVIDER_ELEVENLABS",
     "PROVIDER_WHISPERX",
     "SETTINGS_SCHEMA_VERSION",

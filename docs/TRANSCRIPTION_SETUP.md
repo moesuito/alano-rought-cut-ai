@@ -13,6 +13,7 @@ de provider silenciosamente.
 | WhisperX local + Community-1 | Perfil local acima + diarização Pyannote | `HF_TOKEN` com o gate aceito | Recomendado para tomadas com mais de uma pessoa. |
 | WhisperX local sem diarização | Perfil local + Silero VAD pinado | nenhuma | Mantém CUDA e alinhamento por palavra, mas não produz speakers; pode reduzir a precisão editorial em conversas. |
 | ElevenLabs Scribe | Scribe com timestamps por palavra e diarização do provider | `ELEVENLABS_API_KEY` | Consome a conta ElevenLabs; também gera transcript canônico auditável. |
+| AssemblyAI (Cloud) | Modelo Best com timestamps por palavra e diarização | `ASSEMBLYAI_API_KEY` | Consome a conta AssemblyAI via API; suporte a diarização e pontuação. |
 
 O perfil local baixa aproximadamente **16 GiB** entre runtime e modelos; o
 assistente pede pelo menos 12 GiB livres e recomenda 18 GiB. Os modelos ficam

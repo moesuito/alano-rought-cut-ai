@@ -1,7 +1,7 @@
 # Alano Rough Cut AI Assistant Installer for Windows
 
 param(
-    [ValidateSet("whisperx", "elevenlabs")][string]$Provider,
+    [ValidateSet("whisperx", "elevenlabs", "assemblyai")][string]$Provider,
     [ValidateSet("community-1", "none")][string]$Diarization,
     [switch]$NonInteractive
 )

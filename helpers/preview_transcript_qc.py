@@ -38,17 +38,21 @@ from helpers.internal_silence import (
     evaluate_internal_silence_contract,
 )
 from helpers.transcription_contract import (
+    ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
     DEFAULT_DIARIZATION_MODEL,
     DEFAULT_DIARIZATION_MODEL_REVISION,
     DIARIZATION_COMMUNITY_1,
     ELEVENLABS_TRANSCRIPTION_PROVIDER,
+    AssemblyAIConfig,
     ElevenLabsConfig,
     WHISPERX_TRANSCRIPTION_PROVIDER,
     WhisperXConfig,
+    convert_assemblyai_result,
     convert_elevenlabs_result,
     sha256_file,
 )
 from helpers.transcription_settings import (
+    PROVIDER_ASSEMBLYAI,
     PROVIDER_ELEVENLABS,
     PROVIDER_WHISPERX,
     resolve_settings,
@@ -294,6 +298,29 @@ class ElevenLabsScribeProvider(TranscriptProvider):
         )
 
 
+class AssemblyAITranscriptProvider(TranscriptProvider):
+    def __init__(self, config: AssemblyAIConfig | None = None):
+        self.config = config or AssemblyAIConfig()
+
+    def transcribe(self, audio_path: Path) -> dict[str, Any]:
+        try:
+            from helpers.transcribe import call_assemblyai
+            from helpers.transcription_providers import load_env_value
+        except ModuleNotFoundError as exc:
+            if exc.name != "helpers":
+                raise
+            from transcribe import call_assemblyai
+            from transcription_providers import load_env_value
+        api_key = load_env_value("ASSEMBLYAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("ASSEMBLYAI_API_KEY not found in .env or environment")
+        return convert_assemblyai_result(
+            call_assemblyai(audio_path, api_key, self.config.language_code),
+            config=self.config,
+            source_sha256=sha256_file(audio_path),
+        )
+
+
 class WhisperXTranscriptProvider(TranscriptProvider):
     """Normative local CUDA provider with forced alignment and diarization."""
 
@@ -359,9 +386,11 @@ def load_source_transcription_profile(
             )
         try:
             if provider == WHISPERX_TRANSCRIPTION_PROVIDER:
-                config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(**config_data)
+                config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(**config_data)
             elif provider == ELEVENLABS_TRANSCRIPTION_PROVIDER:
                 config = ElevenLabsConfig(**config_data)
+            elif provider == ASSEMBLYAI_TRANSCRIPTION_PROVIDER:
+                config = AssemblyAIConfig(**config_data)
             else:
                 raise ValueError(f"unsupported provider {provider!r}")
         except (TypeError, ValueError) as exc:
@@ -1645,7 +1674,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "local-whisper", "auto"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "local-whisper", "auto"),
         default="configured",
         help=(
             "Workspace transcription backend by default. 'auto' remains a "
@@ -1742,9 +1771,15 @@ def main() -> None:
                 configured_canonical_provider = (
                     WHISPERX_TRANSCRIPTION_PROVIDER
                     if effective_provider in {PROVIDER_WHISPERX, "auto"}
-                    else ELEVENLABS_TRANSCRIPTION_PROVIDER
-                    if effective_provider == PROVIDER_ELEVENLABS
-                    else None
+                    else (
+                        ELEVENLABS_TRANSCRIPTION_PROVIDER
+                        if effective_provider == PROVIDER_ELEVENLABS
+                        else (
+                            ASSEMBLYAI_TRANSCRIPTION_PROVIDER
+                            if effective_provider == PROVIDER_ASSEMBLYAI
+                            else None
+                        )
+                    )
                 )
                 if source_profile is not None:
                     source_provider, source_config = source_profile
@@ -1757,7 +1792,11 @@ def main() -> None:
                     effective_provider = (
                         PROVIDER_WHISPERX
                         if source_provider == WHISPERX_TRANSCRIPTION_PROVIDER
-                        else PROVIDER_ELEVENLABS
+                        else (
+                            PROVIDER_ELEVENLABS
+                            if source_provider == ELEVENLABS_TRANSCRIPTION_PROVIDER
+                            else PROVIDER_ASSEMBLYAI
+                        )
                     )
                 else:
                     source_config = None
@@ -1769,6 +1808,12 @@ def main() -> None:
                         source_config
                         if isinstance(source_config, ElevenLabsConfig)
                         else ElevenLabsConfig(language=configured.language if configured else "pt")
+                    ).transcribe(wav_path)
+                elif effective_provider == PROVIDER_ASSEMBLYAI:
+                    transcript_data = AssemblyAITranscriptProvider(
+                        source_config
+                        if isinstance(source_config, AssemblyAIConfig)
+                        else AssemblyAIConfig(language_code=configured.language if configured else "pt")
                     ).transcribe(wav_path)
                 else:
                     if isinstance(source_config, WhisperXConfig):

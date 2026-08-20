@@ -24,6 +24,7 @@ try:
     from helpers.transcription_settings import (
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
+        PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_WHISPERX,
         SettingsError,
@@ -41,6 +42,7 @@ except ModuleNotFoundError as exc:
     from transcription_settings import (  # type: ignore[no-redef]
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
+        PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_WHISPERX,
         SettingsError,
@@ -200,6 +202,21 @@ def validate_elevenlabs_key(key: str) -> None:
         raise WizardError(f"não foi possível validar a ElevenLabs: {exc.reason}") from exc
 
 
+def validate_assemblyai_key(key: str) -> None:
+    request = urllib.request.Request(
+        "https://api.assemblyai.com/v2/transcript?limit=1",
+        headers={"authorization": key, "User-Agent": "AlanoCut/0.4.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if response.status not in {200, 201}:
+                raise WizardError("a API key da AssemblyAI foi recusada")
+    except urllib.error.HTTPError as exc:
+        raise WizardError("a API key da AssemblyAI foi recusada") from exc
+    except urllib.error.URLError as exc:
+        raise WizardError(f"não foi possível validar a AssemblyAI: {exc.reason}") from exc
+
+
 def _check_space(*, non_interactive: bool) -> None:
     target = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
     free_gib = shutil.disk_usage(target).free / (1024**3)
@@ -253,6 +270,19 @@ def provision(settings: TranscriptionSettings, *, non_interactive: bool) -> None
         _set_env_value("ELEVENLABS_API_KEY", key)
         return
 
+    if settings.provider == PROVIDER_ASSEMBLYAI:
+        key = _read_env_value("ASSEMBLYAI_API_KEY")
+        if not key:
+            if non_interactive:
+                raise WizardError("ASSEMBLYAI_API_KEY é obrigatória no modo não interativo")
+            key = getpass.getpass("Cole a AssemblyAI API Key (entrada oculta): ").strip()
+        if not key:
+            raise WizardError("nenhuma API key da AssemblyAI foi informada")
+        if not os.environ.get("ALANOCUT_SKIP_CREDENTIAL_VALIDATION"):
+            validate_assemblyai_key(key)
+        _set_env_value("ASSEMBLYAI_API_KEY", key)
+        return
+
     print(
         "O perfil WhisperX local reserva aproximadamente 16 GiB entre runtime e modelos "
         "(18 GiB livres recomendados). Ele opera somente em CUDA; não há fallback em CPU."
@@ -294,6 +324,12 @@ def doctor(settings: TranscriptionSettings) -> dict[str, object]:
             "provider": settings.provider,
             "checks": {"elevenlabs_api_key": bool(_read_env_value("ELEVENLABS_API_KEY"))},
         }
+    if settings.provider == PROVIDER_ASSEMBLYAI:
+        return {
+            "status": "pass" if _read_env_value("ASSEMBLYAI_API_KEY") else "unhealthy",
+            "provider": settings.provider,
+            "checks": {"assemblyai_api_key": bool(_read_env_value("ASSEMBLYAI_API_KEY"))},
+        }
     runtime = _helper_path("whisperx_runtime.py")
     models = _helper_path("transcription_models.py")
     runtime_result = subprocess.run([sys.executable, str(runtime), "doctor"], check=False)
@@ -323,30 +359,42 @@ def select_settings(
         selected_provider = provider
     else:
         default_provider = default.provider if default else PROVIDER_WHISPERX
-        selected_provider = (
-            PROVIDER_WHISPERX
-            if choose(
-                "Qual provider de transcrição deseja utilizar?",
-                [
-                    (
-                        "WhisperX local — Recomendado",
-                        "Executa em NVIDIA CUDA; não consome API externa.",
-                    ),
-                    (
-                        "ElevenLabs Scribe",
-                        "Usa sua API Key e o consumo da sua conta ElevenLabs.",
-                    ),
-                ],
-                default=0 if default_provider == PROVIDER_WHISPERX else 1,
-                non_interactive=non_interactive,
-            )
-            == 0
-            else PROVIDER_ELEVENLABS
+        default_index = 0 if default_provider == PROVIDER_WHISPERX else (1 if default_provider == PROVIDER_ELEVENLABS else 2)
+        choice_idx = choose(
+            "Qual provider de transcrição deseja utilizar?",
+            [
+                (
+                    "WhisperX local — Recomendado",
+                    "Executa em NVIDIA CUDA; não consome API externa.",
+                ),
+                (
+                    "ElevenLabs Scribe",
+                    "Usa sua API Key e o consumo da sua conta ElevenLabs.",
+                ),
+                (
+                    "AssemblyAI (Cloud)",
+                    "Usa sua API Key e o modelo Best da AssemblyAI.",
+                ),
+            ],
+            default=default_index,
+            non_interactive=non_interactive,
         )
+        if choice_idx == 0:
+            selected_provider = PROVIDER_WHISPERX
+        elif choice_idx == 1:
+            selected_provider = PROVIDER_ELEVENLABS
+        else:
+            selected_provider = PROVIDER_ASSEMBLYAI
     if selected_provider == PROVIDER_ELEVENLABS:
         if diarization is not None:
             raise WizardError("--diarization só pode ser usado com o provider whisperx")
         return TranscriptionSettings.elevenlabs(
+            language=default.language if default else "pt"
+        )
+    if selected_provider == PROVIDER_ASSEMBLYAI:
+        if diarization is not None:
+            raise WizardError("--diarization só pode ser usado com o provider whisperx")
+        return TranscriptionSettings.assemblyai(
             language=default.language if default else "pt"
         )
     if selected_provider != PROVIDER_WHISPERX:
@@ -433,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=("install", "configure", "init", "setup", "doctor", "migrate"))
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--settings-output", type=Path, default=None)
-    parser.add_argument("--provider", choices=(PROVIDER_WHISPERX, PROVIDER_ELEVENLABS))
+    parser.add_argument("--provider", choices=(PROVIDER_WHISPERX, PROVIDER_ELEVENLABS, PROVIDER_ASSEMBLYAI))
     parser.add_argument("--diarization", choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE))
     parser.add_argument("--non-interactive", action="store_true")
     return parser

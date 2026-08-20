@@ -29,9 +29,11 @@ try:
         TranscriptContractError,
         WhisperXConfig,
         ElevenLabsConfig,
+        AssemblyAIConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
         convert_elevenlabs_result,
+        convert_assemblyai_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -43,6 +45,7 @@ try:
         load_env_value,
     )
     from helpers.transcription_settings import (
+        PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_WHISPERX,
         resolve_settings,
@@ -59,9 +62,11 @@ except ModuleNotFoundError as exc:
         TranscriptContractError,
         WhisperXConfig,
         ElevenLabsConfig,
+        AssemblyAIConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
         convert_elevenlabs_result,
+        convert_assemblyai_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -73,6 +78,7 @@ except ModuleNotFoundError as exc:
         load_env_value,
     )
     from transcription_settings import (  # type: ignore[no-redef]
+        PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
         PROVIDER_WHISPERX,
         resolve_settings,
@@ -214,6 +220,89 @@ def _scribe_transcript(
     )
 
 
+def call_assemblyai(
+    audio_path: Path,
+    api_key: str,
+    language: str | None = None,
+    num_speakers: int | None = None,
+) -> dict[str, Any]:
+    """Call the explicitly selected AssemblyAI provider."""
+    headers = {"authorization": api_key}
+    # 1. Upload audio
+    with audio_path.open("rb") as handle:
+        upload_resp = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers=headers,
+            data=handle,
+            timeout=600,
+        )
+    if upload_resp.status_code != 200:
+        raise RuntimeError(f"AssemblyAI upload returned HTTP {upload_resp.status_code}")
+    upload_url = upload_resp.json().get("upload_url")
+    if not upload_url:
+        raise RuntimeError("AssemblyAI upload did not return an upload_url")
+
+    # 2. Submit job
+    transcript_req: dict[str, Any] = {
+        "audio_url": upload_url,
+        "speaker_labels": True,
+        "language_code": language or "pt",
+        "speech_model": "best",
+        "punctuate": True,
+        "format_text": True,
+    }
+    if num_speakers is not None:
+        transcript_req["speakers_expected"] = num_speakers
+
+    resp = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        headers=headers,
+        json=transcript_req,
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"AssemblyAI transcript submission returned HTTP {resp.status_code}")
+    transcript_id = resp.json().get("id")
+    if not transcript_id:
+        raise RuntimeError("AssemblyAI did not return a transcript id")
+
+    # 3. Poll
+    while True:
+        poll_resp = requests.get(
+            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+            headers=headers,
+            timeout=60,
+        )
+        if poll_resp.status_code != 200:
+            raise RuntimeError(f"AssemblyAI polling returned HTTP {poll_resp.status_code}")
+        data = poll_resp.json()
+        status = data.get("status")
+        if status == "completed":
+            return data
+        if status == "error":
+            raise RuntimeError(f"AssemblyAI transcription failed: {data.get('error')}")
+        time.sleep(2)
+
+
+def _assemblyai_transcript(
+    source: Path,
+    *,
+    api_key: str,
+    language: str | None,
+    num_speakers: int | None,
+    config: AssemblyAIConfig,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="alano_cut_assemblyai_") as temp_dir:
+        audio = Path(temp_dir) / f"{source.stem}.wav"
+        extract_audio(source, audio)
+        payload = call_assemblyai(audio, api_key, language, num_speakers)
+    return convert_assemblyai_result(
+        payload,
+        config=config,
+        source_sha256=sha256_file(source),
+    )
+
+
 def transcribe_one(
     video: Path,
     edit_dir: Path,
@@ -298,6 +387,16 @@ def transcribe_one(
             if verbose:
                 print(f"cached: {output.name} (source + ElevenLabs config match)")
             return output
+    elif provider == "assemblyai":
+        effective_config = config or AssemblyAIConfig(language_code=language or "pt")
+        if not isinstance(effective_config, AssemblyAIConfig):
+            raise ValueError("AssemblyAI provider requires AssemblyAIConfig")
+        if output.exists() and not force and is_cache_valid(
+            output, source_sha256=source_hash, config=effective_config
+        ):
+            if verbose:
+                print(f"cached: {output.name} (source + AssemblyAI config match)")
+            return output
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
 
@@ -311,7 +410,7 @@ def transcribe_one(
             runtime_python=runtime_python,
             analysis_dir=edit_dir.resolve() / "audio_analysis",
         ).transcribe(source)
-    else:
+    elif provider == "elevenlabs":
         payload = _scribe_transcript(
             source,
             api_key=api_key or load_api_key(),
@@ -319,11 +418,24 @@ def transcribe_one(
             num_speakers=num_speakers,
             config=effective_config,
         )
+    elif provider == "assemblyai":
+        assembly_key = api_key or load_env_value("ASSEMBLYAI_API_KEY")
+        if not assembly_key:
+            raise RuntimeError("ASSEMBLYAI_API_KEY not found in .env or environment")
+        payload = _assemblyai_transcript(
+            source,
+            api_key=assembly_key,
+            language=language,
+            num_speakers=num_speakers,
+            config=effective_config,
+        )
+    else:
+        raise ValueError(f"unsupported transcription provider: {provider}")
     ensure_no_secret_fields(payload)
     write_json_atomic(output, payload)
 
     pending_acoustic: list[dict[str, Any]] = []
-    if provider in {"whisperx", "elevenlabs"}:
+    if provider in {"whisperx", "elevenlabs", "assemblyai"}:
         try:
             pending_acoustic = validate_provisional_normative_transcript(payload)
         except TranscriptContractError as error:
@@ -373,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai"),
         default="configured",
         help="Workspace provider by default, or an explicit audited override",
     )
@@ -435,7 +547,7 @@ def main() -> int:
                 args.diarization
                 or (resolved_settings.diarization if resolved_settings else DIARIZATION_COMMUNITY_1)
             )
-            config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(
+            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(
                 model=args.model,
                 language=language,
                 compute_type=args.compute_type,
@@ -460,8 +572,12 @@ def main() -> int:
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
-        else:
+        elif provider == PROVIDER_ELEVENLABS:
             config = ElevenLabsConfig(language=language)
+        elif provider == PROVIDER_ASSEMBLYAI:
+            config = AssemblyAIConfig(language_code=language or "pt")
+        else:
+            raise ValueError(f"unsupported transcription provider: {provider}")
         transcribe_one(
             source,
             (args.edit_dir or source.parent / "edit").resolve(),
