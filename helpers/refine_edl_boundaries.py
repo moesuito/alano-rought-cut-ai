@@ -29,6 +29,7 @@ from helpers.internal_silence import (
     INTERNAL_SILENCE_OVERRIDE_FIELD,
     INTERNAL_SILENCE_SPLIT_POLICY,
     INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
+    INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS,
     compute_internal_silence_event_id,
     decimal_timestamp,
     evaluate_internal_silence_contract,
@@ -114,8 +115,9 @@ def split_ranges_on_internal_silence(
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             raise ValueError(f"{label} audit_event has an invalid event_id")
+        allowed_thresholds = {300.0, 350.0, 500.0, float(INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000), float(INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS * 1000)}
         if (
-            event.get("threshold_ms") != 300.0
+            event.get("threshold_ms") not in allowed_thresholds
             or event.get("comparison") != "strictly_greater_than"
             or event.get("action") not in {"split", "preserved_by_explicit_overrides"}
         ):

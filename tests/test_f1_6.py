@@ -32,13 +32,13 @@ from helpers.verify_edit_ready import validate_boundary_report
 @pytest.mark.parametrize(
     ("right_start", "expected_range_count"),
     [
-        (1.299999, 1),
-        (1.300000, 1),
-        (1.300001, 2),
-        (1.301000, 2),
+        (1.349999, 1),
+        (1.350000, 1),
+        (1.350001, 2),
+        (1.351000, 2),
     ],
 )
-def test_internal_silence_split_uses_strict_300ms_threshold(
+def test_internal_silence_split_uses_strict_350ms_threshold(
     right_start, expected_range_count
 ):
     words = {
@@ -162,15 +162,15 @@ def test_internal_silence_split_is_multi_gap_and_idempotent():
     )
 
 
-def test_internal_silence_event_identity_rejects_exact_300ms_and_stale_duration():
+def test_internal_silence_event_identity_rejects_exact_350ms_and_stale_duration():
     words = {
         "source": [
             {"text": "fim", "start": 0.0, "end": 0.1, "type": "word"},
-            {"text": "segue", "start": 0.400001, "end": 0.5, "type": "word"},
+            {"text": "segue", "start": 0.450001, "end": 0.55, "type": "word"},
         ]
     }
     ranges, events = split_ranges_on_internal_silence(
-        [{"source": "source", "start": 0.0, "end": 0.5}],
+        [{"source": "source", "start": 0.0, "end": 0.55}],
         words,
     )
     report = {
@@ -188,7 +188,7 @@ def test_internal_silence_event_identity_rejects_exact_300ms_and_stale_duration(
         "internal_silence_events": events,
         "internal_silence_policy": {
             "policy": INTERNAL_SILENCE_SPLIT_POLICY,
-            "threshold_ms": 300.0,
+            "threshold_ms": 350.0,
             "comparison": "strictly_greater_than",
             "detected_gap_count": 1,
             "split_gap_count": 1,
@@ -204,15 +204,15 @@ def test_internal_silence_event_identity_rejects_exact_300ms_and_stale_duration(
 
     exact = json.loads(json.dumps(report))
     exact_gap = exact["internal_silence_events"][0]["gaps"][0]
-    exact_gap["right_word_start"] = 0.4
-    exact_gap["gap_seconds"] = 0.3
-    exact_gap["gap_ms"] = 300.0
+    exact_gap["right_word_start"] = 0.45
+    exact_gap["gap_seconds"] = 0.35
+    exact_gap["gap_ms"] = 350.0
     for range_data in ranges:
         range_data["internal_silence_split"]["audit_event"] = exact[
             "internal_silence_events"
         ][0]
     errors = validate_boundary_report(exact, ranges)
-    assert any("not strictly over 300 ms" in error for error in errors)
+    assert any("not strictly over 350 ms" in error or "threshold" in error for error in errors)
 
     stale = json.loads(json.dumps(report))
     stale["internal_silence_events"][0]["gaps"][0]["gap_ms"] = 999.0

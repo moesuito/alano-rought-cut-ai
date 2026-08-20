@@ -252,12 +252,12 @@ def test_clean_resume_reports_every_join_and_passes():
 @pytest.mark.parametrize(
     ("gap_seconds", "expected_status", "expected_check_count"),
     [
-        (0.300000, "pass", 0),
-        (0.300001, "review", 1),
-        (0.301000, "review", 1),
+        (0.350000, "pass", 0),
+        (0.350001, "review", 1),
+        (0.351000, "review", 1),
     ],
 )
-def test_internal_silence_gate_is_strictly_greater_than_300ms(
+def test_internal_silence_gate_is_strictly_greater_than_350ms(
     gap_seconds, expected_status, expected_check_count
 ):
     context = set_first_range_internal_gap(make_context(), gap_seconds)

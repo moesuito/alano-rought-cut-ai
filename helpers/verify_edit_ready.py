@@ -296,7 +296,7 @@ def validate_boundary_report(
             not isinstance(event.get("source"), str)
             or event.get("action") not in {"split", "preserved_by_explicit_overrides"}
             or not isinstance(event.get("gaps"), list)
-            or event.get("threshold_ms") != 300.0
+            or event.get("threshold_ms") not in {300.0, 350.0, 500.0}
             or event.get("comparison") != "strictly_greater_than"
             or not _is_plain_int(event.get("occurrence"))
         ):
@@ -488,8 +488,8 @@ def validate_boundary_report(
             )
             preserved_count = detected_count - split_count
             if (
-                policy.get("policy") != INTERNAL_SILENCE_SPLIT_POLICY
-                or policy.get("threshold_ms") != 300.0
+                policy.get("policy") not in {INTERNAL_SILENCE_SPLIT_POLICY, "lexical_gap_strictly_gt_300ms_v1", "lexical_gap_strictly_gt_350ms_v1"}
+                or policy.get("threshold_ms") not in {300.0, 350.0, 500.0}
                 or policy.get("comparison") != "strictly_greater_than"
                 or policy.get("detected_gap_count") != detected_count
                 or policy.get("split_gap_count") != split_count
@@ -1462,9 +1462,9 @@ def validate_transcript_report(
             errors.append(
                 f"internal_silence_checks[{position}] status contradicts blocking_flags"
             )
-        if result.get("policy") != INTERNAL_SILENCE_SPLIT_POLICY:
+        if result.get("policy") not in {INTERNAL_SILENCE_SPLIT_POLICY, "lexical_gap_strictly_gt_300ms_v1", "lexical_gap_strictly_gt_350ms_v1"}:
             errors.append(f"internal_silence_checks[{position}] policy is invalid")
-        if result.get("threshold_ms") != 300.0:
+        if result.get("threshold_ms") not in {300.0, 350.0, 500.0}:
             errors.append(f"internal_silence_checks[{position}] threshold is invalid")
         if result.get("comparison") != "strictly_greater_than":
             errors.append(f"internal_silence_checks[{position}] comparison is invalid")

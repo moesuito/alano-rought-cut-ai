@@ -9,8 +9,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
-INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS = Decimal("0.300")
-INTERNAL_SILENCE_SPLIT_POLICY = "lexical_gap_strictly_gt_300ms_v1"
+INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS = Decimal("0.350")
+INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS = Decimal("0.500")
+INTERNAL_SILENCE_SPLIT_POLICY = "lexical_gap_strictly_gt_350ms_v1"
 INTERNAL_SILENCE_OVERRIDE_FIELD = "preserve_internal_silences"
 
 
@@ -33,7 +34,7 @@ def gap_exceeds_internal_silence_threshold(
     *,
     threshold_seconds: Decimal = INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS,
 ) -> bool:
-    """Compare a lexical gap exactly, preserving the strict 300 ms boundary."""
+    """Compare a lexical gap exactly, preserving the strict threshold boundary."""
     if threshold_seconds < 0:
         raise ValueError("internal silence threshold must be non-negative")
     return (
@@ -89,7 +90,7 @@ def compute_internal_silence_event_id(
         gap_seconds = right_word_start - left_word_end
         if gap_seconds <= INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS:
             raise ValueError(
-                f"internal-silence event gap {position} is not strictly over 300 ms"
+                f"internal-silence event gap {position} is not strictly over {int(INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS * 1000)} ms"
             )
         declared_gap_seconds = decimal_timestamp(
             gap.get("gap_seconds"), "declared gap seconds"
@@ -196,7 +197,21 @@ def evaluate_internal_silence_contract(
     last_word_index: int,
 ) -> list[dict[str, Any]]:
     """Evaluate gaps plus precise, reasoned per-gap preservation overrides."""
-    gaps = find_internal_silence_gaps(words, first_word_index, last_word_index)
+    threshold = INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS
+    if (
+        range_data.get("is_list")
+        or range_data.get("is_enumeration")
+        or (isinstance(range_data.get("boundary_constraints"), dict) and range_data["boundary_constraints"].get("is_list"))
+    ):
+        threshold = INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS
+
+    custom_max = range_data.get("max_gap_seconds")
+    if custom_max is None and isinstance(range_data.get("boundary_constraints"), dict):
+        custom_max = range_data["boundary_constraints"].get("max_gap_seconds")
+    if custom_max is not None:
+        threshold = decimal_timestamp(custom_max, "max_gap_seconds")
+
+    gaps = find_internal_silence_gaps(words, first_word_index, last_word_index, threshold_seconds=threshold)
     constraints = range_data.get("boundary_constraints")
     if constraints is None:
         constraints = {}

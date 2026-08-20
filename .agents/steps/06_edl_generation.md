@@ -26,12 +26,12 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Do not over-tighten.
 - Use word boundaries for all cut edges.
 - Use canonical provider JSON for exact word timestamps when trimming inside packed phrases; WhisperX timestamps are forced-aligned.
-- Do not add a global fixed trim or pre-roll. Select the intended lexical span; Step 07 will resolve its exact frame boundaries from lexical and acoustic evidence.
-- Every lexical gap strictly greater than 300ms inside a selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical provider word timestamps.
-- A gap of exactly 300ms remains untouched. There is no warning band.
+- Every lexical gap strictly greater than 350ms inside a standard selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical provider word timestamps.
+- For lists and enumerations (e.g. sequence of items, features, products), pauses up to 500ms represent natural cadence and must NOT be chopped into micro-cuts. Mark the range with `"is_list": true` or `"max_gap_seconds": 0.500`.
+- A gap of exactly 350ms (or 500ms in lists) remains untouched. There is no warning band.
 - Treat gaps < 150ms as unsafe unless there is a strong editorial reason.
 - When a speaker handoff genuinely needs 400-600ms of air, preserve that exact gap through the reasoned per-gap override below.
-- Preserve an intentional gap over 300ms only with a per-gap `boundary_constraints.preserve_internal_silences` entry containing the exact consecutive canonical word indices/text and a non-empty editorial reason. Wildcard range overrides are forbidden.
+- Preserve an intentional gap over 350ms (or over 500ms in lists) only with a per-gap `boundary_constraints.preserve_internal_silences` entry containing the exact consecutive canonical word indices/text and a non-empty editorial reason. Wildcard range overrides are forbidden.
 
 ## Retake And Semantic Repair
 
