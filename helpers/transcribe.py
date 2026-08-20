@@ -323,6 +323,19 @@ def _vulkan_transcript(
         except ModuleNotFoundError:
             raise RuntimeError("Vulkan runtime helper not found")
 
+    diarization_turns = None
+    if config.diarization_mode not in {DIARIZATION_NONE, "none"}:
+        try:
+            from helpers.directml_diarization import diarize_audio_file
+        except ModuleNotFoundError:
+            try:
+                from directml_diarization import diarize_audio_file
+            except ModuleNotFoundError:
+                diarize_audio_file = None
+
+        if diarize_audio_file is not None:
+            diarization_turns = diarize_audio_file(source)
+
     with tempfile.TemporaryDirectory(prefix="alano_cut_vulkan_") as temp_dir:
         audio = Path(temp_dir) / f"{source.stem}.wav"
         extract_audio(source, audio, denoise=True)
@@ -334,6 +347,7 @@ def _vulkan_transcript(
     return convert_vulkan_whisper_result(
         raw_json,
         config=config,
+        diarization=diarization_turns,
         source_sha256=sha256_file(source),
     )
 
@@ -433,7 +447,15 @@ def transcribe_one(
                 print(f"cached: {output.name} (source + AssemblyAI config match)")
             return output
     elif provider in {"whisper-vulkan", "vulkan"}:
-        effective_config = config or VulkanWhisperConfig(language=language or "pt")
+        diarization_mode = (
+            selected_settings.diarization
+            if selected_settings is not None
+            else DIARIZATION_NONE
+        )
+        effective_config = config or VulkanWhisperConfig(
+            language=language or "pt",
+            diarization_mode=diarization_mode,
+        )
         if not isinstance(effective_config, VulkanWhisperConfig):
             raise ValueError("Vulkan Whisper provider requires VulkanWhisperConfig")
         if output.exists() and not force and is_cache_valid(
@@ -628,7 +650,14 @@ def main() -> int:
         elif provider == PROVIDER_ASSEMBLYAI:
             config = AssemblyAIConfig(language_code=language or "pt")
         elif provider in {PROVIDER_VULKAN, "vulkan"}:
-            config = VulkanWhisperConfig(language=language or "pt")
+            diarization_mode = (
+                args.diarization
+                or (resolved_settings.diarization if resolved_settings else DIARIZATION_NONE)
+            )
+            config = VulkanWhisperConfig(
+                language=language or "pt",
+                diarization_mode=diarization_mode,
+            )
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
         transcribe_one(

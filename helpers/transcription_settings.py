@@ -73,9 +73,12 @@ class TranscriptionSettings:
         elif self.provider == PROVIDER_VULKAN:
             if self.device != "vulkan":
                 raise SettingsError("Vulkan Whisper requires device='vulkan'")
-            if self.diarization != DIARIZATION_NONE:
+            if self.diarization not in {
+                DIARIZATION_COMMUNITY_1,
+                DIARIZATION_NONE,
+            }:
                 raise SettingsError(
-                    "Vulkan Whisper does not currently support multi-speaker diarization"
+                    "Vulkan Whisper diarization must be 'community-1' or 'none'"
                 )
         else:
             if self.diarization != DIARIZATION_PROVIDER:
@@ -116,12 +119,17 @@ class TranscriptionSettings:
         )
 
     @classmethod
-    def vulkan(cls, *, language: str = "pt") -> "TranscriptionSettings":
+    def vulkan(
+        cls,
+        *,
+        diarization: str = DIARIZATION_COMMUNITY_1,
+        language: str = "pt",
+    ) -> "TranscriptionSettings":
         return cls(
             provider=PROVIDER_VULKAN,
             language=language,
             device="vulkan",
-            diarization=DIARIZATION_NONE,
+            diarization=diarization,
         )
 
     def to_dict(self) -> dict[str, str]:

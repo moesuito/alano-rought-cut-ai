@@ -182,7 +182,14 @@ def main() -> int:
         elif provider == "assemblyai":
             config = AssemblyAIConfig(language_code=language or "pt")
         elif provider in {"whisper-vulkan", "vulkan"}:
-            config = VulkanWhisperConfig(language=language or "pt")
+            diarization_mode = (
+                args.diarization
+                or (resolved_settings.diarization if resolved_settings else DIARIZATION_NONE)
+            )
+            config = VulkanWhisperConfig(
+                language=language or "pt",
+                diarization_mode=diarization_mode,
+            )
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
     except Exception as error:

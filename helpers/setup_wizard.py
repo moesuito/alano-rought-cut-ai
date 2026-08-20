@@ -299,6 +299,16 @@ def provision(settings: TranscriptionSettings, *, non_interactive: bool) -> None
         res = setup_vulkan()
         if res.get("status") != "pass":
             raise WizardError(f"Falha na configuração do runtime Vulkan: {res}")
+        if settings.diarization != DIARIZATION_NONE:
+            print("Baixando modelos ONNX do Pyannote para diarização DirectML...")
+            try:
+                from helpers.directml_diarization import ensure_diarization_models
+            except ModuleNotFoundError:
+                try:
+                    from directml_diarization import ensure_diarization_models
+                except ModuleNotFoundError:
+                    raise WizardError("DirectML diarization helper not found")
+            ensure_diarization_models()
         return
 
     print(
@@ -356,7 +366,20 @@ def doctor(settings: TranscriptionSettings) -> dict[str, object]:
                 from vulkan_runtime import doctor as doctor_vulkan
             except ModuleNotFoundError:
                 return {"status": "unhealthy", "provider": settings.provider, "error": "helper missing"}
-        return doctor_vulkan()
+        doc = doctor_vulkan()
+        if settings.diarization != DIARIZATION_NONE:
+            try:
+                from helpers.directml_diarization import doctor as doctor_dml
+            except ModuleNotFoundError:
+                try:
+                    from directml_diarization import doctor as doctor_dml
+                except ModuleNotFoundError:
+                    doctor_dml = lambda: {"status": "unhealthy", "error": "helper missing"}
+            dml_doc = doctor_dml()
+            doc["checks"]["directml_diarization"] = dml_doc
+            if dml_doc.get("status") != "pass":
+                doc["status"] = "unhealthy"
+        return doc
     runtime = _helper_path("whisperx_runtime.py")
     models = _helper_path("transcription_models.py")
     runtime_result = subprocess.run([sys.executable, str(runtime), "doctor"], check=False)
@@ -438,10 +461,35 @@ def select_settings(
             language=default.language if default else "pt"
         )
     if selected_provider == PROVIDER_VULKAN:
-        if diarization is not None:
-            raise WizardError("--diarization só pode ser usado com o provider whisperx")
+        if diarization:
+            selected_diarization = diarization
+        else:
+            default_diar_idx = (
+                0
+                if (default and default.provider == PROVIDER_VULKAN and default.diarization == DIARIZATION_COMMUNITY_1)
+                else 1
+            )
+            diar_choice = choose(
+                "Deseja habilitar Diarização Local (identificação de múltiplos locutores)?",
+                [
+                    (
+                        "Diarização DirectML (Pyannote ONNX) — Recomendado para múltiplos locutores",
+                        "Executa acelerado na GPU via DirectML com fallback automático em CPU.",
+                    ),
+                    (
+                        "Sem Diarização (Mais rápido)",
+                        "Ideal para vídeos de locutor único (aulas, tutoriais, talking-head).",
+                    ),
+                ],
+                default=default_diar_idx,
+                non_interactive=non_interactive,
+            )
+            selected_diarization = (
+                DIARIZATION_COMMUNITY_1 if diar_choice == 0 else DIARIZATION_NONE
+            )
         return TranscriptionSettings.vulkan(
-            language=default.language if default else "pt"
+            diarization=selected_diarization,
+            language=default.language if default else "pt",
         )
     if selected_provider != PROVIDER_WHISPERX:
         raise WizardError(f"provider não suportado: {selected_provider}")

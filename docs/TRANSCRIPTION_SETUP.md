@@ -12,7 +12,8 @@ de provider silenciosamente.
 | WhisperX local (recomendado) | `faster-whisper large-v3`, alinhamento WhisperX e CUDA | nenhuma; `HF_TOKEN` só com diarização | Sem consumo de API e sem fallback em CPU. |
 | WhisperX local + Community-1 | Perfil local acima + diarização Pyannote | `HF_TOKEN` com o gate aceito | Recomendado para tomadas com mais de uma pessoa. |
 | WhisperX local sem diarização | Perfil local + Silero VAD pinado | nenhuma | Mantém CUDA e alinhamento por palavra, mas não produz speakers; pode reduzir a precisão editorial em conversas. |
-| Whisper Large Vulkan (Local) | `whisper.cpp` com aceleração Vulkan em GPUs AMD Radeon, Intel Arc/Iris, etc. | nenhuma | Timestamps por palavra offline sem necessidade de CUDA; fallback automático do instalador em GPUs não-NVIDIA. |
+| Whisper Large Vulkan + Diarização (Local) | `whisper.cpp` (Vulkan) + Pyannote ONNX (DirectML GPU) | nenhuma / `HF_TOKEN` opcional | Aceleração completa em GPUs AMD Radeon, Intel Arc/Iris, etc. com identificação de múltiplos locutores offline. |
+| Whisper Large Vulkan sem diarização | `whisper.cpp` (Vulkan) com timestamps por palavra | nenhuma | Modo ultrarrápido para locutor único em GPUs não-NVIDIA. |
 | ElevenLabs Scribe (Cloud) | Scribe com timestamps por palavra e diarização do provider | `ELEVENLABS_API_KEY` | Consome a conta ElevenLabs; também gera transcript canônico auditável. |
 | AssemblyAI (Cloud) | Modelo Best com timestamps por palavra e diarização | `ASSEMBLYAI_API_KEY` | Consome a conta AssemblyAI via API; suporte a diarização e pontuação. |
 

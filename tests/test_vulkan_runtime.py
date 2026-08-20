@@ -43,7 +43,7 @@ def test_vulkan_whisper_config_invalid():
         VulkanWhisperConfig(device="cpu")
 
     with pytest.raises(TranscriptContractError):
-        VulkanWhisperConfig(diarization_mode="community-1")
+        VulkanWhisperConfig(diarization_mode="unsupported_mode")
 
 
 def test_parse_whisper_cpp_tokens_to_words():
@@ -147,11 +147,14 @@ def test_vulkan_cache_validity(tmp_path):
 
 
 def test_vulkan_transcription_settings():
-    settings = TranscriptionSettings.vulkan(language="pt")
-    assert settings.provider == PROVIDER_VULKAN
-    assert settings.language == "pt"
-    assert settings.device == "vulkan"
-    assert settings.diarization == "none"
+    settings_default = TranscriptionSettings.vulkan(language="pt")
+    assert settings_default.provider == PROVIDER_VULKAN
+    assert settings_default.language == "pt"
+    assert settings_default.device == "vulkan"
+    assert settings_default.diarization == "community-1"
+
+    settings_none = TranscriptionSettings.vulkan(language="pt", diarization="none")
+    assert settings_none.diarization == "none"
 
 
 def test_gpu_detection():

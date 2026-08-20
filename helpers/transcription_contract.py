@@ -247,9 +247,16 @@ class VulkanWhisperConfig:
     def __post_init__(self) -> None:
         if self.device != "vulkan":
             raise TranscriptContractError("VulkanWhisperConfig device must be 'vulkan'")
-        if self.diarization_mode not in {DIARIZATION_NONE, "none"}:
+        if self.diarization_mode not in {
+            DIARIZATION_NONE,
+            "none",
+            DIARIZATION_COMMUNITY_1,
+            "community-1",
+            "directml",
+            "pyannote_directml",
+        }:
             raise TranscriptContractError(
-                "Vulkan Whisper does not currently support multi-speaker diarization"
+                f"unsupported Vulkan Whisper diarization mode: {self.diarization_mode}"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -971,6 +978,7 @@ def convert_vulkan_whisper_result(
     result: Mapping[str, Any] | list[dict[str, Any]],
     *,
     config: VulkanWhisperConfig,
+    diarization: list[dict[str, Any]] | None = None,
     source_path: str | os.PathLike[str] | None = None,
     source_sha256: str | None = None,
     max_overlap_seconds: float = 0.25,
@@ -1004,6 +1012,9 @@ def convert_vulkan_whisper_result(
         raise TranscriptContractError("Vulkan Whisper result must be a list or mapping")
 
     resolved_source_hash = _resolve_source_hash(source_path, source_sha256)
+    diarization_required = config.diarization_mode not in {DIARIZATION_NONE, "none"}
+    normalized_diarization = _convert_diarization(diarization) if diarization_required and diarization else []
+
     words: list[dict[str, Any]] = []
     for index, item in enumerate(raw_words):
         if not isinstance(item, Mapping):
@@ -1017,14 +1028,24 @@ def convert_vulkan_whisper_result(
         score = item.get("score")
         if score is not None:
             score = float(score)
+
+        if diarization_required:
+            overlap_spk = _speaker_for_interval(start, end, normalized_diarization, max_gap_seconds=0.0) if normalized_diarization else None
+            bounded_spk = _speaker_for_interval(start, end, normalized_diarization) if normalized_diarization else None
+            speaker = overlap_spk or bounded_spk or "speaker_0"
+            speaker_assignment = "turn_overlap" if overlap_spk is not None else "bounded_gap"
+        else:
+            speaker = None
+            speaker_assignment = "disabled"
+
         words.append(
             {
                 "text": text,
                 "start": round(start, 3),
                 "end": round(end, 3),
                 "type": "word",
-                "speaker_id": None,
-                "speaker_assignment": "disabled",
+                "speaker_id": speaker,
+                "speaker_assignment": speaker_assignment,
                 "score": score if score is not None else 1.0,
                 "timing_source": "provider_word_timestamp",
             }
@@ -1035,20 +1056,23 @@ def convert_vulkan_whisper_result(
 
     segments: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
+    current_speaker = None
     for word in words:
-        if current and (word["start"] - current[-1]["end"] >= 0.5):
+        spk = word.get("speaker_id")
+        if current and (word["start"] - current[-1]["end"] >= 0.5 or (diarization_required and spk != current_speaker)):
             segments.append(
                 {
                     "id": len(segments),
                     "start": current[0]["start"],
                     "end": current[-1]["end"],
                     "text": " ".join(item["text"] for item in current),
-                    "speaker_id": None,
+                    "speaker_id": current_speaker if diarization_required else None,
                     "words": [item.copy() for item in current],
                 }
             )
             current = []
         current.append(word)
+        current_speaker = spk
     if current:
         segments.append(
             {
@@ -1056,19 +1080,27 @@ def convert_vulkan_whisper_result(
                 "start": current[0]["start"],
                 "end": current[-1]["end"],
                 "text": " ".join(item["text"] for item in current),
-                "speaker_id": None,
+                "speaker_id": current_speaker if diarization_required else None,
                 "words": [item.copy() for item in current],
             }
         )
 
-    diarization: list[dict[str, Any]] = []
+    transcript_diarization = normalized_diarization if diarization_required else []
+    if diarization_required and not transcript_diarization:
+        transcript_diarization = [
+            {
+                "start": words[0]["start"],
+                "end": words[-1]["end"],
+                "speaker_id": "speaker_0",
+            }
+        ]
 
     transcript: dict[str, Any] = {
         "text": full_text or " ".join(w["text"] for w in words),
         "language_code": language_code,
         "words": words,
         "segments": segments,
-        "diarization": diarization,
+        "diarization": transcript_diarization,
         "_alano_cut": {
             "schema_version": TRANSCRIPT_SCHEMA_VERSION,
             "transcription_provider": VULKAN_WHISPER_TRANSCRIPTION_PROVIDER,
@@ -1082,13 +1114,13 @@ def convert_vulkan_whisper_result(
                 "asr": config.model,
                 "semantic_verifier": None,
                 "alignment": "whisper_cpp",
-                "diarization": None,
+                "diarization": "pyannote_onnx" if diarization_required else None,
             },
             "model_revisions": {
                 "asr": config.model,
                 "semantic_verifier": None,
                 "alignment": "whisper_cpp",
-                "diarization": None,
+                "diarization": "pyannote_onnx" if diarization_required else None,
             },
             "runtime": {"service": "whisper_cpp", "device": "vulkan"},
             "alignment": {
@@ -1097,11 +1129,11 @@ def convert_vulkan_whisper_result(
                 "timed_word_coverage": 1.0,
             },
             "diarization_status": {
-                "status": "disabled",
-                "mode": DIARIZATION_NONE,
-                "model": None,
+                "status": "pass" if diarization_required else "disabled",
+                "mode": config.diarization_mode,
+                "model": "pyannote_onnx" if diarization_required else None,
                 "exclusive": False,
-                "turn_count": len(diarization),
+                "turn_count": len(transcript_diarization),
             },
         },
     }
@@ -1142,7 +1174,14 @@ def validate_transcript(
         raise TranscriptContractError("invalid WhisperX diarization mode")
     if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER} and diarization_mode != DIARIZATION_PROVIDER:
         raise TranscriptContractError(f"invalid {provider} diarization mode")
-    if provider == VULKAN_WHISPER_TRANSCRIPTION_PROVIDER and diarization_mode != DIARIZATION_NONE:
+    if provider == VULKAN_WHISPER_TRANSCRIPTION_PROVIDER and diarization_mode not in {
+        DIARIZATION_NONE,
+        "none",
+        DIARIZATION_COMMUNITY_1,
+        "community-1",
+        "directml",
+        "pyannote_directml",
+    }:
         raise TranscriptContractError(f"invalid {provider} diarization mode")
 
     words = transcript.get("words")
@@ -1386,6 +1425,13 @@ def validate_normative_transcript(
             or alignment.get("timed_word_coverage") != 1.0
         ):
             raise TranscriptContractError("Vulkan Whisper word timestamp binding is invalid")
+        if config.get("diarization_mode") not in {DIARIZATION_NONE, "none"}:
+            if not isinstance(diarization_status, Mapping) or (
+                diarization_status.get("status") != "pass"
+                or diarization_status.get("model") != "pyannote_onnx"
+                or diarization_status.get("turn_count") != len(transcript["diarization"])
+            ):
+                raise TranscriptContractError("Vulkan Whisper diarization binding is invalid")
         return
 
     diarization_mode = config.get("diarization_mode")

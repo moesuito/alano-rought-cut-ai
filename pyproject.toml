@@ -7,10 +7,14 @@ requires-python = ">=3.10"
 dependencies = [
     "requests",
     "pillow",
-    "numpy",
+    "numpy<2.0",
     "torch",
     "torchaudio",
     "deepfilternet",
+    "onnxruntime-directml",
+    "scipy<1.13",
+    "scikit-learn<1.5",
+    "huggingface-hub",
 ]
 
 [build-system]
