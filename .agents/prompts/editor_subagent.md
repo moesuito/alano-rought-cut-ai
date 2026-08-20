@@ -20,10 +20,18 @@ INPUTS:
 
 RULES:
   - Start/end times must fall on word boundaries from the transcript.
-  - If cutting inside a phrase, inspect canonical provider JSON and snap to exact word timestamps (forced alignment when the provider is WhisperX).
+  - If cutting inside a phrase, inspect canonical provider JSON and snap to exact word timestamps (forced alignment when the provider is WhisperX / Wav2Vec2).
   - Pad cut boundaries within the 30-200ms working window.
-  - Every lexical gap strictly greater than 300ms inside one selected range will be split automatically into a jump cut. Exactly 300ms is retained; there is no warning band.
-  - If a pause above 300ms is intentionally essential, emit an exact per-gap `boundary_constraints.preserve_internal_silences` entry with both canonical consecutive word indices/text and a non-empty editorial reason. Never use a wildcard override.
+  - Audio Gap Rules by Video Type:
+    * Short-form Content (TikTok, Instagram Reels, YouTube Shorts):
+      - Standard audio gap threshold is 200ms for rapid-fire pacing.
+      - The list filter is disabled: enumerations are cut with the fast 200ms gap.
+      - Content must be concise, summarized, and strictly fit within 90 seconds (typically 30-90s).
+    * Long-form Content (Videoaulas, Tutorials, YouTube, Educational):
+      - Standard audio gap threshold is 350ms.
+      - Lists / enumerations use 500ms threshold (`"is_list": true`) to preserve natural breathing and cadence.
+  - Every lexical gap strictly greater than the threshold inside one selected range will be split automatically into a jump cut. Exactly the threshold is retained; there is no warning band.
+  - If a pause above the threshold is intentionally essential, emit an exact per-gap `boundary_constraints.preserve_internal_silences` entry with both canonical consecutive word indices/text and a non-empty editorial reason. Never use a wildcard override.
   - Gaps <150ms are unsafe unless there is a strong editorial reason.
   - Identify retakes by meaning, not exact wording. Speakers often repeat ideas with different phrasing.
   - The latest take is often, but not always, the best. Compare clarity, confidence, concision, energy, and continuity.

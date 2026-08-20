@@ -24,7 +24,9 @@ Common mistakes:
 - keeping source order when a later hook belongs first;
 - cutting pauses that create emphasis.
 
-Target runtime guidance:
-- usually 30-90s, but let the material decide.
+Target runtime & pacing guidance:
+- Standard audio gap threshold is 200ms for fast-paced, high-retention social content.
+- The 500ms list preservation filter is disabled for social content; lists and enumerations are cut with the fast 200ms gap.
+- Maximum duration is strictly <= 90s (usually 30-90s). Summarize and keep only essential points.
 
 Do not force all beats if the material does not support them.

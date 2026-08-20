@@ -11,8 +11,10 @@ from typing import Any
 
 INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS = Decimal("0.350")
 INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS = Decimal("0.500")
+INTERNAL_SILENCE_SHORT_FORM_THRESHOLD_SECONDS = Decimal("0.200")
 INTERNAL_SILENCE_SPLIT_POLICY = "lexical_gap_strictly_gt_350ms_v1"
 INTERNAL_SILENCE_OVERRIDE_FIELD = "preserve_internal_silences"
+SHORT_FORM_VIDEO_TYPES = {"reels", "tiktok", "shorts", "social_talking_head", "short", "social"}
 
 
 def decimal_timestamp(value: Any, label: str) -> Decimal:
@@ -197,13 +199,22 @@ def evaluate_internal_silence_contract(
     last_word_index: int,
 ) -> list[dict[str, Any]]:
     """Evaluate gaps plus precise, reasoned per-gap preservation overrides."""
-    threshold = INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS
-    if (
-        range_data.get("is_list")
-        or range_data.get("is_enumeration")
-        or (isinstance(range_data.get("boundary_constraints"), dict) and range_data["boundary_constraints"].get("is_list"))
-    ):
-        threshold = INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS
+    is_short = (
+        range_data.get("is_short_form")
+        or str(range_data.get("video_type", "")).lower() in SHORT_FORM_VIDEO_TYPES
+        or (isinstance(range_data.get("metadata"), dict) and str(range_data["metadata"].get("video_type", "")).lower() in SHORT_FORM_VIDEO_TYPES)
+    )
+
+    if is_short:
+        threshold = INTERNAL_SILENCE_SHORT_FORM_THRESHOLD_SECONDS
+    else:
+        threshold = INTERNAL_SILENCE_SPLIT_THRESHOLD_SECONDS
+        if (
+            range_data.get("is_list")
+            or range_data.get("is_enumeration")
+            or (isinstance(range_data.get("boundary_constraints"), dict) and range_data["boundary_constraints"].get("is_list"))
+        ):
+            threshold = INTERNAL_SILENCE_LIST_SPLIT_THRESHOLD_SECONDS
 
     custom_max = range_data.get("max_gap_seconds")
     if custom_max is None and isinstance(range_data.get("boundary_constraints"), dict):

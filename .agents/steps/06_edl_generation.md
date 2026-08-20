@@ -26,12 +26,18 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Do not over-tighten.
 - Use word boundaries for all cut edges.
 - Use canonical provider JSON for exact word timestamps when trimming inside packed phrases; WhisperX timestamps are forced-aligned.
-- Every lexical gap strictly greater than 350ms inside a standard selected range is a mandatory jump cut. Step 07 enforces this deterministically from canonical provider word timestamps.
-- For lists and enumerations (e.g. sequence of items, features, products), pauses up to 500ms represent natural cadence and must NOT be chopped into micro-cuts. Mark the range with `"is_list": true` or `"max_gap_seconds": 0.500`.
-- A gap of exactly 350ms (or 500ms in lists) remains untouched. There is no warning band.
+- **Gap & Pacing Rules by Video Archetype**:
+  - **Short-form Content (TikTok, Instagram Reels, YouTube Shorts, etc.)**:
+    - Standard audio gap threshold is **200ms** (`0.200s`). Every pause > 200ms is cut dynamically to ensure snappy, high-retention pacing.
+    - The list filter is disabled for short-form: enumerations and lists are cut with the fast 200ms gap.
+    - Content must be concise, summarized, and strictly fit within **90 seconds** (typically 30-90s).
+  - **Long-form Content (Videoaulas, Tutorials, YouTube, Educational)**:
+    - Standard audio gap threshold is **350ms** (`0.350s`).
+    - For lists and enumerations (e.g. sequence of items, features, products), pauses up to **500ms** represent natural cadence and must NOT be chopped into micro-cuts. Mark the range with `"is_list": true` or `"max_gap_seconds": 0.500`.
+- A gap of exactly 200ms (short-form) or 350ms/500ms (long-form) remains untouched. There is no warning band.
 - Treat gaps < 150ms as unsafe unless there is a strong editorial reason.
 - When a speaker handoff genuinely needs 400-600ms of air, preserve that exact gap through the reasoned per-gap override below.
-- Preserve an intentional gap over 350ms (or over 500ms in lists) only with a per-gap `boundary_constraints.preserve_internal_silences` entry containing the exact consecutive canonical word indices/text and a non-empty editorial reason. Wildcard range overrides are forbidden.
+- Preserve an intentional gap over the threshold only with a per-gap `boundary_constraints.preserve_internal_silences` entry containing the exact consecutive canonical word indices/text and a non-empty editorial reason. Wildcard range overrides are forbidden.
 
 ## Retake And Semantic Repair
 
