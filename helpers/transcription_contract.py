@@ -25,12 +25,14 @@ TRANSCRIPT_SCHEMA_VERSION = 2
 WHISPERX_TRANSCRIPTION_PROVIDER = "whisperx_faster_whisper"
 ELEVENLABS_TRANSCRIPTION_PROVIDER = "elevenlabs_scribe"
 ASSEMBLYAI_TRANSCRIPTION_PROVIDER = "assemblyai_best"
+VULKAN_WHISPER_TRANSCRIPTION_PROVIDER = "whisper_vulkan_large"
 # Backward-compatible public name used throughout the local-provider tests.
 TRANSCRIPTION_PROVIDER = WHISPERX_TRANSCRIPTION_PROVIDER
 SUPPORTED_TRANSCRIPTION_PROVIDERS = {
     WHISPERX_TRANSCRIPTION_PROVIDER,
     ELEVENLABS_TRANSCRIPTION_PROVIDER,
     ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
+    VULKAN_WHISPER_TRANSCRIPTION_PROVIDER,
 }
 DIARIZATION_COMMUNITY_1 = "community-1"
 DIARIZATION_NONE = "none"
@@ -233,6 +235,31 @@ class AssemblyAIConfig:
         return config_hash(self)
 
 
+@dataclass(frozen=True, slots=True)
+class VulkanWhisperConfig:
+    """Output-affecting Vulkan Whisper settings; credentials are intentionally absent."""
+
+    model: str = "large-v3-turbo"
+    language: str | None = "pt"
+    device: str = "vulkan"
+    diarization_mode: str = DIARIZATION_NONE
+
+    def __post_init__(self) -> None:
+        if self.device != "vulkan":
+            raise TranscriptContractError("VulkanWhisperConfig device must be 'vulkan'")
+        if self.diarization_mode not in {DIARIZATION_NONE, "none"}:
+            raise TranscriptContractError(
+                "Vulkan Whisper does not currently support multi-speaker diarization"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return config_hash(self)
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         encoded = json.dumps(
@@ -248,13 +275,13 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 
 def config_hash(
-    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | Mapping[str, Any],
+    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig | Mapping[str, Any],
 ) -> str:
     """Return the deterministic SHA-256 of a runtime configuration."""
 
     value = (
         config.to_dict()
-        if isinstance(config, (WhisperXConfig, ElevenLabsConfig, AssemblyAIConfig))
+        if isinstance(config, (WhisperXConfig, ElevenLabsConfig, AssemblyAIConfig, VulkanWhisperConfig))
         else dict(config)
     )
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
@@ -940,6 +967,148 @@ def convert_assemblyai_result(
     return transcript
 
 
+def convert_vulkan_whisper_result(
+    result: Mapping[str, Any] | list[dict[str, Any]],
+    *,
+    config: VulkanWhisperConfig,
+    source_path: str | os.PathLike[str] | None = None,
+    source_sha256: str | None = None,
+    max_overlap_seconds: float = 0.25,
+) -> dict[str, Any]:
+    """Normalize whisper.cpp Vulkan tokens or parsed word records into schema v2."""
+
+    if isinstance(result, list):
+        raw_words = result
+        full_text = " ".join(str(w.get("text", "")).strip() for w in raw_words)
+        language_code = config.language or "pt"
+    elif isinstance(result, Mapping):
+        try:
+            from helpers.vulkan_runtime import parse_whisper_cpp_tokens_to_words
+        except ModuleNotFoundError:
+            try:
+                from vulkan_runtime import parse_whisper_cpp_tokens_to_words
+            except ModuleNotFoundError:
+                parse_whisper_cpp_tokens_to_words = lambda d: []
+        raw_words = parse_whisper_cpp_tokens_to_words(dict(result))
+        full_text = " ".join(
+            str(segment.get("text") or "").strip()
+            for segment in result.get("transcription", [])
+            if isinstance(segment, Mapping) and str(segment.get("text") or "").strip()
+        )
+        language_code = (
+            result.get("result", {}).get("language")
+            if isinstance(result.get("result"), Mapping)
+            else config.language or "pt"
+        )
+    else:
+        raise TranscriptContractError("Vulkan Whisper result must be a list or mapping")
+
+    resolved_source_hash = _resolve_source_hash(source_path, source_sha256)
+    words: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_words):
+        if not isinstance(item, Mapping):
+            raise TranscriptContractError(f"words[{index}] must be a record")
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        start = float(item.get("start", 0))
+        end = float(item.get("end", 0))
+        start, end = _validate_interval(start, end, f"words[{index}]")
+        score = item.get("score")
+        if score is not None:
+            score = float(score)
+        words.append(
+            {
+                "text": text,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "type": "word",
+                "speaker_id": None,
+                "speaker_assignment": "disabled",
+                "score": score if score is not None else 1.0,
+                "timing_source": "provider_word_timestamp",
+            }
+        )
+    if not words:
+        raise TranscriptContractError("Vulkan Whisper result contains no timed lexical words")
+    _validate_word_order(words, max_overlap_seconds=max_overlap_seconds, field="words")
+
+    segments: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    for word in words:
+        if current and (word["start"] - current[-1]["end"] >= 0.5):
+            segments.append(
+                {
+                    "id": len(segments),
+                    "start": current[0]["start"],
+                    "end": current[-1]["end"],
+                    "text": " ".join(item["text"] for item in current),
+                    "speaker_id": None,
+                    "words": [item.copy() for item in current],
+                }
+            )
+            current = []
+        current.append(word)
+    if current:
+        segments.append(
+            {
+                "id": len(segments),
+                "start": current[0]["start"],
+                "end": current[-1]["end"],
+                "text": " ".join(item["text"] for item in current),
+                "speaker_id": None,
+                "words": [item.copy() for item in current],
+            }
+        )
+
+    diarization: list[dict[str, Any]] = []
+
+    transcript: dict[str, Any] = {
+        "text": full_text or " ".join(w["text"] for w in words),
+        "language_code": language_code,
+        "words": words,
+        "segments": segments,
+        "diarization": diarization,
+        "_alano_cut": {
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+            "transcription_provider": VULKAN_WHISPER_TRANSCRIPTION_PROVIDER,
+            "source_sha256": resolved_source_hash,
+            "config": config.to_dict(),
+            "config_sha256": config.sha256,
+            "word_count": len(words),
+            "timed_word_count": len(words),
+            "timed_word_coverage": 1.0,
+            "models": {
+                "asr": config.model,
+                "semantic_verifier": None,
+                "alignment": "whisper_cpp",
+                "diarization": None,
+            },
+            "model_revisions": {
+                "asr": config.model,
+                "semantic_verifier": None,
+                "alignment": "whisper_cpp",
+                "diarization": None,
+            },
+            "runtime": {"service": "whisper_cpp", "device": "vulkan"},
+            "alignment": {
+                "status": "pass",
+                "mode": "provider_word_timestamps",
+                "timed_word_coverage": 1.0,
+            },
+            "diarization_status": {
+                "status": "disabled",
+                "mode": DIARIZATION_NONE,
+                "model": None,
+                "exclusive": False,
+                "turn_count": len(diarization),
+            },
+        },
+    }
+    validate_transcript(transcript, max_overlap_seconds=max_overlap_seconds)
+    return transcript
+
+
 def validate_transcript(
     transcript: Mapping[str, Any],
     *,
@@ -973,6 +1142,8 @@ def validate_transcript(
         raise TranscriptContractError("invalid WhisperX diarization mode")
     if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER} and diarization_mode != DIARIZATION_PROVIDER:
         raise TranscriptContractError(f"invalid {provider} diarization mode")
+    if provider == VULKAN_WHISPER_TRANSCRIPTION_PROVIDER and diarization_mode != DIARIZATION_NONE:
+        raise TranscriptContractError(f"invalid {provider} diarization mode")
 
     words = transcript.get("words")
     if not isinstance(words, list) or not words:
@@ -994,7 +1165,7 @@ def validate_transcript(
             word.get("timing_source")
         ).startswith("forced_alignment"):
             raise TranscriptContractError(f"words[{index}] is not forced-aligned")
-        if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER} and (
+        if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER, VULKAN_WHISPER_TRANSCRIPTION_PROVIDER} and (
             word.get("timing_source") != "provider_word_timestamp"
         ):
             raise TranscriptContractError(
@@ -1202,6 +1373,19 @@ def validate_normative_transcript(
             or diarization_status.get("turn_count") != len(transcript["diarization"])
         ):
             raise TranscriptContractError("AssemblyAI diarization binding is invalid")
+        return
+
+    if metadata.get("transcription_provider") == VULKAN_WHISPER_TRANSCRIPTION_PROVIDER:
+        if not isinstance(runtime, Mapping) or (
+            runtime.get("service") != "whisper_cpp" or runtime.get("device") != "vulkan"
+        ):
+            raise TranscriptContractError("Vulkan Whisper service binding is invalid")
+        if not isinstance(alignment, Mapping) or (
+            alignment.get("status") != "pass"
+            or alignment.get("mode") != "provider_word_timestamps"
+            or alignment.get("timed_word_coverage") != 1.0
+        ):
+            raise TranscriptContractError("Vulkan Whisper word timestamp binding is invalid")
         return
 
     diarization_mode = config.get("diarization_mode")
@@ -1441,7 +1625,7 @@ def is_cache_valid(
     cache: Mapping[str, Any] | str | os.PathLike[str],
     *,
     source_sha256: str,
-    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig,
+    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig,
 ) -> bool:
     """Return true for a strict or scopeable-provisional bound cache."""
 
@@ -1461,8 +1645,10 @@ def is_cache_valid(
             expected_provider = WHISPERX_TRANSCRIPTION_PROVIDER
         elif isinstance(config, ElevenLabsConfig):
             expected_provider = ELEVENLABS_TRANSCRIPTION_PROVIDER
-        else:
+        elif isinstance(config, AssemblyAIConfig):
             expected_provider = ASSEMBLYAI_TRANSCRIPTION_PROVIDER
+        else:
+            expected_provider = VULKAN_WHISPER_TRANSCRIPTION_PROVIDER
         if metadata.get("transcription_provider") != expected_provider:
             return False
         if metadata.get("source_sha256") != source_sha256.lower():
@@ -1541,6 +1727,9 @@ __all__ = [
     "ASSEMBLYAI_TRANSCRIPTION_PROVIDER",
     "AssemblyAIConfig",
     "convert_assemblyai_result",
+    "VULKAN_WHISPER_TRANSCRIPTION_PROVIDER",
+    "VulkanWhisperConfig",
+    "convert_vulkan_whisper_result",
     "ELEVENLABS_TRANSCRIPTION_PROVIDER",
     "TRANSCRIPT_SCHEMA_VERSION",
     "TRANSCRIPTION_PROVIDER",

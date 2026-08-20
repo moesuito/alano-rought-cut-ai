@@ -18,6 +18,7 @@ try:
         WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
+        VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
@@ -35,6 +36,7 @@ except ModuleNotFoundError as exc:
         WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
+        VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
@@ -86,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-dir", type=Path, default=None)
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "assemblyai"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "whisper-vulkan"),
         default="configured",
     )
     parser.add_argument("--language", default="pt")
@@ -150,7 +152,7 @@ def main() -> int:
                 args.diarization
                 or (settings.diarization if settings else DIARIZATION_COMMUNITY_1)
             )
-            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(
+            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig = WhisperXConfig(
                 model=args.model,
                 language=language,
                 compute_type=args.compute_type,
@@ -179,6 +181,8 @@ def main() -> int:
             config = ElevenLabsConfig(language=language)
         elif provider == "assemblyai":
             config = AssemblyAIConfig(language_code=language or "pt")
+        elif provider in {"whisper-vulkan", "vulkan"}:
+            config = VulkanWhisperConfig(language=language or "pt")
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
     except Exception as error:

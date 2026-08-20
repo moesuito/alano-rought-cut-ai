@@ -30,10 +30,12 @@ try:
         WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
+        VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
         convert_elevenlabs_result,
         convert_assemblyai_result,
+        convert_vulkan_whisper_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -47,6 +49,7 @@ try:
     from helpers.transcription_settings import (
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
+        PROVIDER_VULKAN,
         PROVIDER_WHISPERX,
         resolve_settings,
     )
@@ -63,10 +66,12 @@ except ModuleNotFoundError as exc:
         WhisperXConfig,
         ElevenLabsConfig,
         AssemblyAIConfig,
+        VulkanWhisperConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
         convert_elevenlabs_result,
         convert_assemblyai_result,
+        convert_vulkan_whisper_result,
         is_cache_valid,
         sha256_file,
         validate_provisional_normative_transcript,
@@ -80,6 +85,7 @@ except ModuleNotFoundError as exc:
     from transcription_settings import (  # type: ignore[no-redef]
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
+        PROVIDER_VULKAN,
         PROVIDER_WHISPERX,
         resolve_settings,
     )
@@ -303,6 +309,35 @@ def _assemblyai_transcript(
     )
 
 
+def _vulkan_transcript(
+    source: Path,
+    *,
+    language: str | None,
+    config: VulkanWhisperConfig,
+) -> dict[str, Any]:
+    try:
+        from helpers.vulkan_runtime import transcribe_raw_audio
+    except ModuleNotFoundError:
+        try:
+            from vulkan_runtime import transcribe_raw_audio
+        except ModuleNotFoundError:
+            raise RuntimeError("Vulkan runtime helper not found")
+
+    with tempfile.TemporaryDirectory(prefix="alano_cut_vulkan_") as temp_dir:
+        audio = Path(temp_dir) / f"{source.stem}.wav"
+        extract_audio(source, audio, denoise=True)
+        raw_json = transcribe_raw_audio(
+            audio,
+            language=language or "pt",
+            model_name=config.model,
+        )
+    return convert_vulkan_whisper_result(
+        raw_json,
+        config=config,
+        source_sha256=sha256_file(source),
+    )
+
+
 def transcribe_one(
     video: Path,
     edit_dir: Path,
@@ -397,6 +432,16 @@ def transcribe_one(
             if verbose:
                 print(f"cached: {output.name} (source + AssemblyAI config match)")
             return output
+    elif provider in {"whisper-vulkan", "vulkan"}:
+        effective_config = config or VulkanWhisperConfig(language=language or "pt")
+        if not isinstance(effective_config, VulkanWhisperConfig):
+            raise ValueError("Vulkan Whisper provider requires VulkanWhisperConfig")
+        if output.exists() and not force and is_cache_valid(
+            output, source_sha256=source_hash, config=effective_config
+        ):
+            if verbose:
+                print(f"cached: {output.name} (source + Vulkan config match)")
+            return output
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
 
@@ -429,13 +474,19 @@ def transcribe_one(
             num_speakers=num_speakers,
             config=effective_config,
         )
+    elif provider in {"whisper-vulkan", "vulkan"}:
+        payload = _vulkan_transcript(
+            source,
+            language=language,
+            config=effective_config,
+        )
     else:
         raise ValueError(f"unsupported transcription provider: {provider}")
     ensure_no_secret_fields(payload)
     write_json_atomic(output, payload)
 
     pending_acoustic: list[dict[str, Any]] = []
-    if provider in {"whisperx", "elevenlabs", "assemblyai"}:
+    if provider in {"whisperx", "elevenlabs", "assemblyai", "whisper-vulkan", "vulkan"}:
         try:
             pending_acoustic = validate_provisional_normative_transcript(payload)
         except TranscriptContractError as error:
@@ -485,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "assemblyai"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "whisper-vulkan"),
         default="configured",
         help="Workspace provider by default, or an explicit audited override",
     )
@@ -547,7 +598,7 @@ def main() -> int:
                 args.diarization
                 or (resolved_settings.diarization if resolved_settings else DIARIZATION_COMMUNITY_1)
             )
-            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(
+            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig = WhisperXConfig(
                 model=args.model,
                 language=language,
                 compute_type=args.compute_type,
@@ -576,6 +627,8 @@ def main() -> int:
             config = ElevenLabsConfig(language=language)
         elif provider == PROVIDER_ASSEMBLYAI:
             config = AssemblyAIConfig(language_code=language or "pt")
+        elif provider in {PROVIDER_VULKAN, "vulkan"}:
+            config = VulkanWhisperConfig(language=language or "pt")
         else:
             raise ValueError(f"unsupported transcription provider: {provider}")
         transcribe_one(

@@ -26,6 +26,7 @@ try:
         DIARIZATION_NONE,
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
+        PROVIDER_VULKAN,
         PROVIDER_WHISPERX,
         SettingsError,
         TranscriptionSettings,
@@ -36,6 +37,7 @@ try:
         write_settings_atomic,
     )
     from helpers.whisperx_runtime import RuntimeContractError, locate_runtime_python
+    from helpers.gpu_detection import detect_recommended_runtime
 except ModuleNotFoundError as exc:
     if exc.name != "helpers":
         raise
@@ -44,6 +46,7 @@ except ModuleNotFoundError as exc:
         DIARIZATION_NONE,
         PROVIDER_ASSEMBLYAI,
         PROVIDER_ELEVENLABS,
+        PROVIDER_VULKAN,
         PROVIDER_WHISPERX,
         SettingsError,
         TranscriptionSettings,
@@ -54,6 +57,7 @@ except ModuleNotFoundError as exc:
         write_settings_atomic,
     )
     from whisperx_runtime import RuntimeContractError, locate_runtime_python  # type: ignore[no-redef]
+    from gpu_detection import detect_recommended_runtime  # type: ignore[no-redef]
 
 
 MODEL_PAGE = "https://huggingface.co/pyannote/speaker-diarization-community-1"
@@ -283,6 +287,20 @@ def provision(settings: TranscriptionSettings, *, non_interactive: bool) -> None
         _set_env_value("ASSEMBLYAI_API_KEY", key)
         return
 
+    if settings.provider == PROVIDER_VULKAN:
+        print("\nConfigurando runtime Whisper Large Vulkan compartilhado...")
+        try:
+            from helpers.vulkan_runtime import setup as setup_vulkan
+        except ModuleNotFoundError:
+            try:
+                from vulkan_runtime import setup as setup_vulkan
+            except ModuleNotFoundError:
+                raise WizardError("Vulkan runtime helper not found")
+        res = setup_vulkan()
+        if res.get("status") != "pass":
+            raise WizardError(f"Falha na configuração do runtime Vulkan: {res}")
+        return
+
     print(
         "O perfil WhisperX local reserva aproximadamente 16 GiB entre runtime e modelos "
         "(18 GiB livres recomendados). Ele opera somente em CUDA; não há fallback em CPU."
@@ -330,6 +348,15 @@ def doctor(settings: TranscriptionSettings) -> dict[str, object]:
             "provider": settings.provider,
             "checks": {"assemblyai_api_key": bool(_read_env_value("ASSEMBLYAI_API_KEY"))},
         }
+    if settings.provider == PROVIDER_VULKAN:
+        try:
+            from helpers.vulkan_runtime import doctor as doctor_vulkan
+        except ModuleNotFoundError:
+            try:
+                from vulkan_runtime import doctor as doctor_vulkan
+            except ModuleNotFoundError:
+                return {"status": "unhealthy", "provider": settings.provider, "error": "helper missing"}
+        return doctor_vulkan()
     runtime = _helper_path("whisperx_runtime.py")
     models = _helper_path("transcription_models.py")
     runtime_result = subprocess.run([sys.executable, str(runtime), "doctor"], check=False)
@@ -358,33 +385,46 @@ def select_settings(
     if provider:
         selected_provider = provider
     else:
-        default_provider = default.provider if default else PROVIDER_WHISPERX
-        default_index = 0 if default_provider == PROVIDER_WHISPERX else (1 if default_provider == PROVIDER_ELEVENLABS else 2)
+        hw_info = detect_recommended_runtime()
+        rec = hw_info.get("recommended_runtime", "cuda")
+        if default:
+            default_provider = default.provider
+        else:
+            default_provider = PROVIDER_WHISPERX if rec == "cuda" else PROVIDER_VULKAN
+
+        provider_map = [
+            PROVIDER_WHISPERX,
+            PROVIDER_VULKAN,
+            PROVIDER_ASSEMBLYAI,
+            PROVIDER_ELEVENLABS,
+        ]
+        default_index = provider_map.index(default_provider) if default_provider in provider_map else 0
+
         choice_idx = choose(
             "Qual provider de transcrição deseja utilizar?",
             [
                 (
-                    "WhisperX local — Recomendado",
-                    "Executa em NVIDIA CUDA; não consome API externa.",
+                    f"WhisperX local (CUDA){' — Recomendado (NVIDIA detectada)' if rec == 'cuda' else ''}",
+                    "Executa em NVIDIA CUDA com forced alignment e Pyannote.",
                 ),
                 (
-                    "ElevenLabs Scribe",
-                    "Usa sua API Key e o consumo da sua conta ElevenLabs.",
+                    f"Whisper Large Vulkan (Local){' — Recomendado (GPU AMD/Intel detectada)' if rec == 'vulkan' else ''}",
+                    "Executa acelerado por GPU via Vulkan em AMD Radeon, Intel Arc/Iris, etc.",
                 ),
                 (
                     "AssemblyAI (Cloud)",
-                    "Usa sua API Key e o modelo Best da AssemblyAI.",
+                    "Usa sua API Key e o modelo Best da AssemblyAI via nuvem.",
+                ),
+                (
+                    "ElevenLabs Scribe (Cloud)",
+                    "Usa sua API Key e o consumo da sua conta ElevenLabs.",
                 ),
             ],
             default=default_index,
             non_interactive=non_interactive,
         )
-        if choice_idx == 0:
-            selected_provider = PROVIDER_WHISPERX
-        elif choice_idx == 1:
-            selected_provider = PROVIDER_ELEVENLABS
-        else:
-            selected_provider = PROVIDER_ASSEMBLYAI
+        selected_provider = provider_map[choice_idx]
+
     if selected_provider == PROVIDER_ELEVENLABS:
         if diarization is not None:
             raise WizardError("--diarization só pode ser usado com o provider whisperx")
@@ -395,6 +435,12 @@ def select_settings(
         if diarization is not None:
             raise WizardError("--diarization só pode ser usado com o provider whisperx")
         return TranscriptionSettings.assemblyai(
+            language=default.language if default else "pt"
+        )
+    if selected_provider == PROVIDER_VULKAN:
+        if diarization is not None:
+            raise WizardError("--diarization só pode ser usado com o provider whisperx")
+        return TranscriptionSettings.vulkan(
             language=default.language if default else "pt"
         )
     if selected_provider != PROVIDER_WHISPERX:
@@ -481,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("command", choices=("install", "configure", "init", "setup", "doctor", "migrate"))
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--settings-output", type=Path, default=None)
-    parser.add_argument("--provider", choices=(PROVIDER_WHISPERX, PROVIDER_ELEVENLABS, PROVIDER_ASSEMBLYAI))
+    parser.add_argument("--provider", choices=(PROVIDER_WHISPERX, PROVIDER_VULKAN, PROVIDER_ELEVENLABS, PROVIDER_ASSEMBLYAI))
     parser.add_argument("--diarization", choices=(DIARIZATION_COMMUNITY_1, DIARIZATION_NONE))
     parser.add_argument("--non-interactive", action="store_true")
     return parser

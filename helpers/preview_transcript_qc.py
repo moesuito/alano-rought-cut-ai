@@ -43,17 +43,21 @@ from helpers.transcription_contract import (
     DEFAULT_DIARIZATION_MODEL_REVISION,
     DIARIZATION_COMMUNITY_1,
     ELEVENLABS_TRANSCRIPTION_PROVIDER,
+    VULKAN_WHISPER_TRANSCRIPTION_PROVIDER,
     AssemblyAIConfig,
     ElevenLabsConfig,
+    VulkanWhisperConfig,
     WHISPERX_TRANSCRIPTION_PROVIDER,
     WhisperXConfig,
     convert_assemblyai_result,
     convert_elevenlabs_result,
+    convert_vulkan_whisper_result,
     sha256_file,
 )
 from helpers.transcription_settings import (
     PROVIDER_ASSEMBLYAI,
     PROVIDER_ELEVENLABS,
+    PROVIDER_VULKAN,
     PROVIDER_WHISPERX,
     resolve_settings,
 )
@@ -321,6 +325,42 @@ class AssemblyAITranscriptProvider(TranscriptProvider):
         )
 
 
+class VulkanWhisperTranscriptProvider(TranscriptProvider):
+    def __init__(self, config: VulkanWhisperConfig | None = None):
+        self.config = config or VulkanWhisperConfig()
+
+    def transcribe(self, audio_path: Path) -> dict[str, Any]:
+        try:
+            from helpers.vulkan_runtime import transcribe_raw_audio
+        except ModuleNotFoundError:
+            try:
+                from vulkan_runtime import transcribe_raw_audio
+            except ModuleNotFoundError:
+                raise RuntimeError("Vulkan runtime helper not found")
+
+        with tempfile.TemporaryDirectory(prefix="alano_cut_preview_vulkan_") as temp_dir:
+            input_wav = Path(temp_dir) / "preview_16k_mono.wav"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(audio_path), "-ar", "16000", "-ac", "1",
+                    "-c:a", "pcm_s16le", str(input_wav),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            raw_json = transcribe_raw_audio(
+                input_wav,
+                language=self.config.language or "pt",
+                model_name=self.config.model,
+            )
+        return convert_vulkan_whisper_result(
+            raw_json,
+            config=self.config,
+            source_sha256=sha256_file(audio_path),
+        )
+
+
 class WhisperXTranscriptProvider(TranscriptProvider):
     """Normative local CUDA provider with forced alignment and diarization."""
 
@@ -348,7 +388,7 @@ class MockTranscriptProvider(TranscriptProvider):
 def load_source_transcription_profile(
     edl_data: dict[str, Any],
     transcripts_dir: Path,
-) -> tuple[str, WhisperXConfig | ElevenLabsConfig]:
+) -> tuple[str, WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig]:
     """Load the single canonical provider/configuration used by EDL sources.
 
     A preview transcript is only comparable with source-selected words when it
@@ -362,7 +402,7 @@ def load_source_transcription_profile(
     if not isinstance(sources, dict) or not sources:
         raise ValueError("EDL sources must be a non-empty object")
 
-    profiles: dict[tuple[str, str], WhisperXConfig | ElevenLabsConfig] = {}
+    profiles: dict[tuple[str, str], WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig] = {}
     for source_id in sorted(sources):
         source_path = transcripts_dir / f"{source_id}.json"
         try:
@@ -386,11 +426,13 @@ def load_source_transcription_profile(
             )
         try:
             if provider == WHISPERX_TRANSCRIPTION_PROVIDER:
-                config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(**config_data)
+                config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | VulkanWhisperConfig = WhisperXConfig(**config_data)
             elif provider == ELEVENLABS_TRANSCRIPTION_PROVIDER:
                 config = ElevenLabsConfig(**config_data)
             elif provider == ASSEMBLYAI_TRANSCRIPTION_PROVIDER:
                 config = AssemblyAIConfig(**config_data)
+            elif provider == VULKAN_WHISPER_TRANSCRIPTION_PROVIDER:
+                config = VulkanWhisperConfig(**config_data)
             else:
                 raise ValueError(f"unsupported provider {provider!r}")
         except (TypeError, ValueError) as exc:
@@ -1674,7 +1716,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "local-whisper", "auto"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai", "whisper-vulkan", "local-whisper", "auto"),
         default="configured",
         help=(
             "Workspace transcription backend by default. 'auto' remains a "
@@ -1777,7 +1819,11 @@ def main() -> None:
                         else (
                             ASSEMBLYAI_TRANSCRIPTION_PROVIDER
                             if effective_provider == PROVIDER_ASSEMBLYAI
-                            else None
+                            else (
+                                VULKAN_WHISPER_TRANSCRIPTION_PROVIDER
+                                if effective_provider in {PROVIDER_VULKAN, "whisper-vulkan", "vulkan"}
+                                else None
+                            )
                         )
                     )
                 )
@@ -1814,6 +1860,12 @@ def main() -> None:
                         source_config
                         if isinstance(source_config, AssemblyAIConfig)
                         else AssemblyAIConfig(language_code=configured.language if configured else "pt")
+                    ).transcribe(wav_path)
+                elif effective_provider in {PROVIDER_VULKAN, "whisper-vulkan", "vulkan"}:
+                    transcript_data = VulkanWhisperTranscriptProvider(
+                        source_config
+                        if isinstance(source_config, VulkanWhisperConfig)
+                        else VulkanWhisperConfig(language=configured.language if configured else "pt")
                     ).transcribe(wav_path)
                 else:
                     if isinstance(source_config, WhisperXConfig):

@@ -24,10 +24,12 @@ INSTALL_DIR_NAME = "alano-rought-cut-ai"
 PROVIDER_WHISPERX = "whisperx"
 PROVIDER_ELEVENLABS = "elevenlabs"
 PROVIDER_ASSEMBLYAI = "assemblyai"
+PROVIDER_VULKAN = "whisper-vulkan"
 SUPPORTED_PROVIDERS = (
     PROVIDER_WHISPERX,
     PROVIDER_ELEVENLABS,
     PROVIDER_ASSEMBLYAI,
+    PROVIDER_VULKAN,
 )
 
 DIARIZATION_COMMUNITY_1 = "community-1"
@@ -68,6 +70,13 @@ class TranscriptionSettings:
                 raise SettingsError(
                     "WhisperX diarization must be 'community-1' or 'none'"
                 )
+        elif self.provider == PROVIDER_VULKAN:
+            if self.device != "vulkan":
+                raise SettingsError("Vulkan Whisper requires device='vulkan'")
+            if self.diarization != DIARIZATION_NONE:
+                raise SettingsError(
+                    "Vulkan Whisper does not currently support multi-speaker diarization"
+                )
         else:
             if self.diarization != DIARIZATION_PROVIDER:
                 raise SettingsError(f"{self.provider} must use provider diarization")
@@ -104,6 +113,15 @@ class TranscriptionSettings:
             language=language,
             device="cloud",
             diarization=DIARIZATION_PROVIDER,
+        )
+
+    @classmethod
+    def vulkan(cls, *, language: str = "pt") -> "TranscriptionSettings":
+        return cls(
+            provider=PROVIDER_VULKAN,
+            language=language,
+            device="vulkan",
+            diarization=DIARIZATION_NONE,
         )
 
     def to_dict(self) -> dict[str, str]:
@@ -237,6 +255,7 @@ __all__ = [
     "DIARIZATION_PROVIDER",
     "PROVIDER_ASSEMBLYAI",
     "PROVIDER_ELEVENLABS",
+    "PROVIDER_VULKAN",
     "PROVIDER_WHISPERX",
     "SETTINGS_SCHEMA_VERSION",
     "SUPPORTED_DIARIZATION",
