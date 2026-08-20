@@ -177,6 +177,6 @@ Write-Host "==========================================================" -Foregro
 Write-Host "          Installation Completed Successfully!            " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host " Please RESTART your terminal/IDE to load the PATH updates." -ForegroundColor Yellow
-Write-Host " To initialize a video editing project anywhere, run:" -ForegroundColor White
-Write-Host "   alanocut init" -ForegroundColor Cyan
+Write-Host " To edit your videos, open any folder with raw video clips and run:" -ForegroundColor White
+Write-Host "   alanocut" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Green

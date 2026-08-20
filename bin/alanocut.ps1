@@ -4,14 +4,14 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallRoot = Split-Path -Parent $ScriptDir
 
 function Show-Help {
-    Write-Host "Alano Rough Cut AI CLI - Command Line Utility" -ForegroundColor Green
+    Write-Host "Alano Rough Cut AI CLI - Command Line Utility (v0.5.0)" -ForegroundColor Green
     Write-Host "Usage:" -ForegroundColor White
-    Write-Host "  alanocut init        Initialize current directory as a video rough-cut workspace" -ForegroundColor White
-    Write-Host "  alanocut cut         Execute autonomous end-to-end rough cut (Mode 1)" -ForegroundColor White
-    Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
+    Write-Host "  alanocut             Launch Interactive Terminal UI in current folder (Default)" -ForegroundColor Cyan
+    Write-Host "  alanocut cut         Execute autonomous rough cut non-interactively" -ForegroundColor White
+    Write-Host "  alanocut clean       Clean AppData cache to free disk space" -ForegroundColor White
+    Write-Host "  alanocut sessions    List previous editing sessions saved in AppData" -ForegroundColor White
     Write-Host "  alanocut configure   Configure ElevenLabs, AssemblyAI, or local Whisper transcription" -ForegroundColor White
-    Write-Host "  alanocut setup-transcription   Repair the selected provider/runtime/models" -ForegroundColor White
-    Write-Host "  alanocut transcription-doctor  Verify the selected provider profile" -ForegroundColor White
+    Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
     Write-Host "  alanocut --help      Show this help message" -ForegroundColor White
     Write-Host ""
 }
@@ -334,6 +334,18 @@ elseif ($SubCommand -eq "cut") {
     & $PythonPath $OrchestratorPath @CutArgs
     exit $LASTEXITCODE
 }
+elseif ($SubCommand -eq "clean") {
+    $PythonPath = Get-AlanoPython
+    $CliPath = Join-Path $InstallRoot "helpers\interactive_cli.py"
+    & $PythonPath $CliPath "clean"
+    exit $LASTEXITCODE
+}
+elseif ($SubCommand -eq "sessions") {
+    $PythonPath = Get-AlanoPython
+    $CliPath = Join-Path $InstallRoot "helpers\interactive_cli.py"
+    & $PythonPath $CliPath "sessions"
+    exit $LASTEXITCODE
+}
 elseif ($SubCommand -eq "update") {
     $Updated = Update-System -Silent $false
     if ($Updated) {
@@ -353,8 +365,15 @@ elseif ($SubCommand -eq "transcription-doctor") {
     $WizardExit = Invoke-SetupWizard -WizardArguments @("doctor")
     exit $WizardExit
 }
-elseif ($SubCommand -eq "-h" -or $SubCommand -eq "--help" -or $SubCommand -eq "help" -or [string]::IsNullOrEmpty($SubCommand)) {
+elseif ($SubCommand -eq "-h" -or $SubCommand -eq "--help" -or $SubCommand -eq "help") {
     Show-Help
+}
+elseif ([string]::IsNullOrEmpty($SubCommand)) {
+    # Default behavior: Launch Interactive Terminal UI
+    $PythonPath = Get-AlanoPython
+    $CliPath = Join-Path $InstallRoot "helpers\interactive_cli.py"
+    & $PythonPath $CliPath
+    exit $LASTEXITCODE
 }
 else {
     Write-Host "Unknown command: $SubCommand" -ForegroundColor Red

@@ -8,7 +8,7 @@ Executes the entire end-to-end rough cut pipeline in a single automated flow:
 5. Acoustic Boundary Refinement (VAD + 66ms pre/post-roll padding + dynamic gaps)
 6. Audio Preview Render & Quality Control (Audio QC)
 7. Premiere FCP7 XML Timeline Export (timeline.xml)
-8. Run State & Memory Persistence
+8. Run State & Memory Persistence in AppData Session Cache
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +28,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from helpers.llm_client import generate_editorial_plan, get_llm_config, load_env_file
+from helpers.session_manager import (
+    SessionContext,
+    create_new_session,
+    export_deliverable,
+    get_global_transcripts_cache_dir,
+)
 from helpers.timing import format_fps_fraction, parse_fps_fraction
 
 
@@ -102,45 +108,51 @@ def run_autonomous_rough_cut(
     language: str = "pt",
     force_transcribe: bool = False,
     timeline_name: str | None = None,
+    output_xml_filename: str = "timeline.xml",
     llm_config: dict[str, str] | None = None,
+    progress_callback: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Execute the full autonomous rough cut pipeline."""
+    """Execute the full autonomous rough cut pipeline with clean AppData session caching."""
     load_env_file()
     raw_dir = raw_dir.resolve()
+
+    def update_progress(step: str, detail: str) -> None:
+        if progress_callback:
+            progress_callback(step, detail)
+
+    # Initialize Session Context in AppData (Zero folder pollution)
     if edit_dir is None:
-        edit_dir = raw_dir / "edit"
-    edit_dir = edit_dir.resolve()
+        session = create_new_session(working_dir=raw_dir, video_type=video_type, brief=brief)
+        active_edit_dir = session.edit_dir
+    else:
+        active_edit_dir = Path(edit_dir).resolve()
+        active_edit_dir.mkdir(parents=True, exist_ok=True)
+        session = SessionContext(
+            session_id=f"custom_{raw_dir.name}",
+            created_at=datetime.datetime.now().isoformat(),
+            working_dir=str(raw_dir),
+            session_dir=str(active_edit_dir.parent),
+            video_type=video_type,
+            brief=brief,
+        )
 
-    transcripts_dir = edit_dir / "transcripts"
+    transcripts_dir = active_edit_dir / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
-
-    print("\n" + "="*70)
-    print("🎬 ALANO ROUGH CUT AI — MOTOR AUTÔNOMO v0.5.0")
-    print("="*70)
-    print(f"📁 Diretório de Vídeos:   {raw_dir}")
-    print(f"📁 Diretório de Edição:   {edit_dir}")
-    print(f"🎯 Tipo de Conteúdo:      {video_type}")
-    print(f"📝 Briefing:              {brief or '(padrão: melhor take por beat)'}")
-    print("="*70 + "\n")
 
     # -------------------------------------------------------------
     # Step 01: Inventory
     # -------------------------------------------------------------
-    print("[1/8] 🔍 Inspecionando inventário de mídia...")
+    update_progress("1/7", "Inspecionando inventário de mídia...")
     inventory = scan_inventory(raw_dir)
-    print(f"  -> Encontrados {len(inventory)} arquivos de vídeo brutos:")
-    for item in inventory:
-        dur = item["meta"]["duration"]
-        fps = item["meta"]["fps"]
-        print(f"     • {item['filename']} ({dur:.1f}s, {fps} fps)")
+    session.source_files = inventory
+    session.save()
 
-    primary_fps = inventory[0]["meta"]["fps"]
     sources_map = {item["source_id"]: item["path"] for item in inventory}
 
     # -------------------------------------------------------------
     # Step 02: 4-in-1 GPU Transcription (Whisper + Wav2Vec2 + Pyannote)
     # -------------------------------------------------------------
-    print("\n[2/8] 🎙️ Verificando e executando transcrições com alinhamento fonético...")
+    update_progress("2/7", "Verificando e executando transcrições na GPU...")
     transcribe_needed = force_transcribe
     for item in inventory:
         t_file = transcripts_dir / f"{item['source_id']}.json"
@@ -149,12 +161,11 @@ def run_autonomous_rough_cut(
             break
 
     if transcribe_needed:
-        print("  -> Executando transcrição em lote (DeepFilterNet 3 + Whisper + Wav2Vec2 + Pyannote)...")
         batch_script = PROJECT_ROOT / "helpers" / "transcribe_batch.py"
         cmd_transcribe = [
             sys.executable, str(batch_script),
             str(raw_dir),
-            "--edit-dir", str(edit_dir),
+            "--edit-dir", str(active_edit_dir),
             "--provider", provider,
             "--diarization", "community-1",
             "--language", language,
@@ -163,49 +174,42 @@ def run_autonomous_rough_cut(
             cmd_transcribe.append("--force")
 
         subprocess.check_call(cmd_transcribe)
-        print("  -> Transcrição concluída com sucesso.")
-    else:
-        print("  -> Transcrições existentes reutilizadas.")
 
     # -------------------------------------------------------------
     # Step 03: Pack Transcripts (takes_packed.md)
     # -------------------------------------------------------------
-    print("\n[3/8] 📦 Agrupando transcrições em frases e pausas (takes_packed.md)...")
+    update_progress("3/7", "Agrupando transcrições em frases e pausas...")
     pack_script = PROJECT_ROOT / "helpers" / "pack_transcripts.py"
     cmd_pack = [
         sys.executable, str(pack_script),
-        "--edit-dir", str(edit_dir),
+        "--edit-dir", str(active_edit_dir),
     ]
     subprocess.check_call(cmd_pack)
-    takes_packed_file = edit_dir / "takes_packed.md"
+    takes_packed_file = active_edit_dir / "takes_packed.md"
     if not takes_packed_file.exists():
         raise FileNotFoundError(f"takes_packed.md was not generated at {takes_packed_file}")
     takes_packed_content = takes_packed_file.read_text(encoding="utf-8")
-    print(f"  -> takes_packed.md gerado com sucesso ({len(takes_packed_content)} bytes).")
 
     # -------------------------------------------------------------
     # Step 04 & 05 & 06: Cognitive LLM Editorial Decision
     # -------------------------------------------------------------
-    print("\n[4/8] 🧠 Consultando Inteligência Editorial (OpenAI-Compatible / NVIDIA NIM)...")
-    if not brief.strip():
-        brief = f"Corte bruto para {video_type}. Selecione os melhores takes, remova falsos inícios, hesitações e falas de direção."
+    update_progress("4/7", "Montando plano de corte inteligente com LLM...")
+    editorial_brief = brief.strip()
+    if not editorial_brief:
+        editorial_brief = f"Corte autônomo para {video_type}. Identifique os melhores takes, elimine falsos inícios, hesitações e falas de direção."
 
     cut_plan = generate_editorial_plan(
-        brief=brief,
+        brief=editorial_brief,
         takes_packed_content=takes_packed_content,
         video_type=video_type,
         config=llm_config,
     )
-    print(f"  -> A LLM selecionou {len(cut_plan)} takes principais:")
-    for i, cut in enumerate(cut_plan, 1):
-        print(f"     [{i:02d}] {cut['source']} ({cut['start']:.2f}s - {cut['end']:.2f}s) | Beat: {cut['beat']} | List: {cut['is_list']}")
 
-    # Formulate base EDL JSON
     if not timeline_name:
         sanitized_slug = "".join(c if c.isalnum() or c in "_-" else "_" for c in video_type).lower()
         timeline_name = f"{sanitized_slug}_rough_cut_alano"
 
-    edl_path = edit_dir / "edl.json"
+    edl_path = active_edit_dir / "edl.json"
     edl_data = {
         "sequence_name": timeline_name,
         "fps": 29.97,
@@ -230,14 +234,13 @@ def run_autonomous_rough_cut(
         ],
     }
     edl_path.write_text(json.dumps(edl_data, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"  -> edl.json inicial gravada em {edl_path}.")
 
     # -------------------------------------------------------------
     # Step 07: Acoustic Boundary Refinement & Snapper
     # -------------------------------------------------------------
-    print("\n[5/8] 🎛️ Refinando bordas acústicas, VAD e aplicando padding de respiração...")
+    update_progress("5/7", "Refinando bordas acústicas, VAD e aplicando padding...")
     refine_script = PROJECT_ROOT / "helpers" / "refine_edl_boundaries.py"
-    refine_report_path = edit_dir / "refine_report.json"
+    refine_report_path = active_edit_dir / "refine_report.json"
     cmd_refine = [
         sys.executable, str(refine_script),
         str(edl_path),
@@ -247,15 +250,14 @@ def run_autonomous_rough_cut(
     res_refine = subprocess.run(cmd_refine)
     if res_refine.returncode not in {0, 2}:
         raise RuntimeError(f"refine_edl_boundaries failed with exit code {res_refine.returncode}")
-    print(f"  -> Bordas acústicas refinadas e salvas em {edl_path}.")
 
     # -------------------------------------------------------------
     # Step 08: Audio Render & Quality Control (Audio QC)
     # -------------------------------------------------------------
-    print("\n[6/8] 🔊 Renderizando áudio do preview e validando Controle de Qualidade (QC)...")
+    update_progress("6/7", "Renderizando áudio do preview e validando QC...")
     render_script = PROJECT_ROOT / "helpers" / "render.py"
-    preview_wav_path = edit_dir / "preview.wav"
-    timeline_map_path = edit_dir / "preview_timeline.json"
+    preview_wav_path = active_edit_dir / "preview.wav"
+    timeline_map_path = active_edit_dir / "preview_timeline.json"
     cmd_render = [
         sys.executable, str(render_script),
         str(edl_path),
@@ -265,7 +267,7 @@ def run_autonomous_rough_cut(
     subprocess.check_call(cmd_render)
 
     audio_qc_script = PROJECT_ROOT / "helpers" / "preview_audio_qc.py"
-    qc_report_path = edit_dir / "preview_audio_qc.json"
+    qc_report_path = active_edit_dir / "preview_audio_qc.json"
     cmd_qc = [
         sys.executable, str(audio_qc_script),
         str(preview_wav_path),
@@ -273,88 +275,65 @@ def run_autonomous_rough_cut(
         "--timeline-map", str(timeline_map_path),
         "-o", str(qc_report_path),
     ]
-    res_qc = subprocess.run(cmd_qc)
-    try:
-        qc_data = json.loads(qc_report_path.read_text(encoding="utf-8"))
-        print(f"  -> Audio QC Status: {qc_data.get('status', 'pass').upper()}")
-    except Exception:
-        print(f"  -> Audio QC concluído (exit code: {res_qc.returncode}).")
+    subprocess.run(cmd_qc)
 
     # -------------------------------------------------------------
-    # Step 09: Final FCP7 XML Export
+    # Step 09: Final FCP7 XML Export & Clean Delivery
     # -------------------------------------------------------------
-    print("\n[7/8] 🎞️ Exportando timeline Final Cut Pro 7 XML para Premiere Pro...")
+    update_progress("7/7", "Exportando timeline XML para o Premiere...")
     xml_script = PROJECT_ROOT / "helpers" / "edl_to_fcpxml.py"
-    timeline_xml_path = edit_dir / "timeline.xml"
+    session_timeline_xml = active_edit_dir / "timeline.xml"
     cmd_xml = [
         sys.executable, str(xml_script),
         str(edl_path),
-        "-o", str(timeline_xml_path),
+        "-o", str(session_timeline_xml),
     ]
     subprocess.check_call(cmd_xml)
-    print(f"  -> XML Final gerado com sucesso: {timeline_xml_path}")
 
-    # -------------------------------------------------------------
-    # Step 10: Persist Run State & Memory
-    # -------------------------------------------------------------
-    print("\n[8/8] 💾 Salvando estado de execução e memória do projeto...")
-    run_state_path = edit_dir / "run_state.md"
-    project_memory_path = edit_dir / "project.md"
+    # Export deliverable directly to user working folder (cleanly)
+    final_user_xml = export_deliverable(session, raw_dir, output_filename=output_xml_filename)
 
-    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    run_state_content = f"""# Run State: {timeline_name}
+    # Calculate final duration
+    try:
+        refined_edl = json.loads(edl_path.read_text(encoding="utf-8"))
+        ranges = refined_edl.get("ranges", [])
+        total_dur = sum(r["end"] - r["start"] for r in ranges)
+        session.cuts_count = len(ranges)
+        session.total_duration_s = total_dur
+    except Exception:
+        session.cuts_count = len(cut_plan)
 
-- **Data de Execução**: {now_iso}
-- **Modo**: Modo 1 (Orquestrador Autônomo v0.5.0)
-- **Tipo de Conteúdo**: {video_type}
-- **Briefing**: {brief}
-- **Fontes Analisadas**: {len(inventory)} arquivos
-- **Takes Selecionados pela LLM**: {len(cut_plan)}
-- **Arquivo XML Entregável**: `{timeline_xml_path}`
-- **Preview de Áudio**: `{preview_wav_path}`
-"""
-    run_state_path.write_text(run_state_content, encoding="utf-8")
-
-    project_memory = f"""# Project Memory: {timeline_name}
-
-- **Última Atualização**: {now_iso}
-- **Vídeo Final**: {timeline_name} ({video_type})
-- **Entregável**: `{timeline_xml_path}`
-"""
-    project_memory_path.write_text(project_memory, encoding="utf-8")
-
-    print("\n" + "="*70)
-    print("🎉 CORTE BRUTO CONCLUÍDO COM SUCESSO!")
-    print(f"📄 Timeline XML: {timeline_xml_path}")
-    print("="*70 + "\n")
+    session.save()
 
     return {
         "status": "success",
-        "timeline_xml": str(timeline_xml_path),
+        "timeline_xml": str(final_user_xml),
+        "session_dir": str(session.dir),
         "preview_wav": str(preview_wav_path),
-        "edl_json": str(edl_path),
-        "takes_count": len(cut_plan),
+        "takes_count": session.cuts_count,
+        "total_duration_s": session.total_duration_s,
         "timeline_name": timeline_name,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Alano Rough Cut AI Autonomous Orchestrator (Mode 1)")
-    parser.add_argument("raw_dir", nargs="?", default="raw_video", help="Directory containing raw video files")
-    parser.add_argument("--edit-dir", default=None, help="Directory to output edit files (default: <raw_dir>/edit)")
-    parser.add_argument("--brief", "-b", default="", help="User editorial brief / instructions")
+    parser.add_argument("raw_dir", nargs="?", default=".", help="Directory containing raw video files (default: current directory)")
+    parser.add_argument("--edit-dir", default=None, help="Custom directory for edit cache (default: AppData/AlanoCut)")
+    parser.add_argument("--brief", "-b", default="", help="Optional user editorial brief / instructions")
     parser.add_argument("--video-type", "-t", default="aula", help="Content type (aula, reels, tiktok, tutorial, etc.)")
     parser.add_argument("--provider", default="whisper-vulkan", help="ASR Provider (whisper-vulkan, elevenlabs, assemblyai)")
     parser.add_argument("--language", "-l", default="pt", help="Language code (pt, en, etc.)")
     parser.add_argument("--force-transcribe", action="store_true", help="Force re-transcription of all audio")
     parser.add_argument("--timeline-name", default=None, help="Custom name for the output sequence")
+    parser.add_argument("--output-xml", default="timeline.xml", help="Output filename in raw directory (default: timeline.xml)")
 
     args = parser.parse_args()
     raw_path = Path(args.raw_dir)
     edit_path = Path(args.edit_dir) if args.edit_dir else None
 
     try:
-        run_autonomous_rough_cut(
+        res = run_autonomous_rough_cut(
             raw_dir=raw_path,
             edit_dir=edit_path,
             brief=args.brief,
@@ -363,7 +342,9 @@ def main() -> None:
             language=args.language,
             force_transcribe=args.force_transcribe,
             timeline_name=args.timeline_name,
+            output_xml_filename=args.output_xml,
         )
+        print(f"\n✅ Concluído! Timeline gerada em: {res['timeline_xml']}")
     except Exception as e:
         print(f"\n❌ Erro na execução do orquestrador: {e}", file=sys.stderr)
         sys.exit(1)

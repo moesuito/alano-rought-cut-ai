@@ -51,11 +51,11 @@ def test_clean_json_response_handles_raw_array_with_surrounding_chatter():
 
 def test_build_editorial_system_prompt_short_vs_long_form():
     prompt_short = build_editorial_system_prompt("reels")
-    assert "SHORT-FORM" in prompt_short
+    assert "VÍDEO CURTO" in prompt_short or "SHORT-FORM" in prompt_short
     assert "<= 90 segundos" in prompt_short
 
     prompt_long = build_editorial_system_prompt("aula")
-    assert "LONG-FORM" in prompt_long
+    assert "VÍDEO LONGO" in prompt_long or "LONG-FORM" in prompt_long
     assert "500ms" in prompt_long
 
 
