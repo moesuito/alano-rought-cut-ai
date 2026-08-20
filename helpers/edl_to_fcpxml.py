@@ -218,6 +218,7 @@ def convert_edl_to_xml(
     output_path: Path,
     timeline_name: str | None = None,
     project_name: str | None = None,
+    crossfade_frames: int = 4,
 ) -> None:
     # Load EDL JSON
     if not edl_path.exists():
@@ -427,6 +428,26 @@ def convert_edl_to_xml(
             ET.SubElement(a_desc, "channelcount").text = "2"
 
         # ------------------ AUDIO TRACK 1 CLIPITEM ------------------
+        if crossfade_frames > 0 and idx > 1:
+            half_dur = crossfade_frames // 2
+            trans_start = max(0, start_timeline_frame - half_dur)
+            trans_end = start_timeline_frame + (crossfade_frames - half_dur)
+
+            trans_item = ET.SubElement(audio_track1, "transitionitem")
+            ET.SubElement(trans_item, "start").text = str(trans_start)
+            ET.SubElement(trans_item, "end").text = str(trans_end)
+            ET.SubElement(trans_item, "alignment").text = "center"
+
+            t_rate = ET.SubElement(trans_item, "rate")
+            ET.SubElement(t_rate, "timebase").text = str(seq_timebase)
+            ET.SubElement(t_rate, "ntsc").text = seq_ntsc
+
+            effect = ET.SubElement(trans_item, "effect")
+            ET.SubElement(effect, "name").text = "Cross Fade (+3dB)"
+            ET.SubElement(effect, "effectid").text = "CrossFade3dB"
+            ET.SubElement(effect, "effecttype").text = "transition"
+            ET.SubElement(effect, "mediatype").text = "audio"
+
         clipitem_a1 = ET.SubElement(audio_track1, "clipitem", id=clip_a1_id)
         ET.SubElement(clipitem_a1, "name").text = source_path.name
         ET.SubElement(clipitem_a1, "duration").text = str(duration_frames)
@@ -489,6 +510,8 @@ def main() -> None:
                              "If omitted, reads EDL metadata.timeline_name or derives a fallback.")
     parser.add_argument("--project-name", type=str, default=None,
                         help="Optional FCP XML project name. Defaults to the timeline name.")
+    parser.add_argument("--crossfade-frames", type=int, default=4,
+                        help="Number of frames for audio crossfade transitions across cuts (default: 4, 0 to disable)")
     args = parser.parse_args()
 
     edl_path = args.edl.resolve()
@@ -501,6 +524,7 @@ def main() -> None:
         output_path,
         timeline_name=args.timeline_name,
         project_name=args.project_name,
+        crossfade_frames=args.crossfade_frames,
     )
 
 

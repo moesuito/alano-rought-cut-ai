@@ -488,6 +488,36 @@ def test_xml_sequence_fps_authority_wav_only(temp_workspace):
     assert "<duration>30</duration>" in xml_content
 
 
+def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace):
+    """Verify that convert_edl_to_xml inserts 4-frame audio crossfades on track 1 between cuts."""
+    edit_dir = temp_workspace["edit"]
+    edl = {
+        "version": 1,
+        "sources": {"source1": "source1.wav"},
+        "ranges": [
+            {"source": "source1", "start": 0.0, "end": 0.5, "source_in_frame": 0, "source_out_frame": 15},
+            {"source": "source1", "start": 0.5, "end": 1.0, "source_in_frame": 15, "source_out_frame": 30},
+        ],
+        "metadata": {
+            "sequence_fps": "30"
+        }
+    }
+    edl_path = edit_dir / "edl_multi_cut.json"
+    edl_path.write_text(json.dumps(edl), encoding="utf-8")
+    xml_path = edit_dir / "timeline_multi_cut.xml"
+
+    convert_edl_to_xml(edl_path, xml_path, crossfade_frames=4)
+
+    assert xml_path.exists()
+    xml_content = xml_path.read_text(encoding="utf-8")
+
+    assert "<transitionitem>" in xml_content
+    assert "<effectid>CrossFade3dB</effectid>" in xml_content
+    assert "<alignment>center</alignment>" in xml_content
+    assert "<start>13</start>" in xml_content
+    assert "<end>17</end>" in xml_content
+
+
 def test_render_divergent_metadata_probe(temp_workspace, monkeypatch, capsys):
     """Verify render.py fails when probed video frame rate diverges from metadata authority."""
     edit_dir = temp_workspace["edit"]
