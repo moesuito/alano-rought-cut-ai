@@ -139,6 +139,15 @@ def run_autonomous_rough_cut(
     transcripts_dir = active_edit_dir / "transcripts"
     transcripts_dir.mkdir(parents=True, exist_ok=True)
 
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{PROJECT_ROOT};{PROJECT_ROOT / 'helpers'};{env.get('PYTHONPATH', '')}"
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    session.log(f"=== AlanoCut Rough Cut Pipeline Started ===")
+    session.log(f"Working directory: {raw_dir}")
+    session.log(f"Video format type: {video_type}")
+    session.log(f"Briefing: {brief if brief else '(None - 100% Autonomous Mode)'}")
+
     # -------------------------------------------------------------
     # Step 01: Inventory
     # -------------------------------------------------------------
@@ -146,6 +155,7 @@ def run_autonomous_rough_cut(
     inventory = scan_inventory(raw_dir)
     session.source_files = inventory
     session.save()
+    session.log(f"Found {len(inventory)} video source(s): {[item['filename'] for item in inventory]}")
 
     sources_map = {item["source_id"]: item["path"] for item in inventory}
 
@@ -159,8 +169,18 @@ def run_autonomous_rough_cut(
         if not t_file.exists():
             transcribe_needed = True
             break
+        try:
+            t_data = json.loads(t_file.read_text(encoding="utf-8"))
+            if t_data.get("alignment_method") is None and not any(w.get("timing_source") == "forced_alignment" for w in t_data.get("words", [])):
+                # Old unaligned transcript
+                transcribe_needed = True
+                break
+        except Exception:
+            transcribe_needed = True
+            break
 
     if transcribe_needed:
+        session.log(f"Running GPU transcription & Wav2Vec2 forced alignment (provider={provider})...")
         batch_script = PROJECT_ROOT / "helpers" / "transcribe_batch.py"
         cmd_transcribe = [
             sys.executable, str(batch_script),
@@ -169,11 +189,16 @@ def run_autonomous_rough_cut(
             "--provider", provider,
             "--diarization", "community-1",
             "--language", language,
+            "--force",
         ]
-        if force_transcribe:
-            cmd_transcribe.append("--force")
-
-        subprocess.check_call(cmd_transcribe)
+        proc = subprocess.run(cmd_transcribe, env=env, capture_output=True, text=True)
+        session.log(f"Transcription stdout:\n{proc.stdout}")
+        if proc.stderr:
+            session.log(f"Transcription stderr:\n{proc.stderr}")
+        if proc.returncode != 0:
+            raise RuntimeError(f"Transcription failed (code {proc.returncode}): {proc.stderr}")
+    else:
+        session.log("Transcripts already up to date with forced alignment.")
 
     # -------------------------------------------------------------
     # Step 03: Pack Transcripts (takes_packed.md)
@@ -184,7 +209,8 @@ def run_autonomous_rough_cut(
         sys.executable, str(pack_script),
         "--edit-dir", str(active_edit_dir),
     ]
-    subprocess.check_call(cmd_pack)
+    proc = subprocess.run(cmd_pack, env=env, capture_output=True, text=True)
+    session.log(f"Pack transcripts stdout: {proc.stdout.strip()}")
     takes_packed_file = active_edit_dir / "takes_packed.md"
     if not takes_packed_file.exists():
         raise FileNotFoundError(f"takes_packed.md was not generated at {takes_packed_file}")
@@ -198,12 +224,14 @@ def run_autonomous_rough_cut(
     if not editorial_brief:
         editorial_brief = f"Corte autônomo para {video_type}. Identifique os melhores takes, elimine falsos inícios, hesitações e falas de direção."
 
+    session.log(f"Calling LLM for editorial cut plan (brief: {editorial_brief})...")
     cut_plan = generate_editorial_plan(
         brief=editorial_brief,
         takes_packed_content=takes_packed_content,
         video_type=video_type,
         config=llm_config,
     )
+    session.log(f"LLM produced {len(cut_plan)} editorial cut range(s).")
 
     if not timeline_name:
         sanitized_slug = "".join(c if c.isalnum() or c in "_-" else "_" for c in video_type).lower()
@@ -247,8 +275,10 @@ def run_autonomous_rough_cut(
         "--transcripts", str(transcripts_dir),
         "--report", str(refine_report_path),
     ]
-    res_refine = subprocess.run(cmd_refine)
+    res_refine = subprocess.run(cmd_refine, env=env, capture_output=True, text=True)
+    session.log(f"Refine boundaries output:\n{res_refine.stdout}")
     if res_refine.returncode not in {0, 2}:
+        session.log(f"Refine boundaries error:\n{res_refine.stderr}")
         raise RuntimeError(f"refine_edl_boundaries failed with exit code {res_refine.returncode}")
 
     # -------------------------------------------------------------
@@ -264,7 +294,7 @@ def run_autonomous_rough_cut(
         "-o", str(preview_wav_path),
         "--timeline-map", str(timeline_map_path),
     ]
-    subprocess.check_call(cmd_render)
+    subprocess.check_call(cmd_render, env=env)
 
     audio_qc_script = PROJECT_ROOT / "helpers" / "preview_audio_qc.py"
     qc_report_path = active_edit_dir / "preview_audio_qc.json"
@@ -275,7 +305,8 @@ def run_autonomous_rough_cut(
         "--timeline-map", str(timeline_map_path),
         "-o", str(qc_report_path),
     ]
-    subprocess.run(cmd_qc)
+    proc_qc = subprocess.run(cmd_qc, env=env, capture_output=True, text=True)
+    session.log(f"Audio QC output:\n{proc_qc.stdout}")
 
     # -------------------------------------------------------------
     # Step 09: Final FCP7 XML Export & Clean Delivery
@@ -288,27 +319,78 @@ def run_autonomous_rough_cut(
         str(edl_path),
         "-o", str(session_timeline_xml),
     ]
-    subprocess.check_call(cmd_xml)
+    subprocess.check_call(cmd_xml, env=env)
 
     # Export deliverable directly to user working folder (cleanly)
     final_user_xml = export_deliverable(session, raw_dir, output_filename=output_xml_filename)
 
-    # Calculate final duration
+    # Calculate final duration and write Editorial Audit Report
     try:
         refined_edl = json.loads(edl_path.read_text(encoding="utf-8"))
         ranges = refined_edl.get("ranges", [])
         total_dur = sum(r["end"] - r["start"] for r in ranges)
-        session.cuts_count = len(ranges)
-        session.total_duration_s = total_dur
     except Exception:
-        session.cuts_count = len(cut_plan)
+        total_dur = 0.0
+        ranges = []
 
+    # Write human-readable editorial audit report
+    audit_lines = [
+        f"================================================================================",
+        f"                   ALANO ROUGH CUT AI — EDITORIAL AUDIT REPORT                  ",
+        f"================================================================================",
+        f"Session ID:         {session.session_id}",
+        f"Date:               {session.created_at}",
+        f"Working Directory:  {raw_dir}",
+        f"Video Format:       {video_type.upper()}",
+        f"Briefing:           {brief if brief else '(None - 100% Autonomous LLM Decision)'}",
+        f"Deliverable XML:    {final_user_xml}",
+        f"Total Duration:     {total_dur:.2f}s ({total_dur/60:.1f} min)",
+        f"Total Cuts:         {len(ranges)}",
+        f"",
+        f"--------------------------------------------------------------------------------",
+        f"1. RAW MEDIA INVENTORY ({len(inventory)} files):",
+        f"--------------------------------------------------------------------------------",
+    ]
+    for idx, item in enumerate(inventory, 1):
+        m = item.get("meta", {})
+        audit_lines.append(f"  [{idx:02d}] {item['filename']} | {m.get('width', 0)}x{m.get('height', 0)} @ {m.get('fps', '')} fps | Dur: {m.get('duration', 0):.1f}s")
+
+    audit_lines.extend([
+        f"",
+        f"--------------------------------------------------------------------------------",
+        f"2. EDITORIAL CUTS & TAKE SELECTION RATIONALE:",
+        f"--------------------------------------------------------------------------------",
+    ])
+    for idx, cut in enumerate(ranges, 1):
+        audit_lines.append(f"  [{idx:02d}] Beat: {cut.get('beat', 'CUT')} | Source: {cut.get('source')} ({cut.get('start', 0):.2f}s -> {cut.get('end', 0):.2f}s)")
+        if cut.get("quote"):
+            audit_lines.append(f"       Quote:  \"{cut.get('quote')}\"")
+        if cut.get("reason"):
+            audit_lines.append(f"       Reason: {cut.get('reason')}")
+        audit_lines.append("")
+
+    audit_lines.extend([
+        f"================================================================================",
+        f"End of Editorial Audit Report.",
+        f"================================================================================",
+    ])
+
+    session.audit_txt_file.write_text("\n".join(audit_lines), encoding="utf-8")
+    session.log("Editorial audit report written to editorial_audit.txt")
+    session.log(f"=== AlanoCut Rough Cut Pipeline Completed Successfully ===")
+
+    session.cuts_count = len(ranges)
+    session.total_duration_s = total_dur
+    session.timeline_xml_path = str(final_user_xml)
+    session.status = "completed"
     session.save()
 
     return {
         "status": "success",
         "timeline_xml": str(final_user_xml),
         "session_dir": str(session.dir),
+        "session_log": str(session.session_log_file),
+        "audit_txt": str(session.audit_txt_file),
         "preview_wav": str(preview_wav_path),
         "takes_count": session.cuts_count,
         "total_duration_s": session.total_duration_s,

@@ -231,7 +231,9 @@ def interactive_main() -> None:
     success_table.add_row("✂️ Total de Cortes:", f"[bold white]{takes_count} takes selecionados[/bold white]")
     success_table.add_row("⏱️ Duração do Rough Cut:", f"[bold green]{format_seconds(dur_s)}[/bold green] ({dur_s:.1f}s)")
     success_table.add_row("🔊 Controle de Áudio (QC):", "[bold green]APROVADO (Zero clipping / estalos)[/bold green]")
-    success_table.add_row("📁 Cache da Sessão:", f"[dim]{res['session_dir']}[/dim]")
+    success_table.add_row("📝 Relatório Editorial (.txt):", f"[bold cyan]{res.get('audit_txt', '')}[/bold cyan]")
+    success_table.add_row("📜 Log Completo (.log):", f"[dim cyan]{res.get('session_log', '')}[/dim cyan]")
+    success_table.add_row("📁 Pasta da Sessão:", f"[dim]{res['session_dir']}[/dim]")
 
     console.print(
         Panel(

@@ -8,6 +8,7 @@ try {
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallRoot = Split-Path -Parent $ScriptDir
+$env:PYTHONPATH = "$InstallRoot;$InstallRoot\helpers;$env:PYTHONPATH"
 
 function Show-Help {
     Write-Host "Alano Rough Cut AI CLI - Command Line Utility (v0.5.0)" -ForegroundColor Green

@@ -17,6 +17,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Ensure helpers and root directory are always in sys.path
+_CURRENT_DIR = Path(__file__).resolve().parent
+_PARENT_DIR = _CURRENT_DIR.parent
+for _p in [str(_CURRENT_DIR), str(_PARENT_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import requests
 
 try:
@@ -328,16 +335,9 @@ def _vulkan_transcript(
         words = parse_whisper_cpp_tokens_to_words(raw_json)
         
         # Wav2Vec2 CTC Forced Alignment on DirectML GPU
-        try:
-            from helpers.forced_alignment import Wav2Vec2Aligner
-        except ModuleNotFoundError:
+        if len(words) > 0:
             try:
-                from forced_alignment import Wav2Vec2Aligner
-            except ModuleNotFoundError:
-                Wav2Vec2Aligner = None
-
-        if Wav2Vec2Aligner is not None and len(words) > 0:
-            try:
+                from helpers.forced_alignment import Wav2Vec2Aligner
                 import subprocess
                 import numpy as np
 
@@ -350,9 +350,11 @@ def _vulkan_transcript(
                 proc = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
                 samples = np.frombuffer(proc.stdout, dtype=np.float32)
                 aligner = Wav2Vec2Aligner()
-                words = aligner.align_full_transcript(samples, words)
+                aligned_words = aligner.align_full_transcript(samples, words)
+                if aligned_words and len(aligned_words) == len(words):
+                    words = aligned_words
             except Exception as exc:
-                print(f"[Warning] Forced alignment fallback: {exc}", file=sys.stderr)
+                print(f"[Warning] Forced alignment notice: {exc}", file=sys.stderr)
 
     return convert_vulkan_whisper_result(
         words,
@@ -409,7 +411,7 @@ def transcribe_one(
             language=language or "pt",
             diarization_mode=diarization_mode,
         )
-        if not isinstance(effective_config, VulkanWhisperConfig):
+        if not isinstance(effective_config, VulkanWhisperConfig) and type(effective_config).__name__ != "VulkanWhisperConfig":
             raise ValueError("Vulkan Whisper provider requires VulkanWhisperConfig")
         if output.exists() and not force and is_cache_valid(
             output, source_sha256=source_hash, config=effective_config
@@ -419,7 +421,7 @@ def transcribe_one(
             return output
     elif provider == "elevenlabs":
         effective_config = config or ElevenLabsConfig(language=language)
-        if not isinstance(effective_config, ElevenLabsConfig):
+        if not isinstance(effective_config, ElevenLabsConfig) and type(effective_config).__name__ != "ElevenLabsConfig":
             raise ValueError("ElevenLabs provider requires ElevenLabsConfig")
         if output.exists() and not force and is_cache_valid(
             output, source_sha256=source_hash, config=effective_config
@@ -429,7 +431,7 @@ def transcribe_one(
             return output
     elif provider == "assemblyai":
         effective_config = config or AssemblyAIConfig(language_code=language or "pt")
-        if not isinstance(effective_config, AssemblyAIConfig):
+        if not isinstance(effective_config, AssemblyAIConfig) and type(effective_config).__name__ != "AssemblyAIConfig":
             raise ValueError("AssemblyAI provider requires AssemblyAIConfig")
         if output.exists() and not force and is_cache_valid(
             output, source_sha256=source_hash, config=effective_config

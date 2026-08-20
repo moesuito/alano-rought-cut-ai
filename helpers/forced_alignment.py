@@ -187,9 +187,21 @@ class Wav2Vec2Aligner:
                 start_frame = word_spans[0].start
                 end_frame = word_spans[-1].end
                 
+                # Check for pathological multi-second character jumps across silences
+                for span_idx in range(len(word_spans) - 1):
+                    char_gap_frames = word_spans[span_idx + 1].start - word_spans[span_idx].end
+                    if char_gap_frames > 15:  # > 300ms gap between letters of the same word
+                        end_frame = word_spans[span_idx].end
+                        break
+
                 # Compute acoustic timestamps
                 exact_start = time_offset + (start_frame * frame_duration)
                 exact_end = time_offset + (end_frame * frame_duration)
+                
+                # Hard limit on single spoken word duration (<= 1.5s)
+                if exact_end - exact_start > 1.5:
+                    exact_end = exact_start + min(1.5, max(0.3, len(word_tokens) * 0.15))
+                
                 if exact_end <= exact_start:
                     exact_end = exact_start + 0.05
 
@@ -246,11 +258,11 @@ class Wav2Vec2Aligner:
                 prev_end = float(current_chunk_words[-1].get("end", 0.0))
                 pause = w_start - prev_end
                 
-                # Split at pauses (> 1.0s) or when chunk reaches max duration
-                if (pause > 1.0 and chunk_span > 10.0) or chunk_span >= chunk_duration_sec:
-                    chunk_end_time = min(total_audio_sec, prev_end + 0.5)
+                # Split at pauses (>= 0.5s) or when chunk reaches max duration
+                if pause >= 0.5 or chunk_span >= chunk_duration_sec:
+                    chunk_end_time = min(total_audio_sec, prev_end + 0.3)
                     chunks.append((chunk_start_time, chunk_end_time, current_chunk_words))
-                    chunk_start_time = max(0.0, w_start - 0.5)
+                    chunk_start_time = max(0.0, w_start - 0.3)
                     current_chunk_words = [w]
                 else:
                     current_chunk_words.append(w)

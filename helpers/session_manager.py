@@ -108,6 +108,24 @@ class SessionContext:
     def session_xml_file(self) -> Path:
         return self.edit_dir / "timeline.xml"
 
+    @property
+    def session_log_file(self) -> Path:
+        return self.dir / "session.log"
+
+    @property
+    def audit_txt_file(self) -> Path:
+        return self.dir / "editorial_audit.txt"
+
+    def log(self, message: str) -> None:
+        """Write timestamped log line to session.log."""
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            with self.session_log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {message}\n")
+        except Exception:
+            pass
+
     def save(self) -> None:
         """Persist session metadata to session.json."""
         self.edit_dir.mkdir(parents=True, exist_ok=True)

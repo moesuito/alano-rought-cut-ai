@@ -112,55 +112,50 @@ def clean_json_response(raw_text: str) -> str:
     return text
 
 
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+
+def get_editor_system_prompt_template() -> str:
+    """Load editor system prompt template from dedicated Markdown file."""
+    prompt_file = PROMPTS_DIR / "editor_system_prompt.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    
+    # Fallback to AppData install location if running from custom directory
+    appdata_prompt = (
+        Path(os.environ.get("APPDATA", ""))
+        / "alano-rought-cut-ai"
+        / "helpers"
+        / "prompts"
+        / "editor_system_prompt.md"
+    )
+    if appdata_prompt.exists():
+        return appdata_prompt.read_text(encoding="utf-8")
+        
+    raise FileNotFoundError(f"editor_system_prompt.md not found at {prompt_file} or {appdata_prompt}")
+
+
 def build_editorial_system_prompt(video_type: str = "aula") -> str:
-    """Build high-performance system prompt with autonomous editorial intelligence."""
+    """Build high-performance system prompt with autonomous senior editorial intelligence."""
     is_short = video_type.lower() in {"reels", "tiktok", "shorts", "social", "short"}
 
     if is_short:
         pacing_rules = (
             "- FORMATO: VÍDEO CURTO / REDES SOCIAIS (Reels / TikTok / YouTube Shorts).\n"
-            "- OBJETIVO: Ritmo acelerado (fast-pacing), gancho forte nos primeiros 3 segundos, cortes dinâmicos.\n"
-            "- DURAÇÃO MÁXIMA: Estritamente <= 90 segundos (ideal 30s a 60s).\n"
-            "- LISTAS: Não aplicar preservação de lista (is_list: false); corte seco em pausas > 200ms."
+            "- OBJETIVO: Ritmo acelerado (fast-pacing), gancho magnético nos primeiros 3 segundos, cortes dinâmicos e sem respiros mortos.\n"
+            "- DURAÇÃO MÁXIMA: Estritamente <= 90 segundos (ideal entre 30s e 60s).\n"
+            "- LISTAS: Não aplicar preservação de lista ('is_list': false); cortes rápidos e diretos ao ponto."
         )
     else:
         pacing_rules = (
             "- FORMATO: VÍDEO LONGO / EDUCACIONAL (Videoaula / Tutorial / Curso / YouTube).\n"
-            "- OBJETIVO: Didático, fluido, natural, cadenciado e completo.\n"
-            "- LISTAS E ENUMERAÇÕES: Quando o apresentador listar recursos, itens ou passos sequenciais, "
-            "marque 'is_list': true para preservar as pausas naturais de respiração (até 500ms)."
+            "- OBJETIVO: Didático, fluido, natural, cadenciado e completo, priorizando a clareza e a retenção do aluno.\n"
+            "- LISTAS E ENUMERAÇÕES: Quando o apresentador listar recursos, passos ou perfis (ex: 'conta, produtos, vendas...', 'produtores, afiliados, compradores...'), "
+            "marque 'is_list': true para preservar as micropausas naturais de respiração e cadência didática (até 500ms).\n"
         )
 
-    return f"""Você é o Alano Rough Cut AI, um Editor de Vídeo Sênior e Especialista em Montagem de Rough Cut.
-
-Você acabou de receber os arquivos brutos gravados para este projeto. Seu trabalho é pensar exatamente como um montador profissional:
-1. IDENTIFICAR RETAKES E REPETIÇÕES: Quando o apresentador repete uma mesma frase ou ideia várias vezes, compare a energia, clareza e fluidez e escolha a melhor versão (geralmente a última tentativa).
-2. SUBSTITUIÇÃO DE INTRODUÇÕES/HOOKS: Se houver arquivos gravados no final especificamente para substituir a introdução inicial (ex: uma apresentação mais limpa ou sem gaguejo), utilize essa regravação mais recente como o início do vídeo.
-3. ELIMINAÇÃO TOTAL DE ERROS E RUÍDOS DE GRAVAÇÃO: Descarte completamente:
-   - Falsos inícios, gaguejos, pigarros, risos de erro.
-   - Palmas, estalos de dedos ou batidas no microfone usadas para marcar take.
-   - Falas de direção e cacos ("espera aí", "vamos de novo", "corta", "volta", "gravando", "beleza", "ops").
-4. ESTRUTURA NARRATIVA COESA: Organize os trechos em uma ordem de história fluida:
-   [GANCHO / INTRODUÇÃO] -> [CONTEXTO / DEFINIÇÃO] -> [PONTOS PRINCIPAIS] -> [MODELO / EXEMPLOS] -> [CTA / ENCERRAMENTO].
-5. SE O BRIEFING DO USUÁRIO ESTIVER EM BRANCO: Atue de forma 100% autônoma, montando a melhor versão completa e sem erros do conteúdo gravado. Se houver briefing, respeite as preferências do usuário.
-
-DIRETRIZES DE FORMATO E RITMO:
-{pacing_rules}
-
-REGRAS OBRIGATÓRIAS:
-1. Retorne APENAS um array JSON de objetos, sem nenhum texto introdutório, explicações ou markdown antes ou depois.
-2. Cada objeto no array deve conter exatamente:
-   - "source": o ID do arquivo fonte (ex: "C004_04281919_C008" ou "C004_04281904_C006")
-   - "start": timestamp float de início do take em segundos (baseado nos tempos reais de palavra/frase do takes_packed)
-   - "end": timestamp float de término do take em segundos
-   - "beat": identificador do beat narrativo (ex: "HOOK_INTRO", "DEFINICAO", "PROPOSTA_VALOR", "PONTOS_CHAVE", "CTA_ENCERRAMENTO")
-   - "quote": texto resumido das palavras do trecho escolhido
-   - "reason": justificativa editorial do porquê esse take foi o escolhido
-   - "is_list": boolean (true se for enumeração de itens em vídeo longo, false caso contrário)
-
-3. Os cortes devem seguir a ordem lógica da narrativa (mesmo que venham de arquivos diferentes).
-4. Utilize apenas timestamps reais presentes no arquivo de transcrição.
-"""
+    template = get_editor_system_prompt_template()
+    return template.replace("{pacing_rules}", pacing_rules)
 
 
 def generate_editorial_plan(
