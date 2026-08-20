@@ -7,8 +7,9 @@ function Show-Help {
     Write-Host "Alano Rough Cut AI CLI - Command Line Utility" -ForegroundColor Green
     Write-Host "Usage:" -ForegroundColor White
     Write-Host "  alanocut init        Initialize current directory as a video rough-cut workspace" -ForegroundColor White
+    Write-Host "  alanocut cut         Execute autonomous end-to-end rough cut (Mode 1)" -ForegroundColor White
     Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
-    Write-Host "  alanocut configure   Configure ElevenLabs or local WhisperX transcription" -ForegroundColor White
+    Write-Host "  alanocut configure   Configure ElevenLabs, AssemblyAI, or local Whisper transcription" -ForegroundColor White
     Write-Host "  alanocut setup-transcription   Repair the selected provider/runtime/models" -ForegroundColor White
     Write-Host "  alanocut transcription-doctor  Verify the selected provider profile" -ForegroundColor White
     Write-Host "  alanocut --help      Show this help message" -ForegroundColor White
@@ -322,6 +323,16 @@ if ($SubCommand -eq "init") {
     Write-Host "   2. Open your AI agent, read AGENTS.md, and type: 'edit these clips'" -ForegroundColor White
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host ""
+}
+elseif ($SubCommand -eq "cut") {
+    $PythonPath = Get-AlanoPython
+    $OrchestratorPath = Join-Path $InstallRoot "helpers\orchestrator.py"
+    $CutArgs = @()
+    for ($i = 1; $i -lt $args.Count; $i++) {
+        $CutArgs += $args[$i]
+    }
+    & $PythonPath $OrchestratorPath @CutArgs
+    exit $LASTEXITCODE
 }
 elseif ($SubCommand -eq "update") {
     $Updated = Update-System -Silent $false
