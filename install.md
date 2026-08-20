@@ -11,7 +11,7 @@ Esta documentação explica como instalar o assistente de corte bruto e exporta�
 1. **Git** instalado e configurado no PATH do sistema.
 2. **Python 3.10 ou superior** instalado e configurado no PATH do sistema.
 3. Um terminal com privilégios de usuário normais (não requer administrador).
-4. GPU NVIDIA compatível com CUDA (a configuração normativa é uma RTX 3060 de 6 GB ou superior) e driver atualizado.
+4. GPU NVIDIA compatível com CUDA (a configuração normativa é uma RTX 3060 de 6 GB ou superior) e driver atualizado (opcional, para WhisperX local).
 5. FFmpeg disponível no PATH.
 6. Para o perfil local com speakers: acesso aceito ao `pyannote/speaker-diarization-community-1` e um Hugging Face token de leitura. Isso é opcional: WhisperX sem diarização e ElevenLabs não pedem esse token.
 
@@ -39,11 +39,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 O instalador fará o seguinte:
 1. Baixará a release mais recente do GitHub para `%APPDATA%\alano-rought-cut-ai` ou, se não houver release disponível, fará fallback para clone da branch `main`.
-2. Criará o ambiente virtual leve Python (`.venv`) e instalará as dependências do `pyproject.toml`.
+2. Criará o ambiente virtual Python compartilhado (`%APPDATA%\alano-rought-cut-ai\.venv`), instalará as dependências (`torch`, `deepfilternet`, `pillow`, `numpy`, `requests`) e validará o modelo neural DeepFilterNet 3.
 3. Abrirá um setup guiado para escolher ElevenLabs Scribe ou WhisperX local CUDA. ElevenLabs pede somente sua API key. WhisperX informa o uso aproximado de 16 GiB e permite escolher Community-1 ou sem diarização.
-4. Quando o perfil local for escolhido, criará uma única vez o runtime compartilhado em `%LOCALAPPDATA%\AlanoCut\runtimes\`, com Python 3.12 e PyTorch CUDA 12.8, e baixará os modelos para o cache compartilhado. Não há fallback em CPU.
+4. Quando o perfil local for escolhido, criará uma única vez o runtime compartilhado em `%LOCALAPPDATA%\AlanoCut\runtimes\`, com Python 3.12 e PyTorch CUDA 12.8, e baixará os modelos para o cache compartilhado.
 5. Guardará preferência sem segredos em `%APPDATA%\alano-rought-cut-ai\user-settings.json` e credenciais somente em `%APPDATA%\alano-rought-cut-ai\.env`.
 6. Criará os executáveis no diretório `bin/` e adicionará o diretório ao PATH.
+7. No `alanocut init`, as workspaces compartilham instantaneamente o mesmo `.venv` via junction, sem duplicação de pacotes e inicializando em menos de 1 segundo.
 
 Consulte [TRANSCRIPTION_SETUP.md](docs/TRANSCRIPTION_SETUP.md) para os fluxos dos providers, links do Community-1 e execução não interativa.
 
@@ -98,19 +99,10 @@ Esse comando inicializará a workspace configurando a seguinte estrutura:
 │   └── edit/
 ├── helpers/               <-- Scripts auxiliares para corte
 ├── .agents/               <-- Instruções modulares por etapa
-├── alanocut.json          <-- Provider escolhido para esta workspace, sem segredos
-├── .gitignore
-├── AGENTS.md              <-- Leia este arquivo primeiro
-└── SKILL.md               <-- Stub de compatibilidade
+├── .venv/                 <-- Link para o runtime Python compartilhado (Instantâneo)
+├── alanocut.json          <-- Configuração da workspace
+├── AGENTS.md              <-- Instruções mestras para a IA
+└── SKILL.md
 ```
 
-Além de criar a estrutura de arquivos e pastas, o comando `alanocut init` registrará e apontará a Skill de IA do Claude Code (`~/.claude/skills/video-use`) e Gemini (`~/.gemini/config/skills/video-use`) automaticamente para esta pasta atual.
-
-Na versão v0.4.0, o fluxo do agente é estritamente audio-only: sem fades, inspeção de frames ou renderização visual. Depois da decisão editorial, a ordem obrigatória é refinamento de limites -> `preview.wav`/mapa -> QC de áudio -> QC semântico -> transcrição forçada e persistida do preview com hash -> QC de transcript por join -> `verify_edit_ready.py` com exit code 0 -> XML. `alanocut init` instala os helpers, o modelo RNNoise e as instruções dessa cadeia; `timeline_view.py` permanece apenas como diagnóstico manual legado até sua remoção na v0.5.0.
-
-### Próximos Passos:
-1. Escolha o provider no prompt de `alanocut init`. A escolha acontece antes de copiar os arquivos da workspace; API keys e `HF_TOKEN` permanecem globais.
-2. Jogue seus arquivos de vídeo na pasta `raw_video/`.
-3. Abra seu agente de IA (como `claude` ou `gemini`) no diretório do projeto, leia `AGENTS.md`, e dê o comando de edição: *"Corte este vídeo bruto"* ou *"Inicializar edição"*.
-
-O EDL criado pelo agente deve declarar `metadata.sequence_fps`, `metadata.required_beats` (que pode ser uma lista vazia) e `ranges[].beat_id`. Em `evidence_any_of`, cada lista interna representa um conjunto alternativo de frases que deve aparecer nas palavras realmente selecionadas.
+Agora basta abrir o seu assistente de IA (Claude Code, Antigravity, ChatGPT, Codex, etc.) e pedir para realizar o corte!

@@ -289,31 +289,27 @@ if ($SubCommand -eq "init") {
     Create-Junction -LinkPath $GeminiLink -TargetDir $CurrentDir
     Write-Host "  -> Linked skill with Antigravity / Gemini" -ForegroundColor Gray
 
-    # 6. Setup local virtual environment inside the workspace
-    $VenvDir = Join-Path $CurrentDir ".venv"
-    Write-Host "Setting up Python virtual environment in $VenvDir..." -ForegroundColor Cyan
-    if (!(Test-Path $VenvDir)) {
+    # 6. Link shared Python runtime (.venv) into workspace
+    $SharedVenv = Join-Path $InstallRoot ".venv"
+    $WorkspaceVenv = Join-Path $CurrentDir ".venv"
+    
+    if (!(Test-Path $SharedVenv)) {
+        Write-Host "Shared runtime missing. Initializing in $SharedVenv..." -ForegroundColor Cyan
         try {
-            python -m venv $VenvDir
-            Write-Host "  -> Created virtual environment (.venv)" -ForegroundColor Gray
+            python -m venv $SharedVenv
+            $SharedPip = Join-Path $SharedVenv "Scripts\pip.exe"
+            & $SharedPip install -e $InstallRoot | Out-Null
+            Write-Host "  -> Shared runtime created successfully!" -ForegroundColor Gray
         } catch {
-            Write-Error "Failed to create virtual environment: $_"
+            Write-Error "Failed to initialize shared runtime: $_"
         }
-    } else {
-        Write-Host "  -> Virtual environment (.venv) already exists" -ForegroundColor Gray
     }
 
-    $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
-    if (Test-Path $PipPath) {
-        Write-Host "Installing dependencies in workspace..." -ForegroundColor Cyan
-        try {
-            & $PipPath install -e $CurrentDir | Out-Null
-            Write-Host "  -> Dependencies installed successfully!" -ForegroundColor Gray
-        } catch {
-            Write-Error "Failed to install dependencies: $_"
-        }
-    } else {
-        Write-Error "Could not find pip in virtual environment at $PipPath"
+    $NormalizedCurrent = [System.IO.Path]::GetFullPath($CurrentDir).TrimEnd('\')
+    $NormalizedInstall = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    if ([string]::Compare($NormalizedCurrent, $NormalizedInstall, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
+        Create-Junction -LinkPath $WorkspaceVenv -TargetDir $SharedVenv
+        Write-Host "  -> Linked shared Python runtime (.venv)" -ForegroundColor Gray
     }
 
     Write-Host ""

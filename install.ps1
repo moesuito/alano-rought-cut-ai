@@ -119,20 +119,29 @@ else {
     }
 }
 
-# 3. Setup Virtual Environment
+# 3. Setup Shared Virtual Environment
 $VenvDir = Join-Path $InstallDir ".venv"
-Write-Host "Setting up Python virtual environment in $VenvDir..." -ForegroundColor Cyan
+Write-Host "Setting up shared Python virtual environment in $VenvDir..." -ForegroundColor Cyan
 
 if (!(Test-Path $VenvDir)) {
     python -m venv $VenvDir
 }
 
 $PipPath = Join-Path $VenvDir "Scripts\pip.exe"
-Write-Host "Installing dependencies..." -ForegroundColor Cyan
+Write-Host "Installing project dependencies (PyTorch, DeepFilterNet 3, Pillow, NumPy, Requests)..." -ForegroundColor Cyan
 & $PipPath install -e $InstallDir
 
-# 4. Provider profile, credentials, CUDA runtime, and selected model prefetch.
 $PythonPath = Join-Path $VenvDir "Scripts\python.exe"
+
+# 4. Prefetch and validate DeepFilterNet 3 neural model
+Write-Host "Prefetching and validating DeepFilterNet 3 neural denoiser..." -ForegroundColor Cyan
+try {
+    & $PythonPath -c "from df.enhance import init_df; init_df(); print('DeepFilterNet 3 neural denoiser successfully verified!')"
+} catch {
+    Write-Host "Note: DeepFilterNet 3 model cache will initialize on first run." -ForegroundColor Yellow
+}
+
+# 5. Provider profile, credentials, CUDA runtime, and selected model prefetch.
 $WizardPath = Join-Path $InstallDir "helpers\setup_wizard.py"
 if (!(Test-Path $WizardPath)) {
     Write-Error "Setup wizard is missing: $WizardPath"
@@ -148,7 +157,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 5. Expose CLI to PATH
+# 6. Expose CLI to PATH
 $BinDir = Join-Path $InstallDir "bin"
 Write-Host "Adding $BinDir to PATH..." -ForegroundColor Cyan
 
@@ -164,7 +173,7 @@ if ($PathList -notcontains $BinDir) {
     Write-Host "Path is already configured." -ForegroundColor Gray
 }
 
-# 6. Done
+# 7. Done
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "          Installation Completed Successfully!            " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
