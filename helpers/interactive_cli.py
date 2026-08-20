@@ -11,6 +11,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Ensure standard streams use UTF-8 on Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -168,7 +178,8 @@ def interactive_main() -> None:
     brief = Prompt.ask(">", default="", show_default=False).strip()
 
     # 4. Confirmation Summary Card
-    console.print("\n" + Rule(title="📋 Resumo da Operação", style="cyan"))
+    console.print("")
+    console.print(Rule(title="📋 Resumo da Operação", style="cyan"))
     summary_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
     summary_table.add_column("Chave", style="dim cyan", width=22)
     summary_table.add_column("Valor", style="bold white")
