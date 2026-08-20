@@ -1634,8 +1634,26 @@ def main() -> None:
 
         # Determine start sweep stability
         if baseline_start_ok and len(F_in_raw_vals) == 3:
+            spread_raw = max(F_in_raw_vals) - min(F_in_raw_vals)
+            spread_rnn = max(F_in_rnn_vals) - min(F_in_rnn_vals)
             spread_in = max(F_in_raw_vals + F_in_rnn_vals) - min(F_in_raw_vals + F_in_rnn_vals)
             sweep_start_ok = True
+
+            # If raw VAD caught pre-speech breath/inhalation (comp_start_raw < comp_start_rnn)
+            # but RNNoise is stable and isolated the true voiced attack (spread_rnn <= 2):
+            # Prefer the clean RNNoise speech onset instead of treating the start as unstable!
+            if (
+                has_start_rnn
+                and comp_start_raw < comp_start_rnn
+                and spread_rnn <= 2
+                and comp_start_rnn <= float(first_word["start"])
+                and (prev_end is None or comp_start_rnn >= prev_end)
+            ):
+                t_onset = comp_start_rnn
+                F_in = time_to_frame(t_onset, fps, "floor")
+                spread_in = spread_rnn
+                if "rnnoise_pre_speech_breath_filtered" not in start_notes:
+                    start_notes.append("rnnoise_pre_speech_breath_filtered")
         else:
             spread_in = 9999
             sweep_start_ok = False
