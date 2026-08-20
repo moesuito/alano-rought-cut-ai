@@ -29,9 +29,39 @@ def get_current_denoiser_id() -> str:
     return EXPECTED_MODEL_HASH
 
 
+def _ensure_torchaudio_compat() -> None:
+    """Ensure torchaudio.backend.common.AudioMetaData exists for DeepFilterNet on newer torchaudio."""
+    try:
+        import torchaudio
+        try:
+            import torchaudio.backend.common
+        except (ImportError, AttributeError):
+            import types
+            from dataclasses import dataclass
+            
+            @dataclass
+            class AudioMetaData:
+                sample_rate: int = 48000
+                num_frames: int = 0
+                num_channels: int = 1
+                bits_per_sample: int = 16
+                encoding: str = "PCM_S"
+            
+            backend_mod = types.ModuleType("torchaudio.backend")
+            common_mod = types.ModuleType("torchaudio.backend.common")
+            common_mod.AudioMetaData = AudioMetaData
+            backend_mod.common = common_mod
+            torchaudio.backend = backend_mod
+            sys.modules["torchaudio.backend"] = backend_mod
+            sys.modules["torchaudio.backend.common"] = common_mod
+    except Exception:
+        pass
+
+
 def is_deepfilternet_available() -> bool:
     """Check if DeepFilterNet is installed and functional in the environment."""
     try:
+        _ensure_torchaudio_compat()
         import torch
         from df.enhance import enhance, init_df
         return True
@@ -43,6 +73,7 @@ def denoise_deepfilternet(mono_samples: np.ndarray, atten_lim_db: float = 100.0)
     """Denoise 48kHz int16 mono audio using DeepFilterNet 3 with maximum noise attenuation."""
     global _DF_MODEL, _DF_STATE
     try:
+        _ensure_torchaudio_compat()
         import torch
         from df.enhance import enhance, init_df
     except Exception:

@@ -24,11 +24,13 @@ from typing import Any, Iterable, Mapping
 TRANSCRIPT_SCHEMA_VERSION = 2
 WHISPERX_TRANSCRIPTION_PROVIDER = "whisperx_faster_whisper"
 ELEVENLABS_TRANSCRIPTION_PROVIDER = "elevenlabs_scribe"
+ASSEMBLYAI_TRANSCRIPTION_PROVIDER = "assemblyai_best"
 # Backward-compatible public name used throughout the local-provider tests.
 TRANSCRIPTION_PROVIDER = WHISPERX_TRANSCRIPTION_PROVIDER
 SUPPORTED_TRANSCRIPTION_PROVIDERS = {
     WHISPERX_TRANSCRIPTION_PROVIDER,
     ELEVENLABS_TRANSCRIPTION_PROVIDER,
+    ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
 }
 DIARIZATION_COMMUNITY_1 = "community-1"
 DIARIZATION_NONE = "none"
@@ -51,7 +53,7 @@ EXPECTED_RNNOISE_MODEL_HASH = (
     "F1357C4E5BE9DEE8467BEAD486DFCED2D75B640C26AD0B594FA7F102322371D9"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SPEAKER_RE = re.compile(r"^speaker(?:[_ -]?)(\d+)$", re.IGNORECASE)
+_SPEAKER_RE = re.compile(r"^(?:speaker(?:[_ -]?)(\d+)|([a-z]))$", re.IGNORECASE)
 _LEXICAL_WORD_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", re.UNICODE)
 
 
@@ -206,6 +208,31 @@ class ElevenLabsConfig:
         return config_hash(self)
 
 
+@dataclass(frozen=True, slots=True)
+class AssemblyAIConfig:
+    """Output-affecting AssemblyAI settings; credentials are intentionally absent."""
+
+    speech_model: str = "best"
+    language_code: str = "pt"
+    speaker_labels: bool = True
+    punctuate: bool = True
+    format_text: bool = True
+    diarization_mode: str = DIARIZATION_PROVIDER
+
+    def __post_init__(self) -> None:
+        if self.speech_model not in {"best", "nano"}:
+            raise TranscriptContractError("AssemblyAI config.speech_model must be 'best' or 'nano'")
+        if self.speaker_labels is not True or self.diarization_mode != DIARIZATION_PROVIDER:
+            raise TranscriptContractError("AssemblyAI provider diarization must be enabled")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return config_hash(self)
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         encoded = json.dumps(
@@ -221,13 +248,13 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 
 def config_hash(
-    config: WhisperXConfig | ElevenLabsConfig | Mapping[str, Any],
+    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig | Mapping[str, Any],
 ) -> str:
     """Return the deterministic SHA-256 of a runtime configuration."""
 
     value = (
         config.to_dict()
-        if isinstance(config, (WhisperXConfig, ElevenLabsConfig))
+        if isinstance(config, (WhisperXConfig, ElevenLabsConfig, AssemblyAIConfig))
         else dict(config)
     )
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
@@ -244,7 +271,7 @@ def sha256_file(path: str | os.PathLike[str]) -> str:
 
 
 def normalize_speaker_id(value: Any) -> str | None:
-    """Normalize Pyannote/WhisperX speaker labels to ``speaker_N``."""
+    """Normalize Pyannote/WhisperX/ElevenLabs/AssemblyAI speaker labels to ``speaker_N``."""
 
     if value is None:
         return None
@@ -258,7 +285,9 @@ def normalize_speaker_id(value: Any) -> str | None:
     match = _SPEAKER_RE.fullmatch(text)
     if not match:
         raise TranscriptContractError(f"unsupported speaker identifier: {value!r}")
-    return f"speaker_{int(match.group(1))}"
+    if match.group(1) is not None:
+        return f"speaker_{int(match.group(1))}"
+    return f"speaker_{ord(match.group(2).upper()) - ord('A')}"
 
 
 def _finite_number(value: Any, field: str, *, non_negative: bool = True) -> float:
@@ -752,6 +781,165 @@ def convert_elevenlabs_result(
     return transcript
 
 
+def convert_assemblyai_result(
+    result: Mapping[str, Any],
+    *,
+    config: AssemblyAIConfig,
+    source_path: str | os.PathLike[str] | None = None,
+    source_sha256: str | None = None,
+    max_overlap_seconds: float = 0.25,
+) -> dict[str, Any]:
+    """Normalize AssemblyAI word timestamps and speaker labels into schema v2."""
+
+    if not isinstance(result, Mapping):
+        raise TranscriptContractError("AssemblyAI result must be a mapping")
+    resolved_source_hash = _resolve_source_hash(source_path, source_sha256)
+    raw_words = result.get("words")
+    if not isinstance(raw_words, list):
+        raise TranscriptContractError("AssemblyAI result.words must be a list")
+
+    words: list[dict[str, Any]] = []
+    for index, raw_word in enumerate(raw_words):
+        if not isinstance(raw_word, Mapping):
+            raise TranscriptContractError(f"words[{index}] must be a record")
+        text = str(raw_word.get("text") or "").strip()
+        if not text:
+            continue
+        start_ms = raw_word.get("start")
+        end_ms = raw_word.get("end")
+        if start_ms is None or end_ms is None:
+            raise TranscriptContractError(f"words[{index}] is missing start or end")
+        start = float(start_ms) / 1000.0
+        end = float(end_ms) / 1000.0
+        start, end = _validate_interval(start, end, f"words[{index}]")
+        speaker = normalize_speaker_id(raw_word.get("speaker"))
+        if config.speaker_labels and speaker is None:
+            raise TranscriptContractError(
+                f"words[{index}] has no AssemblyAI speaker label"
+            )
+        score = raw_word.get("confidence")
+        if score is not None:
+            score = float(score)
+        words.append(
+            {
+                "text": text,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "type": "word",
+                "speaker_id": speaker,
+                "speaker_assignment": "provider_word_label",
+                "score": score,
+                "timing_source": "provider_word_timestamp",
+            }
+        )
+    if not words:
+        raise TranscriptContractError("AssemblyAI result contains no timed lexical words")
+    _validate_word_order(words, max_overlap_seconds=max_overlap_seconds, field="words")
+
+    segments: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    current_speaker: str | None = None
+    for word in words:
+        speaker = word["speaker_id"]
+        if current and (speaker != current_speaker or word["start"] - current[-1]["end"] >= 0.5):
+            segments.append(
+                {
+                    "id": len(segments),
+                    "start": current[0]["start"],
+                    "end": current[-1]["end"],
+                    "text": " ".join(item["text"] for item in current),
+                    "speaker_id": current_speaker,
+                    "words": [item.copy() for item in current],
+                }
+            )
+            current = []
+        if not current:
+            current_speaker = speaker
+        current.append(word)
+    if current:
+        segments.append(
+            {
+                "id": len(segments),
+                "start": current[0]["start"],
+                "end": current[-1]["end"],
+                "text": " ".join(item["text"] for item in current),
+                "speaker_id": current_speaker,
+                "words": [item.copy() for item in current],
+            }
+        )
+
+    diarization: list[dict[str, Any]] = []
+    for segment in segments:
+        speaker = segment["speaker_id"]
+        if speaker is None:
+            continue
+        if (
+            diarization
+            and diarization[-1]["speaker_id"] == speaker
+            and float(segment["start"]) <= float(diarization[-1]["end"]) + 0.05
+        ):
+            diarization[-1]["end"] = segment["end"]
+        else:
+            diarization.append(
+                {
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "speaker_id": speaker,
+                }
+            )
+
+    language_code = str(result.get("language_code") or config.language_code or "").strip()
+    if not language_code:
+        raise TranscriptContractError("AssemblyAI result has no language")
+    text = str(result.get("text") or "").strip() or " ".join(
+        word["text"] for word in words
+    )
+    transcript: dict[str, Any] = {
+        "text": text,
+        "language_code": language_code,
+        "words": words,
+        "segments": segments,
+        "diarization": diarization,
+        "_alano_cut": {
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+            "transcription_provider": ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
+            "source_sha256": resolved_source_hash,
+            "config": config.to_dict(),
+            "config_sha256": config.sha256,
+            "word_count": len(words),
+            "timed_word_count": len(words),
+            "timed_word_coverage": 1.0,
+            "models": {
+                "asr": config.speech_model,
+                "semantic_verifier": None,
+                "alignment": None,
+                "diarization": "assemblyai",
+            },
+            "model_revisions": {
+                "asr": config.speech_model,
+                "semantic_verifier": None,
+                "alignment": None,
+                "diarization": "provider",
+            },
+            "runtime": {"service": "assemblyai", "device": "cloud"},
+            "alignment": {
+                "status": "pass",
+                "mode": "provider_word_timestamps",
+                "timed_word_coverage": 1.0,
+            },
+            "diarization_status": {
+                "status": "pass",
+                "mode": DIARIZATION_PROVIDER,
+                "model": "assemblyai",
+                "exclusive": False,
+                "turn_count": len(diarization),
+            },
+        },
+    }
+    validate_transcript(transcript, max_overlap_seconds=max_overlap_seconds)
+    return transcript
+
+
 def validate_transcript(
     transcript: Mapping[str, Any],
     *,
@@ -783,8 +971,8 @@ def validate_transcript(
         DIARIZATION_NONE,
     }:
         raise TranscriptContractError("invalid WhisperX diarization mode")
-    if provider == ELEVENLABS_TRANSCRIPTION_PROVIDER and diarization_mode != DIARIZATION_PROVIDER:
-        raise TranscriptContractError("invalid ElevenLabs diarization mode")
+    if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER} and diarization_mode != DIARIZATION_PROVIDER:
+        raise TranscriptContractError(f"invalid {provider} diarization mode")
 
     words = transcript.get("words")
     if not isinstance(words, list) or not words:
@@ -806,7 +994,7 @@ def validate_transcript(
             word.get("timing_source")
         ).startswith("forced_alignment"):
             raise TranscriptContractError(f"words[{index}] is not forced-aligned")
-        if provider == ELEVENLABS_TRANSCRIPTION_PROVIDER and (
+        if provider in {ELEVENLABS_TRANSCRIPTION_PROVIDER, ASSEMBLYAI_TRANSCRIPTION_PROVIDER} and (
             word.get("timing_source") != "provider_word_timestamp"
         ):
             raise TranscriptContractError(
@@ -992,6 +1180,28 @@ def validate_normative_transcript(
             or diarization_status.get("turn_count") != len(transcript["diarization"])
         ):
             raise TranscriptContractError("ElevenLabs diarization binding is invalid")
+        return
+
+    if metadata.get("transcription_provider") == ASSEMBLYAI_TRANSCRIPTION_PROVIDER:
+        if config.get("speech_model") not in {"best", "nano"} or models.get("asr") != config.get("speech_model", "best"):
+            raise TranscriptContractError("AssemblyAI model binding is invalid")
+        if not isinstance(runtime, Mapping) or (
+            runtime.get("service") != "assemblyai" or runtime.get("device") != "cloud"
+        ):
+            raise TranscriptContractError("AssemblyAI service binding is invalid")
+        if not isinstance(alignment, Mapping) or (
+            alignment.get("status") != "pass"
+            or alignment.get("mode") != "provider_word_timestamps"
+            or alignment.get("timed_word_coverage") != 1.0
+        ):
+            raise TranscriptContractError("AssemblyAI word timestamp binding is invalid")
+        if not isinstance(diarization_status, Mapping) or (
+            diarization_status.get("status") != "pass"
+            or diarization_status.get("mode") != DIARIZATION_PROVIDER
+            or diarization_status.get("model") != "assemblyai"
+            or diarization_status.get("turn_count") != len(transcript["diarization"])
+        ):
+            raise TranscriptContractError("AssemblyAI diarization binding is invalid")
         return
 
     diarization_mode = config.get("diarization_mode")
@@ -1231,7 +1441,7 @@ def is_cache_valid(
     cache: Mapping[str, Any] | str | os.PathLike[str],
     *,
     source_sha256: str,
-    config: WhisperXConfig | ElevenLabsConfig,
+    config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig,
 ) -> bool:
     """Return true for a strict or scopeable-provisional bound cache."""
 
@@ -1247,11 +1457,12 @@ def is_cache_valid(
             return False
         if metadata.get("schema_version") != TRANSCRIPT_SCHEMA_VERSION:
             return False
-        expected_provider = (
-            WHISPERX_TRANSCRIPTION_PROVIDER
-            if isinstance(config, WhisperXConfig)
-            else ELEVENLABS_TRANSCRIPTION_PROVIDER
-        )
+        if isinstance(config, WhisperXConfig):
+            expected_provider = WHISPERX_TRANSCRIPTION_PROVIDER
+        elif isinstance(config, ElevenLabsConfig):
+            expected_provider = ELEVENLABS_TRANSCRIPTION_PROVIDER
+        else:
+            expected_provider = ASSEMBLYAI_TRANSCRIPTION_PROVIDER
         if metadata.get("transcription_provider") != expected_provider:
             return False
         if metadata.get("source_sha256") != source_sha256.lower():
@@ -1327,6 +1538,9 @@ __all__ = [
     "DIARIZATION_COMMUNITY_1",
     "DIARIZATION_NONE",
     "DIARIZATION_PROVIDER",
+    "ASSEMBLYAI_TRANSCRIPTION_PROVIDER",
+    "AssemblyAIConfig",
+    "convert_assemblyai_result",
     "ELEVENLABS_TRANSCRIPTION_PROVIDER",
     "TRANSCRIPT_SCHEMA_VERSION",
     "TRANSCRIPTION_PROVIDER",

@@ -17,6 +17,7 @@ try:
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         WhisperXConfig,
         ElevenLabsConfig,
+        AssemblyAIConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
@@ -33,6 +34,7 @@ except ModuleNotFoundError as exc:
         DEFAULT_PORTUGUESE_INITIAL_PROMPT,
         WhisperXConfig,
         ElevenLabsConfig,
+        AssemblyAIConfig,
         DIARIZATION_COMMUNITY_1,
         DIARIZATION_NONE,
     )
@@ -84,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--edit-dir", type=Path, default=None)
     parser.add_argument(
         "--provider",
-        choices=("configured", "whisperx", "elevenlabs"),
+        choices=("configured", "whisperx", "elevenlabs", "assemblyai"),
         default="configured",
     )
     parser.add_argument("--language", default="pt")
@@ -148,7 +150,7 @@ def main() -> int:
                 args.diarization
                 or (settings.diarization if settings else DIARIZATION_COMMUNITY_1)
             )
-            config: WhisperXConfig | ElevenLabsConfig = WhisperXConfig(
+            config: WhisperXConfig | ElevenLabsConfig | AssemblyAIConfig = WhisperXConfig(
                 model=args.model,
                 language=language,
                 compute_type=args.compute_type,
@@ -173,8 +175,12 @@ def main() -> int:
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
             )
-        else:
+        elif provider == "elevenlabs":
             config = ElevenLabsConfig(language=language)
+        elif provider == "assemblyai":
+            config = AssemblyAIConfig(language_code=language or "pt")
+        else:
+            raise ValueError(f"unsupported transcription provider: {provider}")
     except Exception as error:
         print(f"invalid transcription configuration: {error}", file=sys.stderr)
         return 1
