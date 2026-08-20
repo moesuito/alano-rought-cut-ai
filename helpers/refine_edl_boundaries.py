@@ -35,6 +35,7 @@ from helpers.internal_silence import (
 )
 from helpers.audio_analysis import (
     EXPECTED_MODEL_HASH,
+    get_current_denoiser_id,
     get_ffmpeg_version,
     is_ffmpeg_arnndn_available,
     verify_model_hash,

@@ -15,7 +15,51 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+import sys
 import numpy as np
+
+_DF_MODEL = None
+_DF_STATE = None
+
+
+def get_current_denoiser_id() -> str:
+    """Return identifier for the active neural denoiser."""
+    if is_deepfilternet_available():
+        return "DeepFilterNet3-max"
+    return EXPECTED_MODEL_HASH
+
+
+def is_deepfilternet_available() -> bool:
+    """Check if DeepFilterNet is installed and functional in the environment."""
+    try:
+        import torch
+        from df.enhance import enhance, init_df
+        return True
+    except Exception:
+        return False
+
+
+def denoise_deepfilternet(mono_samples: np.ndarray, atten_lim_db: float = 100.0) -> np.ndarray | None:
+    """Denoise 48kHz int16 mono audio using DeepFilterNet 3 with maximum noise attenuation."""
+    global _DF_MODEL, _DF_STATE
+    try:
+        import torch
+        from df.enhance import enhance, init_df
+    except Exception:
+        return None
+
+    try:
+        if _DF_MODEL is None or _DF_STATE is None:
+            _DF_MODEL, _DF_STATE, _ = init_df()
+
+        audio_float = mono_samples.astype(np.float32) / 32768.0
+        audio_tensor = torch.from_numpy(audio_float).unsqueeze(0)
+        enhanced_tensor = enhance(_DF_MODEL, _DF_STATE, audio_tensor, atten_lim_db=atten_lim_db)
+        enhanced_np = enhanced_tensor.squeeze(0).clamp(-1.0, 1.0).numpy()
+        return (enhanced_np * 32767.0).astype(np.int16)
+    except Exception as exc:
+        print(f"DeepFilterNet enhancement error: {exc}", file=sys.stderr)
+        return None
 
 # Standard parameters for voice activity detection
 DEFAULT_VAD_PARAMS = {
@@ -30,7 +74,7 @@ DEFAULT_VAD_PARAMS = {
     "max_lag_ms": 30,
 }
 
-EXPECTED_MODEL_HASH = "F1357C4E5BE9DEE8467BEAD486DFCED2D75B640C26AD0B594FA7F102322371D9"
+EXPECTED_MODEL_HASH = "51BB92B9450988F5DE3DAC32422C3551CA61760C1EF042751037178F4DFAB3F8"
 
 
 def get_ffmpeg_version() -> str:
@@ -283,26 +327,34 @@ def extract_analysis_audio(
     temp_rnn_in = rnn_path.with_suffix(".rnn_in.tmp")
     rnn_mono.tofile(temp_rnn_in)
 
-    # Run RNNoise filter on the anchor dominant channel
-    escaped_model = str(model_path.resolve()).replace("\\", "/")
-    escaped_model = escaped_model.replace(":", "\\:")
-    escaped_model = escaped_model.replace("'", "'\\\\''")
-
+    # Denoise mono channel: use DeepFilterNet 3 (attenuation limit 100 dB) if available, or RNNoise as fallback
     temp_rnn_out = rnn_path.with_suffix(".rnn_out.tmp")
-    cmd_rnn = [
-        "ffmpeg", "-y", "-v", "error",
-        "-f", "s16le", "-ac", "1", "-ar", "48000",
-        "-i", str(temp_rnn_in),
-        "-af", f"arnndn=model='{escaped_model}'",
-        "-f", "s16le", str(temp_rnn_out)
-    ]
-    try:
+    denoised_samples = denoise_deepfilternet(rnn_mono, atten_lim_db=100.0)
+    if denoised_samples is not None:
+        denoised_samples.tofile(temp_rnn_out)
+        denoiser_used = "deepfilternet3"
+    else:
+        escaped_model = str(model_path.resolve()).replace("\\", "/")
+        escaped_model = escaped_model.replace(":", "\\:")
+        escaped_model = escaped_model.replace("'", "'\\\\''")
+        cmd_rnn = [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "s16le", "-ac", "1", "-ar", "48000",
+            "-i", str(temp_rnn_in),
+            "-af", f"arnndn=model='{escaped_model}'",
+            "-f", "s16le", str(temp_rnn_out)
+        ]
         subprocess.run(cmd_rnn, check=True)
+        denoiser_used = "rnnoise"
+
+    try:
         # Write metadata JSON
         meta = {
             "fingerprint": fingerprint,
             "version": "1.1",
             "model": EXPECTED_MODEL_HASH,
+            "denoiser": denoiser_used,
+            "atten_lim_db": 100.0 if denoiser_used == "deepfilternet3" else None,
             "params": DEFAULT_VAD_PARAMS,
             "source": {
                 "path": str(source_path.resolve()),
@@ -404,7 +456,8 @@ def run_vad_hysteresis(
     threshold_high_db: float,
     threshold_low_db: float,
     gap_fill_frames: int,
-    transient_protection_frames: int
+    transient_protection_frames: int,
+    min_speech_db: float = -55.0
 ) -> np.ndarray:
     """Run VAD using adaptive noise floor thresholds, gap filling, and transient protection."""
     n = len(rms_db)
@@ -412,8 +465,8 @@ def run_vad_hysteresis(
 
     is_active = False
     for i in range(n):
-        high_t = noise_floor_db[i] + threshold_high_db
-        low_t = noise_floor_db[i] + threshold_low_db
+        high_t = max(noise_floor_db[i] + threshold_high_db, min_speech_db)
+        low_t = max(noise_floor_db[i] + threshold_low_db, min_speech_db - 8.0)
 
         if is_active:
             if rms_db[i] < low_t:
