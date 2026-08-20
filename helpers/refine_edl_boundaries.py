@@ -1234,13 +1234,13 @@ def main() -> None:
                     )
 
         # Find refined end bound (from last word)
+        end_notes: list[str] = []
         comp_start_raw_end, comp_end_raw, has_end_raw, end_raw_candidates = get_scored_refined_bound(
             activity_raw, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
         )
         comp_start_rnn_end, comp_end_rnn, has_end_rnn, end_rnn_candidates = get_scored_refined_bound(
             activity_rnn, float(last_word["start"]), float(last_word["end"]), prev_end, next_start
         )
-
         t_offset_raw = comp_end_raw if has_end_raw else float(last_word["end"])
         t_offset_rnn = comp_end_rnn if has_end_rnn else float(last_word["end"])
 
@@ -1254,8 +1254,20 @@ def main() -> None:
         else:
             t_offset = float(last_word["end"])
 
-        # Never move an out-point before the selected last word
-        if t_offset < float(last_word["end"]):
+        # Acoustic Out-point Snapping:
+        # If VAD detected the acoustic decay of the speech before last_word["end"],
+        # check if there is sustained silence (>=150ms) before last_word["end"].
+        # If so, snap to the acoustic offset (eliminates ASR over-estimation).
+        # If the gap is small (<150ms), protect the ending conservatively against jitter.
+        # If VAD detected speech extending past last_word["end"], extend t_offset
+        # to avoid cutting off final syllables (eliminates ASR under-estimation).
+        trailing_silence = float(last_word["end"]) - t_offset if (has_end_raw or has_end_rnn) else 0.0
+
+        if (has_end_raw or has_end_rnn) and trailing_silence >= 0.15:
+            end_notes.append("asr_overestimation_tail_snapped")
+        elif (has_end_raw or has_end_rnn) and t_offset > float(last_word["end"]):
+            end_notes.append("asr_underestimation_tail_extended")
+        elif t_offset < float(last_word["end"]):
             t_offset = float(last_word["end"])
 
         # Check for collision with next word
@@ -1301,20 +1313,20 @@ def main() -> None:
                     is_clamped_end = True
                     end_rejection_reasons.append("frame_clamp_collision")
 
-        # Cuts last word?
-        cuts_last_word = (F_out < time_to_frame(float(last_word["end"]), fps, "ceil"))
+        # Cuts last word? Only if F_out is placed before the acoustic end of the word
+        cuts_last_word = (F_out < time_to_frame(t_offset, fps, "ceil"))
 
         # Verify tail padding
         tail_frames = F_out - time_to_frame(t_offset, fps, "ceil")
         has_insufficient_tail = (tail_frames < 2)
 
-        # Check if VAD or clamping/insufficient tail makes VAD invalid or cuts last word
+        # Check if VAD or clamping/insufficient tail makes VAD invalid
         vad_invalid = (
             not (has_end_raw and has_end_rnn)
             or has_insufficient_tail
             or is_clamped_end
-            or (t_offset_raw < float(last_word["end"]))
-            or (t_offset_rnn < float(last_word["end"]))
+            or (t_offset_raw < float(last_word["end"]) and (float(last_word["end"]) - t_offset_raw) < 0.15)
+            or (t_offset_rnn < float(last_word["end"]) and (float(last_word["end"]) - t_offset_rnn) < 0.15)
         )
 
         orig_cuts_last_word = (orig_end < float(last_word["end"]))
@@ -1353,11 +1365,14 @@ def main() -> None:
         )
 
         # Defensible offset evidence:
-        offset_evidence = float(last_word["end"])
-        if has_end_raw:
-            offset_evidence = max(offset_evidence, t_offset_raw)
-        if has_end_rnn:
-            offset_evidence = max(offset_evidence, t_offset_rnn)
+        if has_end_raw and has_end_rnn:
+            offset_evidence = max(t_offset_raw, t_offset_rnn)
+        elif has_end_raw:
+            offset_evidence = t_offset_raw
+        elif has_end_rnn:
+            offset_evidence = t_offset_rnn
+        else:
+            offset_evidence = float(last_word["end"])
 
         F_evidence = time_to_frame(offset_evidence, fps, "ceil")
         has_two_frame_tail_lexical = (F_orig_out >= F_evidence + 2)
@@ -1366,7 +1381,6 @@ def main() -> None:
         is_lexical_safe_end = False
         is_preview_guarded_end_fallback = False
         end_boundary_constraint = None
-        end_notes: list[str] = []
         if vad_invalid:
             metrics_ok = (end_snr is not None and end_corr is not None and end_snr >= 8.0 and end_corr >= 0.8)
             contains_last_word = (orig_end >= float(last_word["end"]))
