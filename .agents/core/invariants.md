@@ -1,29 +1,28 @@
 # Invariants
 
-Keep these rules in context throughout the run.
+Mantenha estas regras em contexto durante todo o run.
 
-- Final deliverable is `<videos_dir>/edit/timeline.xml`.
-- All session outputs go to `<videos_dir>/edit/`.
-- After Step 01, `edit/...` is shorthand for `<videos_dir>/edit/...`.
-- Never write session output inside the repo folder.
-- Never cut inside a word.
-- Do not trust ASR boundary timestamps alone when a cut feels tight; validate against waveform energy too.
-- Source and preview transcription must use the same provider/configuration declared in workspace `alanocut.json`; silent provider fallback is prohibited.
-- WhisperX is CUDA-only and requires forced-aligned words. Community-1 speakers are preferred; explicit `none` diarization is allowed with no speaker IDs and must be recorded as reduced precision. ElevenLabs requires provider word timestamps and provider diarization.
-- Every normative transcript word must have a positive timed interval; CPU fallback, unaligned Whisper, missing selected-provider timing, and silent provider fallback are prohibited.
-- Use canonical provider JSON word timestamps when trimming inside a packed phrase.
-- `takes_packed.md` is the primary reading view, but not the final edit.
-- The transcript is the map. The LLM is the editor.
-- Use LLM editorial judgment, not deterministic scoring algorithms.
-- Cache transcripts only when source and configuration fingerprints match; legacy or differently configured transcripts are stale.
-- Do not re-transcribe unchanged files whose canonical cache contract still matches.
-- XML should point to original media.
-- The agent-facing QA path is audio-only. It does not inspect video frames and does not add fades, loudness processing, or other finishing effects.
-- Preview renders are dry PCM WAV QA artifacts only.
-- After editorial/runtime decisions are stable, execute this gate chain without skipping or reordering it: boundary refiner -> WAV/timeline-map renderer -> preview audio QC -> semantic QC -> forced persisted preview transcription with the preview WAV hash -> join-centric preview transcript QC -> readiness gate exit code 0 -> XML export.
-- Preview/fixed timeline transcripts are mandatory QA artifacts; use their timed words and join evidence to catch duplicated, clipped, orphaned, or semantically wrong final content.
-- `timeline_view.py` and `validate_edl_boundaries.py` are legacy manual diagnostics outside the normative workflow. They cannot replace the refiner or any mandatory gate and are scheduled for removal in v0.5.0.
-- Do not export XML when a mandatory artifact is missing or stale, a QC status is not `pass`, or `verify_edit_ready.py` returns anything other than exit code 0.
-- Do not create a final high-quality MP4.
-- Do not add finishing features: subtitles, overlays, color grading, animations, Remotion, Manim, HyperFrames, YouTube download, publishing, or final-render features.
-- Ask the user only when missing information would materially harm the edit.
+- A entrega final é `<videos_dir>/edit/timeline.xml`.
+- Artefatos de uma execução por skill ficam em `<videos_dir>/edit/`; execuções da CLI instalada usam a sessão correspondente em `%LOCALAPPDATA%\AlanoCut\sessions` e entregam o XML na pasta do usuário.
+- Nunca grave mídia, transcrições ou segredos dentro do repositório.
+- Nunca corte dentro de uma palavra.
+- A precisão da saída nunca pode superar a precisão da evidência recebida.
+- Não confie somente no ASR quando um boundary estiver apertado; use evidência acústica.
+- A stack canônica é Whisper Vulkan + Wav2Vec2 DirectML + Pyannote ONNX DirectML, com DeepFilterNet no caminho acústico.
+- WhisperX, ElevenLabs e AssemblyAI não pertencem a novos runs v0.6.
+- Toda palavra normativa deve possuir intervalo temporal positivo e proveniência auditável.
+- Caches só são válidos quando source hash, schema, modelos, configurações e versões relevantes correspondem.
+- `takes_packed.md` é a leitura editorial primária; o JSON canônico de palavras é a autoridade temporal.
+- A transcrição é o mapa. A LLM é a editora. Helpers determinísticos são os verificadores e executores.
+- A LLM não inventa percepção audiovisual, fontes ou timestamps.
+- O EDL é a autoridade editorial entre agente e pipeline técnico.
+- XML referencia mídia original.
+- O caminho de QA é audio-only e não adiciona acabamento.
+- Preview é WAV PCM seco com timeline map.
+- Execute sem pular ou reordenar: boundary refiner -> WAV/map -> audio QC -> semantic QC -> preview transcript -> transcript join QC -> readiness exit 0 -> XML.
+- Qualquer relatório ausente/antigo, status diferente de `pass`, falha de parse ou readiness diferente de `0` bloqueia XML.
+- Mudança material no EDL invalida todos os artefatos downstream.
+- Falha de parse ou limite de loops não pode ser convertido em aprovação.
+- `timeline_view.py` e `validate_edl_boundaries.py` são diagnósticos manuais legados, não substitutos dos gates.
+- Não crie MP4 final, legendas, overlays, color grading, animações, publicação ou finishing.
+- Pergunte ao usuário somente quando a ausência de informação puder prejudicar materialmente a edição.

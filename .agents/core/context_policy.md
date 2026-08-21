@@ -1,6 +1,6 @@
 # Context Policy
 
-Use the capability router in `AGENTS.md`. Protocol A is the default; Protocol B is a fallback for genuinely constrained runtimes.
+Use the capability router in `SKILL.md`. Protocol A is the default; Protocol B is a fallback for genuinely constrained runtimes. Root `AGENTS.md` contains repository engineering constraints shared by both protocols.
 
 ## Protocol A - Full Operational Context
 
@@ -24,7 +24,7 @@ Use the capability router in `AGENTS.md`. Protocol A is the default; Protocol B 
   - canonical provider JSON only when exact word timestamps or speakers are needed;
   - `preview_timeline.json`, audio QC, and timed preview transcript evidence for cut-boundary QA.
 
-`timeline_view.py` is a legacy manual diagnostic outside both protocols and is scheduled for removal in v0.5.0.
+`timeline_view.py` is a legacy manual diagnostic outside both protocols and is pending dependency-aware removal.
 
 ## Shared Rule
 

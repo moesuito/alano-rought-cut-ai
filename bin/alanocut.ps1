@@ -11,13 +11,13 @@ $InstallRoot = Split-Path -Parent $ScriptDir
 $env:PYTHONPATH = "$InstallRoot;$InstallRoot\helpers;$env:PYTHONPATH"
 
 function Show-Help {
-    Write-Host "Alano Rough Cut AI CLI - Command Line Utility (v0.5.0)" -ForegroundColor Green
+    Write-Host "Alano Rough Cut AI CLI - Command Line Utility (v0.6.0)" -ForegroundColor Green
     Write-Host "Usage:" -ForegroundColor White
     Write-Host "  alanocut             Launch Interactive Terminal UI in current folder (Default)" -ForegroundColor Cyan
     Write-Host "  alanocut cut         Execute autonomous rough cut non-interactively" -ForegroundColor White
     Write-Host "  alanocut clean       Clean AppData cache to free disk space" -ForegroundColor White
     Write-Host "  alanocut sessions    List previous editing sessions saved in AppData" -ForegroundColor White
-    Write-Host "  alanocut configure   Configure ElevenLabs, AssemblyAI, or local Whisper transcription" -ForegroundColor White
+    Write-Host "  alanocut configure   Configure the local Whisper/Vulkan transcription stack" -ForegroundColor White
     Write-Host "  alanocut update      Check for updates on GitHub and apply if available" -ForegroundColor White
     Write-Host "  alanocut --help      Show this help message" -ForegroundColor White
     Write-Host ""

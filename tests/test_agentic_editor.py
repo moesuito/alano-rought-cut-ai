@@ -40,6 +40,7 @@ def test_validate_and_normalize_cuts():
 
 def test_agentic_prompts_generation():
     short_prompt = get_agentic_system_prompt("reels")
+    assert "System Prompt do Agente Editorial Multi-Turno" in short_prompt
     assert "<= 90 segundos" in short_prompt
 
     long_prompt = get_agentic_system_prompt("aula")

@@ -1,4 +1,4 @@
-"""Autonomous Rough Cut Orchestrator (Alano Rough Cut AI v0.5.0).
+"""Autonomous Rough Cut Orchestrator (Alano Rough Cut AI v0.6.0).
 
 Executes the entire end-to-end rough cut pipeline in a single automated flow:
 1. Inventory & Inspection

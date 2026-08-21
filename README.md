@@ -1,142 +1,110 @@
-# alano-rought-cut-ai
+# Alano Rough Cut AI
 
-Introducing **alano-rought-cut-ai** — a specialized autonomous AI engine for video rough cuts and Adobe Premiere Pro timeline XML export.
+Motor local-first de rough cut orientado por transcrição, com agente editorial multi-turno e exportação de timeline para Adobe Premiere Pro.
 
-Current release: **v0.6.0** (Autonomous Agentic Loop Edition).
+Linha atual de desenvolvimento: **v0.6.0 — Agentic Editor**.
 
-This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as an **Autonomous Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
+## Objetivo
 
-## What it does
+O sistema recebe mídia bruta, produz uma transcrição canônica, pensa como um editor sênior, monta um EDL proprietário, refina cortes com evidência acústica e exporta `timeline.xml` no padrão Final Cut Pro 7/XMEML.
 
-- **Autonomous Agentic Editorial Loop (`helpers/agentic_editor.py`)**: Multi-turn cognitive editing engine that diagnoses the footage, maps retakes, drafts the timeline, and auto-critiques/refines the cut before delivery.
-- **Local GPU Acoustic Stack**: Universal GPU acceleration across NVIDIA, AMD, and Intel GPUs via Whisper Large v3 (Vulkan), Wav2Vec2 CTC Forced Alignment (DirectML), Pyannote Diarization (DirectML), and DeepFilterNet 3 (100 dB denoising).
-- **Interactive Terminal Experience (`alanocut`)**: Open a terminal in any video folder, run `alanocut`, choose format and brief, and get `./timeline.xml` with zero folder pollution.
-- **Identifies and cuts out filler words, false starts, and studio banter** (`"Beleza."`, `"Tá."`, `"Corta."`, `"Volta."` isolated between errors).
-- **Acoustic Snapper & Dynamic Pacing**: Word boundary preservation with $\ge 66$ms padding, 350ms standard gaps (long-form), 500ms list preservation (`is_list: true`), and 200ms rapid pacing for short-form (Reels/TikTok <= 90s).
-- **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro**.
-- **Zero Folder Pollution**: All session caches, transcripts, and logs live cleanly in `%APPDATA%/AlanoCut/sessions/<session_id>/`.
+O escopo termina no rough cut. O projeto não faz render final, legendas, motion design, color grading, trilha ou publicação.
 
-## Installation (Windows PowerShell)
+## Arquitetura atual
 
-Install the assistant and the global CLI utility `alanocut` by running the following command in PowerShell:
+```text
+Mídia original
+  -> DeepFilterNet 3
+  -> Whisper local via Vulkan
+  -> Wav2Vec2 forced alignment via DirectML
+  -> Pyannote ONNX diarization via DirectML
+  -> transcrição palavra a palavra
+  -> agente editorial multi-turno
+       diagnóstico e estratégia
+       montagem da EDL
+       crítica e refinamento em loops
+  -> boundary refiner determinístico
+  -> preview WAV + QC
+  -> readiness gate
+  -> timeline.xml
+```
+
+O caminho de mídia é local. A LLM editorial usa uma API OpenAI-compatible: durante o desenvolvimento ela pode apontar para um serviço remoto, mas a arquitetura também aceita servidores locais como Ollama ou vLLM. O objetivo é validar o produto com modelos menores executados na máquina do usuário.
+
+## Agente editorial
+
+O agente recebe a transcrição pronta e trabalha somente na decisão editorial. Ele não transcreve, não faz análise acústica e não inventa percepção visual.
+
+O loop v0.6 separa o trabalho em três fases:
+
+1. diagnóstico global, retakes e estratégia narrativa;
+2. plano concreto de montagem e EDL preliminar;
+3. crítica da própria edição, revisão e novos ciclos até aprovação.
+
+O conhecimento/persona do agente fica em [`helpers/prompts/agentic_editor_system_prompt.md`](helpers/prompts/agentic_editor_system_prompt.md). As mensagens de tarefa e os schemas JSON ficam em [`helpers/prompts/agentic_prompts.py`](helpers/prompts/agentic_prompts.py). Essa separação é intencional para permitir evolução editorial sem reescrever o motor Python.
+
+O modo one-shot continua disponível apenas como compatibilidade enquanto a migração para o loop agêntico é validada.
+
+## GPU local
+
+A stack Windows busca um caminho cross-vendor:
+
+- Whisper.cpp/Vulkan para ASR local;
+- DirectML para forced alignment e diarização ONNX;
+- suporte a GPUs AMD, NVIDIA e Intel sem manter uma implementação editorial diferente por fabricante;
+- fallback de CPU apenas quando o contrato do componente o permite e o resultado continua auditável.
+
+WhisperX, ElevenLabs e AssemblyAI são caminhos legados e não fazem parte da configuração canônica v0.6. O código de compatibilidade ainda será removido após o próximo code review confirmar suas dependências.
+
+## Uso atual
+
+No Windows, a instalação global fica em `%APPDATA%\alano-rought-cut-ai` e as sessões/caches ficam em `%LOCALAPPDATA%\AlanoCut`.
 
 ```powershell
-irm https://raw.githubusercontent.com/moesuito/alano-rought-cut-ai/main/install.ps1 | iex
+.\install.ps1 -Provider whisper-vulkan
 ```
 
-*Note: Restart your terminal/IDE after installation to load the updated `PATH` environment variables.*
-
-The terminal wizard asks which provider to use on the first installation. See
-[the transcription setup guide](docs/TRANSCRIPTION_SETUP.md) for the two
-profiles, credentials, model cache, disk requirement, and headless flags.
-
-## Updating
-
-If `alanocut` is already installed, update the global install from the latest GitHub release:
+Depois, em uma pasta com os vídeos:
 
 ```powershell
-alanocut update
+alanocut
 ```
 
-`alanocut init` also checks for updates before initializing a workspace.
+O terminal interativo atual é uma interface provisória para validar o pipeline. A futura GUI desktop ainda será decidida entre alternativas como Electron e Tauri; não há compromisso de framework nesta versão.
 
-`alanocut update` refreshes the global installation under `%APPDATA%\alano-rought-cut-ai`. Existing workspaces keep their copied `AGENTS.md`, `.agents/`, helpers, and configuration until they are refreshed. After updating, run this once inside each existing workspace that should receive the new harness:
+## Configuração da LLM
 
-```powershell
-alanocut init
+Use `.env` ou variáveis de ambiente:
+
+```dotenv
+LLM_API_KEY=
+LLM_BASE_URL=https://integrate.api.nvidia.com/v1
+LLM_MODEL=z-ai/glm-5.2
 ```
 
-This refresh preserves the workspace's `.env`, `raw_video/`, and `raw_video/edit/` contents.
+Para um servidor local OpenAI-compatible, substitua `LLM_BASE_URL` e `LLM_MODEL`. Servidores locais que não exigem autenticação podem usar um valor sentinela em `LLM_API_KEY` enquanto o cliente ainda exigir o campo.
 
-## How to use (`alanocut init`)
+## Documentação
 
-Instead of cloning and registering the skill manually for each project, navigate to the folder containing your raw videos and run:
+- [`AGENTS.md`](AGENTS.md): direção do produto e regras de desenvolvimento.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): componentes e contratos.
+- [`docs/AGENTIC_LOOP_V0.6.0.md`](docs/AGENTIC_LOOP_V0.6.0.md): estado do agente multi-turno.
+- [`docs/TRANSCRIPTION_SETUP.md`](docs/TRANSCRIPTION_SETUP.md): stack local de transcrição.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): prioridades depois da consolidação.
+- [`.agents/core/workflow.md`](.agents/core/workflow.md): workflow normativo de edição e gates.
 
-```powershell
-alanocut init
-```
+## Estado conhecido da v0.6
 
-This will:
-1. Initialize the directory structure (`raw_video/` and `raw_video/edit/`).
-2. Copy the helper scripts plus `AGENTS.md` and `.agents/` modular editing rules into your directory.
-3. Automatically register the editing skill for Claude Code (`~/.claude/skills/video-use`) and Gemini (`~/.gemini/config/skills/video-use`) pointing to your current folder.
+A branch contém a primeira implementação funcional do loop multi-turno. Ela ainda precisa de code review e testes reais mais amplos antes de ser tratada como release fechada.
 
-Before writing any project file, `alanocut init` asks which transcription
-provider this workspace will use. It saves the choice in `alanocut.json` and
-keeps keys only in the global Alano Cut `.env`; credentials are never copied
-into the workspace.
+As dívidas já conhecidas incluem:
 
-After running `init`:
-1. Drop your raw video files inside `raw_video/`.
-2. Optionally add editing context in `raw_video/edit/USER_BRIEF.md` (target duration, audience, must keep/cut, pacing).
-3. Open your AI agent (like Claude Code or Gemini), read `AGENTS.md`, and say: *"edit these clips"* or *"make a rough cut"*.
+- tornar parse, reflexão e limite de loops estritamente fail-closed;
+- conectar todos os gates documentados ao orquestrador antes do XML;
+- eliminar caminhos legados de transcrição em nuvem e WhisperX;
+- ampliar planejamento, decomposição de tarefas, memória de trabalho e critérios editoriais para modelos locais menores;
+- validar Reels, YouTube, videoaulas e VSLs com mídia real.
 
+## Origem
 
-## How it works
-
-The agent uses an audio-only evidence stack for word-boundary precision:
-
-1. **Source transcripts**: each workspace chooses one canonical provider. WhisperX runs `faster-whisper large-v3` on CUDA with forced word alignment and optionally Community-1 speakers; the no-diarization profile uses pinned Silero VAD and keeps speaker IDs empty. ElevenLabs Scribe uses its provider word timestamps and diarization. Both produce schema-v2 transcripts bound to the provider, configuration and source hash. A pinned, windowed `small` verifier may recover recording cues only in the local path after two-window consensus; ordinary verifier text is never copied. Packed takes remain the model's primary editorial reading view.
-2. **Exact boundary refinement**: `refine_edl_boundaries.py` first splits every canonical consecutive-word gap strictly above 300ms, then combines lexical anchors, raw max-per-channel waveform evidence, and RNNoise to write exact `source_in_frame` / `source_out_frame` values and a hash-bound report.
-3. **Dry preview and audio QC**: `render.py` creates PCM16/48 kHz stereo `preview.wav` plus `preview_timeline.json`; `preview_audio_qc.py` validates every entry/join for inactivity, attack/tail safety, residual activity, clipping, and pops.
-4. **Content coverage**: `semantic_qc.py` validates `metadata.required_beats` against words actually selected from source transcripts.
-5. **Join transcript QC**: the preview is always re-transcribed by the exact provider/configuration recorded by the EDL's selected source transcripts and persisted with its WAV hash. `preview_transcript_qc.py` compares the expected left suffix/right prefix at every mapped join, audits the fixed internal-silence contract, and uses global similarity/recall only as supplemental evidence.
-6. **Readiness and XML**: `verify_edit_ready.py` must return exit code 0 for the exact current artifacts before the agent calls `edl_to_fcpxml.py`.
-
-`timeline_view.py` and `validate_edl_boundaries.py` are legacy manual diagnostics outside the agent workflow and are scheduled for removal in v0.5.0.
-
-## Pipeline
-
-```
-Configured provider -> Pack -> Editorial EDL -> Refine exact frames -> WAV/map -> Audio QC -> Semantic QC
-                                      ^                                      |
-                                      |                                      v
-                                      +-- EDL change <- Persist preview transcript/hash -> Join transcript QC -> Readiness(0) -> XML
-```
-
-Any EDL change invalidates downstream artifacts and restarts the chain at boundary refinement. The normative agent path uses no fades, video frames, or visual inspection.
-
-## Agent protocols
-
-- **Protocol A — capable agent (default):** read the invariants, workflow, unified capable-agent protocol, and all ten step modules before editing. Keep the end-to-end model in context and execute continuously while checkpointing `run_state.md`.
-- **Protocol B — context-constrained fallback:** load one step module at a time and use `run_state.md` as the memory bridge.
-
-Routing is based on real context capacity, not a brittle model-name allowlist. ChatGPT, Codex, Claude Code, Claude Opus/Sonnet, Gemini, and Antigravity are typical Protocol A candidates. Both protocols keep archetype loading selective and produce the same artifacts and QC gates.
-
-The protocols differ only in context strategy. Core invariants, workflow, step modules, gates, helpers, artifacts, QC, and completion criteria are shared and normative for every agent.
-
-## What's new in v0.4.0
-
-- Added a strict quality gate script (`verify_edit_ready.py`) run before XML export.
-- Support for `source_in_frame` / `source_out_frame` mapping inside EDL ranges and XML conversion for precise cut alignment.
-- Switched workflow to be audio-only (`preview.wav` and `preview_timeline.json`), rejecting `.mp4` visual renders.
-- Made boundary refinement, audio QC, required-beat QC, persisted preview transcription, and join-centric transcript QC mandatory and hash-bound.
-- Made every internal lexical gap strictly above 300ms an automatic, readiness-enforced jump cut.
-- Added guided multi-provider setup, secret-free workspace profiles, optional Community-1 diarization, and canonical ElevenLabs Scribe transcripts.
-- Marked `timeline_view.py` as legacy, scheduled for removal in v0.5.0.
-
-## What shipped in v0.3.0
-
-- Full-context execution is now the default for capable agents.
-- The original modular one-step-at-a-time workflow remains available for context-constrained agents.
-- Both protocols now share one normative rule set and identical completion gates.
-
-## QA helper commands
-
-```powershell
-alanocut setup-transcription
-alanocut transcription-doctor
-.venv\Scripts\python.exe helpers\transcribe_batch.py raw_video --provider configured --language pt --model large-v3 --batch-size 2
-.venv\Scripts\python.exe helpers\refine_edl_boundaries.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --report raw_video\edit\edl_boundary_qc.json
-.venv\Scripts\python.exe helpers\render.py raw_video\edit\edl.json -o raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
-.venv\Scripts\python.exe helpers\preview_audio_qc.py raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json --edl raw_video\edit\edl.json --output raw_video\edit\preview_audio_qc.json
-.venv\Scripts\python.exe helpers\semantic_qc.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --output raw_video\edit\edl_semantic_qc.json
-.venv\Scripts\python.exe helpers\preview_transcript_qc.py raw_video\edit\preview.wav --provider configured --audio raw_video\edit\preview.wav --edl raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --timeline-map raw_video\edit\preview_timeline.json --transcript-output raw_video\edit\transcripts\preview.json --output raw_video\edit\preview_transcript_qc.json
-.venv\Scripts\python.exe helpers\verify_edit_ready.py raw_video\edit\edl.json --transcripts raw_video\edit\transcripts --boundary-report raw_video\edit\edl_boundary_qc.json --audio-report raw_video\edit\preview_audio_qc.json --semantic-report raw_video\edit\edl_semantic_qc.json --transcript-report raw_video\edit\preview_transcript_qc.json --audio raw_video\edit\preview.wav --timeline-map raw_video\edit\preview_timeline.json
-.venv\Scripts\python.exe helpers\edl_to_fcpxml.py raw_video\edit\edl.json -o raw_video\edit\timeline.xml --timeline-name "reels 35_cadastro_alano-cut"
-.venv\Scripts\python.exe helpers\fcpxml_to_edl.py raw_video\edit\timeline_fix.xml -o raw_video\edit\timeline_fix_from_xml.edl.json --media-root raw_video
-```
-
-## License
-
-This project is licensed under the MIT License (inherited from the original [video-use](https://github.com/browser-use/video-use) project).
+Este repositório nasceu como uma adaptação de [browser-use/video-use](https://github.com/browser-use/video-use) e foi progressivamente especializado para rough cuts e integração com Premiere Pro. Consulte [`LICENSE`](LICENSE) e [`NOTICE`](NOTICE) para os termos e créditos preservados.

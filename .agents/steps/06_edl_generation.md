@@ -25,7 +25,7 @@ Goal: select the rough-cut ranges and write `edit/edl.json`.
 - Preserve natural cadence.
 - Do not over-tighten.
 - Use word boundaries for all cut edges.
-- Use canonical provider JSON for exact word timestamps when trimming inside packed phrases; WhisperX timestamps are forced-aligned.
+- Use canonical local JSON and its Wav2Vec2-aligned word timestamps when trimming inside packed phrases.
 - **Gap & Pacing Rules by Video Archetype**:
   - **Short-form Content (TikTok, Instagram Reels, YouTube Shorts, etc.)**:
     - Standard audio gap threshold is **200ms** (`0.200s`). Every pause > 200ms is cut dynamically to ensure snappy, high-retention pacing.

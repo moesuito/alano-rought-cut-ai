@@ -20,7 +20,7 @@ INPUTS:
 
 RULES:
   - Start/end times must fall on word boundaries from the transcript.
-  - If cutting inside a phrase, inspect canonical provider JSON and snap to exact word timestamps (forced alignment when the provider is WhisperX / Wav2Vec2).
+  - If cutting inside a phrase, inspect canonical local JSON and snap to exact Wav2Vec2-aligned word timestamps.
   - Pad cut boundaries within the 30-200ms working window.
   - Audio Gap Rules by Video Type:
     * Short-form Content (TikTok, Instagram Reels, YouTube Shorts):

@@ -1,7 +1,7 @@
 [project]
 name = "alano-cut"
-version = "0.4.0"
-description = "Capability-routed agent harness for transcript-driven rough cuts"
+version = "0.6.0"
+description = "Local-first agentic rough-cut engine for Premiere-compatible timelines"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [

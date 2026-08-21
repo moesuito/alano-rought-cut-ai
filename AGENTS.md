@@ -1,131 +1,101 @@
-# AGENTS.md — Guia do Desenvolvedor e Instruções para Agentes de IA
+# AGENTS.md — Alano Rough Cut AI
 
-> **Documento Oficial de Engenharia para Agentes de IA (Codex, Claude Code, Antigravity, etc.) e Desenvolvedores**  
-> **Versão do Projeto:** v0.6.0 (Autonomous Agentic Loop Edition)  
-> **Repositório:** `moesuito/alano-rought-cut-ai`
+## Estado canônico
 
----
+- Linha de desenvolvimento: `v0.6.0`.
+- Branch canônica: `codex/feature-v0.6.0-agentic-editor`.
+- Repositório de desenvolvimento: `O:\Antigravity\alano-cut`.
+- Instalação global da CLI: `%APPDATA%\alano-rought-cut-ai`.
+- Sessões, modelos e caches: `%LOCALAPPDATA%\AlanoCut`.
+- Entrega do produto: `timeline.xml` no formato Final Cut Pro 7/XMEML, importável no Adobe Premiere Pro.
 
-## 1. Identidade e Propósito do Projeto
+O Alano Rough Cut AI faz exclusivamente o primeiro corte editorial. Não implemente render final, legendas, motion design, color grading, trilha, publicação ou acabamento.
 
-O **Alano Rough Cut AI** é um motor autônomo especializado em **Rough Cut (Primeiro Corte Bruto)** para vídeos de criadores, videoaulas, tutoriais e redes sociais.
+## Direção do produto
 
-* **Entrega Final:** Arquivo XML no padrão Final Cut Pro 7 (`timeline.xml`), 100% compatível e pronto para ser importado diretamente no **Adobe Premiere Pro**.
-* **Escopo Estrito (Hard Scope):** Apenas montagem e decupagem da timeline. O sistema **NÃO** faz render final de vídeo MP4, legendas, motion design, color grading, trilha sonora ou animações.
+O produto é local-first. A meta é executar transcrição, análise acústica, raciocínio editorial, refinamento, QC e exportação na máquina do usuário.
 
----
+O único componente que ainda pode depender de serviço remoto durante o desenvolvimento é a LLM editorial. O cliente usa o contrato OpenAI-compatible para permitir tanto APIs quanto servidores locais, como Ollama ou vLLM. Novas decisões não devem aumentar a dependência de nuvem.
 
-## 2. Onde Fica Cada Coisa (Estrutura de Pastas e Builds)
+A interface atual de terminal é deliberadamente funcional e provisória. Não invista em acabamento visual da TUI antes da decisão sobre a futura GUI desktop, possivelmente Electron ou Tauri.
 
-### 📍 2.1 Build Instalada no Sistema (Produção Local do Usuário)
-* **Caminho:** `%APPDATA%\alano-rought-cut-ai` (Ex: `C:\Users\Alano\AppData\Roaming\alano-rought-cut-ai`)
-* **O que contém:**
-  * `bin/alanocut.cmd` e `bin/alanocut.ps1` (adicionados ao `PATH` do Windows, permitindo rodar `alanocut` em qualquer terminal).
-  * `helpers/` (todo o código Python do pipeline, ASR, agente e XML).
-  * `.agents/` (documentos do protocolo agêntico).
-  * `docs/` (arquitetura e referências técnicas).
-  * `config.json` (configurações do workspace).
-* ⚠️ **REGRA CRÍTICA PARA AGENTES DE DEV:** Sempre que você fizer alterações de código no repositório de desenvolvimento, você **DEVE sincronizar os arquivos para `%APPDATA%\alano-rought-cut-ai`** para que o usuário possa testar a nova build imediatamente no terminal.
+## Pipeline v0.6
 
-### 📍 2.2 Sessões e Caches de Execução (Zero Folder Pollution)
-* **Caminho:** `%APPDATA%\AlanoCut\sessions\<session_id>\`
-* **O que contém:**
-  * `transcripts/` (transcrições `.json` geradas e alinhadas por áudio).
-  * `takes_packed.md` (leitura condensada de frases e pausas).
-  * `editorial_strategy.json` (estratégia diagnosticada na Task 1 do agente).
-  * `edl.json` e `refine_report.json` (EDL refinada pelo Snapper).
-  * `preview.wav` e `preview_timeline.json` (áudio PCM para controle de qualidade).
-  * `editorial_audit.txt` (relatório human-readable com justificativas e ciclos de auto-reflexão).
-  * `session.log` (log cronológico técnico de execução).
-  * `timeline.xml` (cópia da timeline entregue).
-
-### 📍 2.3 Repositório de Desenvolvimento
-* **Caminho:** `O:\Antigravity\alano-cut` (e seus worktrees em `.worktrees/`).
-
----
-
-## 3. Arquitetura do Sistema (Como o Alano Cut Funciona)
-
-O pipeline executa 3 fases complementares:
-
-```
-[Mídia Bruta .mov / .mp4]
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 🟢 FASE 1: STACK ACÚSTICA LOCAL NA GPU (Zero Tokens)        │
-│ 1. Denoising: DeepFilterNet 3 (redução de 100 dB)           │
-│ 2. ASR: Whisper Large v3 Turbo (GPU Vulkan)                 │
-│ 3. Forced Alignment: Wav2Vec2 CTC DirectML (timestamps ms)  │
-│ 4. Diarization: Pyannote Diarization v3 (ONNX DirectML)      │
-│ 5. Pack: helpers/pack_transcripts.py -> takes_packed.md     │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 🟡 FASE 2: MOTOR AGÊNTICO EM LOOPS (helpers/agentic_editor) │
-│ Task 1: Diagnóstico Global, Retakes e Estratégia Narrativa │
-│ Task 2: Decupagem e Montagem da EDL Preliminar              │
-│ Task 3: Auto-Reflexão Crítica e Re-corte em Loops           │
-│         -> Conclui dinamicamente com status: "APPROVED"     │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 🔵 FASE 3: REFINAMENTO ACÚSTICO E EXPORTAÇÃO (Zero Tokens)   │
-│ 1. helpers/refine_edl_boundaries.py (Snapper + 66ms padding)│
-│ 2. helpers/render.py & preview_audio_qc.py (Preview WAV QC) │
-│ 3. helpers/edl_to_fcpxml.py (Gera ./timeline.xml)           │
-│ 4. helpers/session_manager.py (Exporta entrega limpa)       │
-└─────────────────────────────────────────────────────────────┘
+```text
+mídia original
+  -> DeepFilterNet 3
+  -> Whisper local via Vulkan
+  -> alinhamento Wav2Vec2 via DirectML
+  -> diarização Pyannote ONNX via DirectML
+  -> transcrição canônica palavra a palavra
+  -> agente editorial multi-turno
+       1. diagnóstico e estratégia
+       2. plano de montagem e EDL preliminar
+       3. crítica, revisão e novos loops
+  -> refinamento determinístico de boundaries
+  -> preview WAV e gates de QC
+  -> readiness gate
+  -> timeline.xml
 ```
 
----
+Vulkan e DirectML formam o caminho Windows cross-vendor para GPUs AMD, NVIDIA e Intel, com fallbacks explicitamente documentados quando disponíveis. WhisperX, ElevenLabs e AssemblyAI não pertencem ao caminho canônico v0.6. Código legado desses provedores pode existir até uma limpeza controlada, mas não deve orientar novas features nem a documentação normativa.
 
-## 4. Regras e Protocolos de Desenvolvimento para Agentes
+## Responsabilidades do agente editorial
 
-Ao trabalhar neste repositório, siga rigorosamente as seguintes diretrizes:
+A LLM recebe a transcrição pronta. Ela não deve transcrever, analisar waveform ou inventar precisão audiovisual que não recebeu. Sua responsabilidade é:
 
-### 1. Invariantes Editoriais Inquebráveis
-* **Nunca corte dentro de palavras (`never cut inside a word`):** Os cortes devem respeitar os limites de palavras e o padding acústico de $\ge 66$ms aplicado pelo Snapper.
-* **Preservação de Contexto vs. Cacos:** Termos como *"Beleza."*, *"Tá."*, *"Corta."*, *"Volta."* isolados entre pausas e erros são **cacos de bastidor** e devem ser eliminados; se usados com função comunicativa (ex: *"Tudo beleza pessoal?"*), devem ser **mantidos como conteúdo**.
-* **Pacing Diferenciado:**
-  * **Vídeos Longos (Aulas/Tutoriais):** Gap padrão de 350ms. Listas e enumerações usam `is_list: true` para preservar pausas naturais de até 500ms.
-  * **Vídeos Curtos (Reels/TikTok):** Gap padrão de 200ms, sem filtro de lista, duração estrita $\le 90$s.
+1. compreender todo o conteúdo e o brief;
+2. identificar estrutura, retakes, pickups, erros, cacos e intenção narrativa;
+3. criar um plano editorial verificável;
+4. converter o plano em ranges do EDL proprietário;
+5. revisar criticamente a montagem em loops até aprovação válida;
+6. entregar o EDL aos estágios determinísticos de áudio, QC e XML.
 
-### 2. Protocolo de Testes Automatizados
-* **Comando:** `py -3.12 -m pytest -q`
-* **Regra:** Nunca commite ou conclua uma tarefa de código com testes falhando. Todos os 275+ testes da suíte DEVEM passar com sucesso.
+Modelos menores e locais são um requisito de arquitetura. Prefira tarefas menores, estado explícito, saídas estruturadas, validação e loops curtos em vez de depender de uma única chamada excepcionalmente inteligente.
 
-### 3. Protocolo de Sincronização Local (Deploy em AppData)
-Após editar qualquer arquivo em `helpers/`, `bin/`, `docs/`, prompts ou templates, execute no PowerShell:
+## Prompts
 
-```powershell
-$Src = "O:\Antigravity\alano-cut\.worktrees\codex-feature-v0.4-audio-snapper"
-$Dest = Join-Path $env:APPDATA "alano-rought-cut-ai"
+- `helpers/prompts/agentic_editor_system_prompt.md`: persona, conhecimento e princípios editoriais do agente multi-turno. Deve permanecer editável fora do Python.
+- `helpers/prompts/agentic_prompts.py`: composição das tarefas, schemas de saída e regras dinâmicas por formato.
+- `helpers/prompts/editor_system_prompt.md`: prompt legado do modo one-shot, mantido enquanto esse modo existir.
 
-Copy-Item -Path (Join-Path $Src "helpers") -Destination $Dest -Recurse -Force
-Copy-Item -Path (Join-Path $Src "bin") -Destination $Dest -Recurse -Force
-Copy-Item -Path (Join-Path $Src ".agents") -Destination $Dest -Recurse -Force
-Copy-Item -Path (Join-Path $Src "docs") -Destination $Dest -Recurse -Force
-Copy-Item -Path (Join-Path $Src "config.json") -Destination $Dest -Force
-Copy-Item -Path (Join-Path $Src "README.md") -Destination $Dest -Force
-Copy-Item -Path (Join-Path $Src "CHANGELOG.md") -Destination $Dest -Force
-Copy-Item -Path (Join-Path $Src "AGENTS.md") -Destination $Dest -Force
-```
+Não volte a embutir o system prompt agêntico inteiro no código Python.
 
-### 4. Protocolo Git
-* Crie branches semânticas para novas features (ex: `codex/feature-v0.6.0-agentic-editor`).
-* Faça commits claros e objetivos e faça push para a branch correspondente no repositório remoto.
+## Contratos editoriais e técnicos
 
----
+- Nunca cortar dentro de palavra.
+- A precisão da saída nunca pode superar a precisão da evidência recebida.
+- Falas de bastidor são classificadas pela função comunicativa, não por palavras isoladas.
+- Retakes devem ser resolvidos pela correção, completude, clareza e continuidade; recência é apenas desempate.
+- Vídeos curtos e longos têm pacing diferente.
+- O EDL é a autoridade editorial entre a LLM e o pipeline determinístico.
+- XML só pode representar mídia original e uma EDL pronta.
+- Estados ausentes, inválidos, `review`, `warning`, hashes antigos ou falhas de parse não podem virar aprovação implícita.
 
-## 5. Próximas Frentes e Roadmap para o Próximo Agente
+O workflow normativo do produto está em `.agents/core/invariants.md`, `.agents/core/workflow.md` e `.agents/steps/`. O código ainda possui gaps entre esse contrato e o orquestrador; trate-os como dívida conhecida até o próximo code review, não como comportamento aprovado.
 
-1. **Modo 2 — Batch Multi-Video Dispatcher:**
-   - Implementar a partição de lotes de múltiplos vídeos a partir de gravações brutas longas (ex: criar 5 Reels independentes ou 2 aulas separadas de um lote de 10 arquivos).
-   - O Dispatcher divide os micro-briefs e executa o `AgenticEditorialLoop` isoladamente para cada vídeo em um contexto limpo.
-2. **Refinamento dos Prompts de Auto-Reflexão:**
-   - Acompanhar os relatórios de `editorial_audit.txt` em projetos reais para aprimorar os critérios de inspeção e auto-correção da Task 3.
-3. **Integração com Premiere via CEP / ExtendScript:**
-   - Futuras expansões para importar automaticamente a timeline no Premiere Pro aberto via MCP ou extensão.
+## Protocolo de desenvolvimento
+
+1. Leia este arquivo, `README.md`, `docs/ARCHITECTURE.md` e os documentos específicos da área alterada.
+2. Preserve mudanças do usuário e dados fora do código rastreado.
+3. Mantenha alterações pequenas, auditáveis e coerentes com a direção local-first.
+4. Para código, execute os testes relevantes e, antes de concluir, a suíte completa quando o custo for proporcional ao risco.
+5. Para documentação/metadados, execute ao menos `git diff --check` e verificações estruturais pertinentes.
+6. Não anuncie contagens fixas de testes sem medi-las na mesma revisão.
+7. Push, PR, merge, tag e release são ações distintas; só execute as autorizadas pelo usuário.
+
+Quando um fluxo explícito de ORCHESTRATOR/WORKER for solicitado, leia `ORCHESTRATOR.md`, `WORKER.md` e `.agents/development/agent_operating_model.md`. Sem essa delegação explícita, trabalhe normalmente neste repositório.
+
+## Sincronização da instalação local
+
+Depois de validar uma mudança destinada a teste pelo usuário, sincronize a árvore rastreada relevante para `%APPDATA%\alano-rought-cut-ai`, preservando obrigatoriamente `.env`, `.venv` e `user-settings.json`. A fonte deve ser o checkout central `O:\Antigravity\alano-cut`, não um caminho antigo de worktree.
+
+## Prioridades após a consolidação
+
+1. Code review completo da v0.6 e inventário de dívidas.
+2. Tornar o agente e o orquestrador estritamente fail-closed.
+3. Evoluir o loop para planejamento, tarefas, execução, crítica e validação mais ricos.
+4. Testar cortes reais em Reels, YouTube, videoaulas e VSLs.
+5. Medir a qualidade com modelos locais menores.
+6. Remover caminhos legados de nuvem/WhisperX somente após validar que nenhuma dependência ativa permanece.
+7. Projetar a GUI desktop apenas quando o pipeline e seus contratos estiverem estáveis.

@@ -1,5 +1,7 @@
 # Alano Rough Cut AI — Arquitetura do Orquestrador Autônomo (v0.5.0)
 
+> Documento histórico. A arquitetura one-shot foi substituída pelo loop multi-turno da v0.6. Os itens não marcados abaixo pertencem ao plano original e não representam o estado atual. Consulte `docs/ARCHITECTURE.md`, `docs/AGENTIC_LOOP_V0.6.0.md` e `docs/ROADMAP.md` para decisões vigentes.
+
 Documento de especificação técnica e plano de arquitetura para a versão **v0.5.0**, tornando o `alanocut` um motor de corte bruto autônomo com inteligência artificial embutida (*Embedded Agent*), compatível com qualquer provedor **OpenAI-Compatible** (NVIDIA NIM, Ollama, vLLM, OpenAI, Groq, etc.).
 
 ---

@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file intentionally contains no rules, commands, or architecture notes.
+Leia e siga `AGENTS.md`; ele é a fonte canônica de engenharia deste repositório.
 
-Read `DEV_AGENTS.md` first and follow its role router (`ORCHESTRATOR.md` / `WORKER.md`). Do not infer a role from this file.
-
-All development-harness rules, role routing, validation, and project constraints live in `DEV_AGENTS.md` and the files it routes to. `AGENTS.md` remains the product runtime contract copied by `alanocut init`.
+`DEV_AGENTS.md` é apenas um ponteiro de compatibilidade. Use `ORCHESTRATOR.md` e `WORKER.md` somente quando o usuário solicitar explicitamente esse modelo de trabalho.

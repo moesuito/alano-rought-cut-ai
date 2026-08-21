@@ -1,64 +1,84 @@
-# PRD - Alano Cut
+# PRD — Alano Cut v0.6
 
-Status: living document.  
-Updated: 2026-07-13
+Status: documento vivo.
+Atualizado: 2026-08-20.
 
-## Vision
+## Visão
 
-Alano Cut is a transcript-driven rough-cut harness for talking-head and course footage. It turns an editorial EDL into a Premiere-compatible FCP7 XML while preserving original media and avoiding finishing work.
+Transformar gravações brutas de talking head, Reels, YouTube, videoaulas, tutoriais e VSLs em um rough cut coerente, tecnicamente seguro e importável no Premiere Pro, com processamento local e um agente editorial compatível com modelos menores.
 
-## Users
+## Usuários
 
-- Course/video editor — needs repeatable removal of retakes, direction cues, dead air, and unsafe cut boundaries.
-- AI editing agent — needs compact transcripts, explicit gates, deterministic helpers, and resumable artifacts.
+- Editor de vídeo que precisa eliminar retakes, falsos inícios, bastidores, redundância e pausas indevidas sem perder intenção.
+- Criador/produtor que quer receber uma timeline editável, não um render final fechado.
+- Agente de IA que precisa de transcrição compacta, ferramentas determinísticas, estado explícito e gates auditáveis.
 
-## Requirements
+## Requisitos
 
-### CUT-00 — Provider-bound transcription
+### CUT-00 — Transcrição local canônica
 
-- WHEN source or preview audio is transcribed THEN the workspace-selected provider SHALL be used for both. WhisperX SHALL run `faster-whisper large-v3` with forced word alignment on NVIDIA CUDA; ElevenLabs SHALL use Scribe word timestamps and provider diarization.
-- WhisperX Community-1 diarization is preferred and available with an accepted Hugging Face gate. The explicit local no-diarization profile SHALL keep CUDA and word alignment while recording missing speaker IDs as reduced precision.
-- Every lexical word SHALL have a positive provider-bound interval; missing selected-provider timing, CPU fallback for WhisperX, legacy/mismatched caches, and silent provider fallback SHALL block the workflow.
-- Transcript caches SHALL be bound to source SHA-256, canonical schema, provider, models/runtime settings, and configuration SHA-256.
-- Hugging Face and ElevenLabs credentials SHALL remain global and SHALL NOT appear in argv, workspace config, transcripts, reports, logs, exceptions, or Git.
+- Fonte e preview SHALL usar a stack local canônica: Whisper Vulkan, alinhamento Wav2Vec2 DirectML e, quando habilitada, diarização Pyannote ONNX DirectML.
+- Cada palavra usada editorialmente SHALL possuir intervalo temporal positivo e proveniência de modelo/runtime.
+- Cache SHALL estar vinculado ao SHA-256 da fonte, schema, modelos, configurações e versões relevantes.
+- Ausência de timing, desalinhamento, cache incompatível ou fallback silencioso SHALL bloquear o fluxo.
+- WhisperX, ElevenLabs e AssemblyAI SHALL permanecer fora do caminho canônico v0.6.
 
-### CUT-01 — Rough-cut XML
+### CUT-01 — Agente editorial multi-turno
 
-- WHEN an approved EDL references original media THEN Alano Cut SHALL export a Premiere-compatible `timeline.xml` without rendering a final delivery video.
+- A LLM SHALL receber a transcrição pronta e SHALL decidir apenas conteúdo, estrutura, retakes, pacing e montagem.
+- O agente SHALL separar estratégia, montagem e crítica em estado explícito.
+- Toda EDL SHALL ser justificável pelo brief, estratégia e transcrição.
+- Falha de parse, schema inválido ou limite de loops sem aprovação SHALL produzir falha/revisão, nunca aprovação implícita.
+- O system prompt durável SHALL permanecer em Markdown separado do runtime Python.
 
-### CUT-02 — Audio-safe boundaries
+### CUT-02 — EDL e XML
 
-- WHEN an EDL is refined THEN the system SHALL preserve intended words while tightening silence by using ASR anchors, waveform evidence, and exportable video frames.
-- WHEN two selected consecutive canonical words have a lexical gap strictly greater than 300ms THEN the refiner SHALL create a jump cut before acoustic snapping; a gap equal to 300ms SHALL remain.
-- An intentional gap above 300ms SHALL survive only through an exact consecutive-word override with a non-empty reason; wildcard range overrides SHALL be rejected.
-- WHEN a preview is rendered THEN the system SHALL create only a dry PCM WAV/map and SHALL represent every range entry and join in audio QC.
-- WHEN a boundary has excessive entry inactivity, a tight lexical attack, residual rejected activity, damaged tail, clipping, or a severe join discontinuity THEN the agent SHALL stop before XML.
+- O EDL proprietário SHALL ser a autoridade entre a LLM e os helpers determinísticos.
+- `metadata.sequence_fps` e `metadata.required_beats` SHALL existir; ranges SHALL apontar para fontes/timestamps reais e beats válidos.
+- Somente uma EDL pronta SHALL ser exportada como FCP7/XMEML.
+- O XML SHALL referenciar a mídia original e não SHALL representar um render final.
 
-### CUT-03 — Editorial coverage
+### CUT-03 — Boundaries seguros
 
-- WHEN a lesson declares required beats THEN the system SHALL verify their evidence in the selected source transcript and the preview transcript before the agent considers the edit ready.
-- `metadata.required_beats` SHALL always be present, may be empty, and SHALL express alternative evidence as nested phrase groups referenced by `ranges[].beat_id`.
-- WHEN preview audio is rendered THEN it SHALL always be transcribed into a persisted timed-word artifact bound to that WAV hash.
-- WHEN a preview has joins THEN transcript QC SHALL compare the expected left suffix/right prefix at every join and block orphan prefixes, crossed joins, missing/deformed expected words, direction cues, or untimed words.
+- O refiner SHALL preservar palavras pretendidas e ajustar boundaries com ASR, waveform e frames exportáveis.
+- Cortes não SHALL ocorrer dentro de palavras.
+- Cada entrada, saída e join SHALL possuir evidência auditável.
+- Atividade rejeitada, silêncio excessivo, ataque apertado, tail danificada, clipping ou pop grave SHALL bloquear exportação.
 
-### CUT-05 — Fail-closed workflow
+### CUT-04 — Cobertura e QC
 
-- WHEN the agent exports XML THEN it SHALL have executed `refine -> render WAV/map -> audio QC -> semantic QC -> persist preview transcript/hash -> join transcript QC -> readiness` in that order, and readiness SHALL have returned exit code 0 for the exact current artifacts.
-- WHEN an EDL changes THEN every downstream artifact SHALL be considered stale and the workflow SHALL restart at refinement.
-- Manual legacy diagnostics or the warning-only manual XML command SHALL NOT substitute for a successful agent workflow gate.
+- Beats obrigatórios SHALL ser verificados contra fonte, ranges e preview.
+- Preview SHALL ser um WAV PCM seco com timeline map, não um render final.
+- Preview transcription SHALL estar vinculada ao hash do WAV e possuir timing palavra a palavra.
+- Audio QC e transcript QC SHALL cobrir todos os joins.
+- Mudança material no EDL SHALL invalidar todos os artefatos downstream.
 
-### CUT-04 — Private media
+### CUT-05 — Workflow fail-closed
 
-- WHEN local lesson media is used for regression THEN it SHALL remain ignored by Git and absent from public CI artifacts.
+- O caminho obrigatório SHALL ser: `refine -> render WAV/map -> audio QC -> semantic QC -> preview transcript -> transcript join QC -> readiness -> XML`.
+- Readiness SHALL retornar `0` para os artefatos atuais.
+- Estado `review`, `warning`, `fail`, relatório ausente, hash antigo ou comando manual warning-only SHALL bloquear XML no fluxo autônomo.
 
-## Out Of Scope
+### CUT-06 — Local-first e hardware
 
-- Final-quality video rendering, subtitles, overlays, color grading, animation, publishing, or automatic visual review.
-- Fades, video-frame inspection, or visual analysis in the agent QA path.
+- Transcrição, análise acústica, EDL, QC e exportação SHALL executar localmente.
+- O caminho Windows SHALL aceitar GPUs AMD, NVIDIA e Intel por Vulkan/DirectML sem lógica editorial específica por fabricante.
+- A LLM SHALL usar um contrato OpenAI-compatible que permita backends remotos durante desenvolvimento e servidores locais no produto-alvo.
+- Novas features SHALL evitar dependência adicional de nuvem.
 
-## Change Log
+### CUT-07 — Dados privados
 
-- 2026-07-11 - Development harness introduced; v0.4.0 audio boundary refinement planned.
-- 2026-07-13 - Join-centric audio/transcript QC and the fail-closed v0.4.0 workflow made normative.
-- 2026-07-14 - Explicit workspace profiles for WhisperX (Community-1 or no diarization) and ElevenLabs Scribe became the normative transcription routing contract.
-- 2026-07-13 - Internal lexical gaps strictly above 300ms became deterministic jump cuts with fail-closed readiness validation.
+- Mídia, transcrições, sessões e regressões privadas SHALL permanecer fora do Git.
+- Segredos SHALL permanecer em `.env`/ambiente e não aparecer em argv, configs rastreadas, logs, relatórios ou exceções.
+
+## Fora de escopo
+
+- render final de vídeo;
+- legendas, overlays, motion design, color grading ou trilha;
+- publicação;
+- inspeção visual automática nesta fase;
+- acabamento da TUI provisória antes da decisão da GUI desktop.
+
+## Critério de promoção
+
+A v0.6 só pode ser tratada como release fechada depois de code review, suíte automatizada, testes de instalação e regressões reais em múltiplos formatos. Contagens antigas de testes não substituem validação executada no commit candidato.

@@ -42,7 +42,7 @@ Goal: render and validate the exact audio-only rough cut before XML export.
 9. If any EDL range changes, restart at the Step 07 refiner and regenerate every downstream artifact in this order.
 10. Update `edit/run_state.md` with artifact hashes, per-gate statuses, findings, and fixes.
 
-The normative agent workflow is audio-only and does not inspect frames. `timeline_view.py` and `validate_edl_boundaries.py` remain manual-only legacy diagnostics outside this gate chain and are scheduled for removal in v0.5.0.
+The normative agent workflow is audio-only and does not inspect frames. `timeline_view.py` and `validate_edl_boundaries.py` remain manual-only legacy diagnostics outside this gate chain pending dependency-aware removal.
 
 ## QC Gate
 

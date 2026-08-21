@@ -1,53 +1,85 @@
-# Architecture - Alano Cut
+# Arquitetura v0.6.0
 
-Status: living document.  
-Updated: 2026-08-20 (v0.6.0 Agentic Loop Architecture)
+Atualizado em 2026-08-20.
 
-## Overview
+## Princípios
 
-The runtime is a Python/FFmpeg helper suite directed by the product `AGENTS.md` and modular `.agents/` workflow, or executed autonomously via the embedded **Agentic Multi-Turn Loop Engine (`helpers/agentic_editor.py`)** and interactive CLI (`alanocut`).
+1. **Local-first:** mídia, transcrição, análise acústica, EDL, QC e XML permanecem na máquina do usuário.
+2. **LLM isolada da mecânica:** a LLM decide a edição; helpers determinísticos validam tempo, áudio e exportação.
+3. **EDL como contrato:** o JSON proprietário é a fronteira entre raciocínio editorial e execução técnica.
+4. **Evidência auditável:** decisões temporais precisam apontar para palavras, frames, samples e hashes reais.
+5. **Fail-closed:** ausência, parse inválido, revisão pendente ou relatório antigo deve bloquear exportação.
+6. **Cross-vendor no Windows:** Vulkan e DirectML evitam uma pipeline editorial separada para AMD, NVIDIA e Intel.
 
-Each workspace explicitly selects local GPU Whisper (Vulkan + DirectML), AssemblyAI, or ElevenLabs Scribe for source and preview transcription; EDL JSON is the editable editorial contract; FCP7/XMEML is the final deliverable.
+## Componentes
 
-## Stack
+### Entrada e sessão
 
-- **Python 3.10+** with `numpy<2.0`, `requests`, `torch`, `torchaudio`, `deepfilternet`, `onnxruntime-directml`, `scipy`, `scikit-learn`, `rich`.
-- **Universal GPU Runtime on Windows**:
-  - `whisper.cpp` (Vulkan) for word timestamps;
-  - `Wav2Vec2 CTC` (`jonatasgrosman/wav2vec2-large-xlsr-53-portuguese` via DirectML) for millisecond-exact forced alignment;
-  - `Pyannote ONNX` (DirectML) for speaker diarization;
-  - `DeepFilterNet 3` for neural pre-filtering (100 dB reduction).
-  - Runs universally across NVIDIA GeForce/RTX, AMD Radeon, and Intel Arc/Iris GPUs without requiring 16 GB CUDA-only environments.
-- **Cognitive Editorial Engine**: Multi-turn sequential agentic loop (`helpers/agentic_editor.py`) executing Strategy -> Assembly -> Autonomous Reflection/Critique Loop with any OpenAI-Compatible API (NVIDIA NIM, Ollama, vLLM, OpenAI, Groq).
-- **FFmpeg/ffprobe** for media extraction, audio analysis, and XML source metadata.
-- **PowerShell installer & Interactive TUI (`alanocut`)** for Windows workspace bootstrap, update, and zero-pollution session runs.
+- `helpers/interactive_cli.py`: terminal interativo provisório.
+- `helpers/orchestrator.py`: coordena o run de vídeo único.
+- `helpers/session_manager.py`: mantém sessões em `%LOCALAPPDATA%\AlanoCut\sessions` e copia somente a entrega final para a pasta do usuário.
 
-## Modules
+### Transcrição local
 
-- `helpers/agentic_editor.py` — Autonomous multi-turn cognitive loop engine (Strategy -> Assembly -> Reflection/Refinement Loop -> Dynamic Sign-off).
-- `helpers/prompts/agentic_prompts.py` — Modular task prompts for the agentic loop engine.
-- `helpers/prompts/editor_system_prompt.md` — 46-section Master Editorial System Prompt for one-shot mode.
-- `helpers/orchestrator.py` — Unified 10-step orchestrator pipeline with `--mode agentic` (default) and `--mode one-shot`.
-- `helpers/interactive_cli.py` — Modern terminal UI with Rich spinners, format selector, and live progress.
-- `helpers/session_manager.py` — AppData session caching (`%APPDATA%/AlanoCut/sessions/`), zero folder pollution, and audit persistence (`session.log`, `editorial_audit.txt`, `editorial_strategy.json`).
-- `helpers/transcription_contract.py` — Canonical transcript schema, fingerprints, cache validation, and atomic persistence.
-- `helpers/forced_alignment.py` — Wav2Vec2 CTC forced alignment engine with trellis jump suppression and pause chunking.
-- `helpers/vulkan_runtime.py` and `helpers/directml_diarization.py` — Universal local GPU acceleration across Vulkan and DirectML.
-- `helpers/pack_transcripts.py` — Compact editorial reading view (`takes_packed.md`).
-- `helpers/refine_edl_boundaries.py` — In-place lexical/acoustic refinement (VAD, Snapper, 66ms padding).
-- `helpers/render.py` — Dry PCM preview WAV and cumulative timeline map.
-- `helpers/preview_audio_qc.py` — Audio quality validation (clipping, phase, pops).
-- `helpers/edl_to_fcpxml.py` — Final Cut Pro 7 XML timeline generator for Adobe Premiere Pro.
+- `helpers/transcribe.py` e `helpers/transcribe_batch.py`: entrada do pipeline de transcrição.
+- `helpers/deepfilter_audio.py`: denoising para análise/ASR.
+- `helpers/whisper_vulkan.py`: Whisper local acelerado por Vulkan.
+- `helpers/wav2vec2_directml.py`: alinhamento CTC palavra a palavra.
+- `helpers/pyannote_directml.py`: diarização ONNX via DirectML.
+- `helpers/transcription_contract.py`: schema canônico e proveniência.
+- `helpers/pack_transcripts.py`: visão editorial condensada em `takes_packed.md`.
 
-## Boundaries & Principles
+WhisperX e provedores cloud ainda aparecem em módulos de compatibilidade, mas estão fora do caminho canônico v0.6 e devem ser removidos somente após análise de dependências.
 
-- **Zero Folder Pollution**: All session caches, transcripts, and logs live in `%APPDATA%/AlanoCut/sessions/<session_id>/`. The only file written to the user's working folder is `./timeline.xml`.
-- **Original Media Referencing**: XML strictly references original high-quality media files (`.mov`, `.mp4`).
-- **Never Cut Inside a Word**: Word boundaries are strictly enforced. Acoustic attacks are snapped with $\ge 66$ms padding by `refine_edl_boundaries.py`.
-- **Audio-First QA**: Agent QC validates audio energy, clipping, and continuous speech flow without requiring heavy video rendering.
-- **Fail-Closed Verification**: Transcripts must be forced-aligned and valid before EDL generation.
+### Inteligência editorial
 
-## Reference Architecture Documents
+- `helpers/agentic_editor.py`: conversa persistente e loop multi-turno.
+- `helpers/prompts/agentic_editor_system_prompt.md`: persona e conhecimento editorial.
+- `helpers/prompts/agentic_prompts.py`: tarefas, contexto dinâmico e schemas JSON.
+- `helpers/llm_client.py`: cliente OpenAI-compatible para backends remotos ou locais.
 
-- [`docs/AGENTIC_LOOP_V0.6.0.md`](file:///O:/Antigravity/alano-cut/.worktrees/codex-feature-v0.4-audio-snapper/docs/AGENTIC_LOOP_V0.6.0.md) — Comprehensive technical reference for the Multi-Turn Cognitive Loop Engine.
-- [`docs/AUTONOMOUS_ORCHESTRATOR_V0.5.0.md`](file:///O:/Antigravity/alano-cut/.worktrees/codex-feature-v0.4-audio-snapper/docs/AUTONOMOUS_ORCHESTRATOR_V0.5.0.md) — Specification for the local GPU stack and autonomous orchestration.
+O agente executa estratégia, montagem e crítica. A direção pretendida é evoluir para planejamento e tarefas explícitas, com estado verificável e loops que funcionem em modelos locais menores.
+
+### EDL, áudio e QC
+
+- `helpers/refine_edl_boundaries.py`: converte intenção editorial em boundaries acústicos/frame-exact.
+- `helpers/render.py`: gera preview WAV seco e `preview_timeline.json`.
+- `helpers/preview_audio_qc.py`: verifica entradas, saídas, joins, clipping e pops.
+- `helpers/semantic_qc.py`: verifica beats obrigatórios.
+- `helpers/preview_transcript_qc.py`: compara a fala esperada e observada em cada join.
+- `helpers/verify_edit_ready.py`: gate agregado de prontidão.
+- `helpers/edl_to_fcpxml.py`: exporta FCP7/XMEML referenciando a mídia original.
+
+## Fluxo de dados
+
+```text
+source media + brief
+  -> canonical transcripts
+  -> takes_packed.md
+  -> editorial_strategy.json
+  -> preliminary edl.json
+  -> reflected/revised edl.json
+  -> frame-exact edl.json + refine report
+  -> preview.wav + timeline map
+  -> audio/semantic/transcript QC reports
+  -> readiness
+  -> timeline.xml
+```
+
+## Limite da LLM
+
+A LLM pode escolher, ordenar e justificar conteúdo. Ela não pode:
+
+- inventar timestamps ou fontes;
+- aprovar JSON que não foi interpretado;
+- substituir validação acústica;
+- transformar ausência de evidência em sucesso;
+- exportar XML diretamente sem passar pelo contrato do EDL e pelos gates.
+
+## Estado de implementação
+
+A arquitetura acima é o contrato v0.6. A implementação atual ainda não conecta todos os gates ao caminho autônomo e possui fallbacks fail-open conhecidos. Esses gaps são prioridade do próximo code review e não devem ser descritos como garantias já entregues.
+
+## Interfaces
+
+A TUI existe apenas para teste funcional. A GUI desktop será desenhada depois que o pipeline, o agente e os contratos estiverem estáveis. Electron e Tauri são possibilidades, não decisões atuais.

@@ -5,16 +5,24 @@
 ### Added
 - **Autonomous Agentic Editorial Loop Engine (`helpers/agentic_editor.py`)**: Multi-turn sequential cognitive loop managing Task 1 (Strategy & Retake Mapping), Task 2 (Assembly), and Task 3 (Self-Critique & Autonomous Refinement Loop with dynamic `APPROVED` sign-off).
 - **Modular Task Prompts (`helpers/prompts/agentic_prompts.py`)**: Specialized prompt contracts for narrative strategy, assembly, and quality supervisor reflection.
+- **Dedicated Agentic System Prompt (`helpers/prompts/agentic_editor_system_prompt.md`)**: Editable Markdown source for the multi-turn editor persona and durable editorial knowledge.
 - **Master Senior Editor System Prompt (`helpers/prompts/editor_system_prompt.md`)**: 46-section exhaustive reference prompt for one-shot mode.
 - **Orchestrator Mode Switch (`--mode agentic` vs `--mode one-shot`)**: Full integration into `helpers/orchestrator.py` with telemetry recorded to `editorial_audit.txt` and `session.log`.
 - **Unit Test Suite for Agentic Loop (`tests/test_agentic_editor.py`)**: Validates normalization, prompt formatting, happy-path approval, and iterative refinement.
 - **Technical Architecture Documentation (`docs/AGENTIC_LOOP_V0.6.0.md`)**: In-depth design guide detailing single-agent multi-turn loop mechanics.
 
+### Changed
+- Consolidated the repository documentation around the local-first v0.6 architecture, provisional terminal UI, and future local-model/desktop-GUI direction.
+- Declared Whisper Vulkan, Wav2Vec2 DirectML, Pyannote ONNX DirectML, and DeepFilterNet as the canonical transcription/acoustic stack.
+- Marked WhisperX, ElevenLabs, AssemblyAI, and one-shot paths as legacy pending a dependency-aware cleanup.
+- Aligned project, CLI, and configuration version metadata to `v0.6.0`.
+- Corrected the session location to `%LOCALAPPDATA%/AlanoCut` and removed stale worktree paths from developer instructions.
+
 ## v0.5.0 - 2026-08-15
 
 ### Added
 - Embedded Autonomous Orchestrator (`helpers/orchestrator.py`) supporting OpenAI-compatible LLM backends (NVIDIA NIM, Ollama, OpenAI, Groq).
-- Zero-pollution session architecture storing all intermediate artifacts in `%APPDATA%/AlanoCut/sessions/`.
+- Zero-pollution session architecture storing all intermediate artifacts in `%LOCALAPPDATA%/AlanoCut/sessions/`.
 - Interactive TUI (`alanocut`) with Rich spinners, format configuration, and direct delivery of `timeline.xml`.
 - Wav2Vec2 CTC DirectML GPU forced alignment engine with pause-based chunking and intra-word trellis jump suppression.
 

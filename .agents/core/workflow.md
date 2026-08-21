@@ -1,6 +1,6 @@
 # Workflow
 
-Follow the steps in order under either operating protocol from `AGENTS.md`.
+Follow the steps in order under the operating protocol selected by `SKILL.md` and `.agents/core/context_policy.md`.
 
 - Protocol A (default): read the complete core workflow and all step modules before execution, then work end to end while checkpointing state.
 - Protocol B (context-constrained): at each step, read only the listed step module plus core invariants and the active `edit/run_state.md`.
@@ -36,7 +36,7 @@ Inputs:
 
 Outputs:
 - `edit/transcripts/<source>.json`
-- provider-bound timed words (forced-aligned for WhisperX; Scribe timestamps for ElevenLabs)
+- canonical local timed words aligned by Wav2Vec2
 - updated `edit/run_state.md`
 
 Next:
@@ -197,7 +197,7 @@ These criteria apply identically to Protocol A and Protocol B. Finish only when:
 
 - every intended source is inventoried and accounted for;
 - every editorially relevant source has a readable transcript or a documented exclusion reason;
-- every included source and preview transcript uses the canonical provider schema, matching hashes/configuration and complete word timing; WhisperX uses forced alignment and Community-1 speakers when that selected profile enables diarization;
+- every included source and preview transcript uses the canonical local schema, matching hashes/configuration and complete Wav2Vec2-aligned word timing; Pyannote speaker IDs are present when diarization is enabled;
 - the EDL is coherent, duration-checked, structurally valid, declares `sequence_fps` and `required_beats`, and uses refined exact-frame ranges;
 - every join is represented in both preview audio QC and timed preview transcript QC;
 - no unresolved boundary review, uncut canonical internal silence above 300ms, excessive entry silence, tight first-word attack, orphan cue/token, crossed join, missing beat, or stale hash remains;

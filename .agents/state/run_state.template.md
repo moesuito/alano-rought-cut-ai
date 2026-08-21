@@ -59,7 +59,7 @@ ASR/alignment/diarization models:
 Runtime versions/GPU:
 Source/config transcript hashes:
 Provider word-timing coverage:
-WhisperX forced-alignment / diarization status:
+Wav2Vec2 alignment / Pyannote diarization status:
 Boundary refiner report/status/hash:
 Refined EDL hash:
 Preview WAV hash:

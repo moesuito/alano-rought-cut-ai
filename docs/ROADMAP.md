@@ -1,27 +1,47 @@
-# Roadmap - Alano Cut
+# Roadmap
 
-Status: living document.  
-Updated: 2026-07-13
+Atualizado em 2026-08-20 para a linha v0.6.0.
 
-## F0 — Development Harness
+## Agora: estabilizar a v0.6
 
-| Branch | Goal | Status |
-| --- | --- | --- |
-| `codex/chore-dev-harness` | Durable development roles, worktree flow, and Python validation contract. | in progress |
+1. Consolidar o repositório e remover duplicação documental.
+2. Executar um code review completo do agente, orquestrador, transcrição, QC e instalação.
+3. Tornar o pipeline autônomo fail-closed do parse da LLM até o XML.
+4. Garantir que semantic QC, preview transcript QC e readiness sejam obrigatórios no caminho real.
+5. Corrigir propagação de tipo de vídeo, pacing e identidade dos eventos acústicos.
+6. Remover divergências de versão, paths e documentação.
 
-## F1 — Audio-Exact Boundary Refinement (v0.4.0)
+## Próximo: inteligência editorial
 
-| Task | Goal | Status |
-| --- | --- | --- |
-| F1.1 | Rational timing, bundled RNNoise model, in-place boundary refiner. | completed |
-| F1.2 | Frame-exact dry WAV preview and baseline join QC. | completed |
-| F1.3 | Required beats, mandatory preview transcript, readiness gate. | completed |
-| F1.4 | XML parity, docs, installer, tests, and v0.4.0 release preparation. | completed |
-| F1.5 | Fail-closed exact-frame/map/readiness hardening. | completed |
-| F1.6 | Adaptive lexical/acoustic boundary selection and rejected-neighbor guards. | completed |
-| F1.7 | Join-centric audio/transcript QC and mandatory product-workflow integration. | in progress |
-| F1.8 | Acoustic out-point snapping & ASR over-estimation correction. | planned |
+1. Evoluir o agente de três chamadas/fases para um runtime com plano, tarefas, execução, crítica e validação explícitas.
+2. Separar estado factual, memória de trabalho, plano editorial e histórico de decisões.
+3. Criar schemas mais rigorosos para estratégia, beats, ranges e revisão.
+4. Adicionar ferramentas internas para o agente consultar trechos, palavras, candidatos a retake e duração sem reenviar todo o contexto.
+5. Projetar retry e recuperação sem transformar falha de parse em aprovação.
+6. Melhorar o conhecimento do editor para Reels, YouTube, videoaulas, tutoriais e VSLs.
+7. Medir qualidade e custo com modelos locais menores.
 
-## Later
+## Validação real
 
-- v0.5.0: remove the legacy `timeline_view.py` and `validate_edl_boundaries.py` manual-diagnostic paths after migration evidence.
+1. Construir um corpus privado representativo com permissões e resultados esperados.
+2. Registrar erros editoriais, falhas acústicas, divergências de EDL e regressões.
+3. Avaliar completude, coerência, seleção de retakes, pacing e segurança de joins.
+4. Comparar modelos e configurações com o mesmo material e os mesmos gates.
+5. Só promover uma release depois de validar o pipeline instalado, não apenas testes unitários.
+
+## Limpeza controlada
+
+1. Remover WhisperX e seus documentos antigos.
+2. Remover ElevenLabs e AssemblyAI do produto depois de provar que nenhuma dependência ativa permanece.
+3. Arquivar planos v0.4/v0.5 e manter somente documentação histórica necessária.
+4. Remover o modo one-shot quando o loop agêntico tiver cobertura equivalente ou superior.
+5. Revisar dependências, instalador e artefatos empacotados.
+
+## Depois da estabilidade
+
+- dispatcher para múltiplos vídeos e múltiplas entregas;
+- integração mais direta com Premiere Pro;
+- GUI desktop, com escolha futura entre Electron, Tauri ou alternativa equivalente;
+- distribuição e atualização confiáveis para usuários finais.
+
+Não priorizar acabamento da TUI atual: ela é um instrumento temporário de validação.

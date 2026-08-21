@@ -8,9 +8,37 @@ Defines specialized system prompts and task instructions for multi-turn cognitiv
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+
+PROMPTS_DIR = Path(__file__).resolve().parent
+
+
+def _load_agentic_system_prompt_template() -> str:
+    """Load the agentic editor persona and durable knowledge from Markdown."""
+    prompt_file = PROMPTS_DIR / "agentic_editor_system_prompt.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+
+    appdata_prompt = (
+        Path(os.environ.get("APPDATA", ""))
+        / "alano-rought-cut-ai"
+        / "helpers"
+        / "prompts"
+        / "agentic_editor_system_prompt.md"
+    )
+    if appdata_prompt.exists():
+        return appdata_prompt.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(
+        "agentic_editor_system_prompt.md not found at "
+        f"{prompt_file} or {appdata_prompt}"
+    )
+
 
 def get_agentic_system_prompt(video_type: str = "aula") -> str:
-    """Master System Prompt defining the Persona, Authority, and Editorial Standards."""
+    """Build the agentic system prompt from Markdown plus format-specific rules."""
     is_short = video_type.lower() in {"reels", "tiktok", "shorts", "social", "short"}
 
     if is_short:
@@ -28,35 +56,8 @@ def get_agentic_system_prompt(video_type: str = "aula") -> str:
             "marque 'is_list': true para preservar as micropausas naturais de respiração (até 500ms)."
         )
 
-    return f"""Você é "O Editor" — um Editor de Vídeo Sênior e Diretor de Pós-Produção atuando em um fluxo de trabalho agêntico autônomo.
-
-Você possui autoridade editorial plena, pensamento crítico e profundo discernimento sobre linguagem falada, ritmo audiovisual e psicologia da atenção.
-
-Seu trabalho é executado em TAREFAS estruturadas:
-1. DIAGNOSTICAR o material e planejar a estratégia narrativa.
-2. MONTAR a timeline inicial com timestamps exatos das transcrições.
-3. REFLETIR, criticar a própria montagem e REFINAR até que o corte atinja a perfeição profissional.
-
-════════════════════════════════════════════════════════════════════════════════
-🧠 REGRAS DE JULGAMENTO EDITORIAL SÊNIOR
-════════════════════════════════════════════════════════════════════════════════
-
-1. MONTAGEM PELA HISTÓRIA (NÃO PELA ORDEM DOS ARQUIVOS):
-   - Se o material for linear, preserve a ordem cronológica natural.
-   - Se houver regravações posteriores (pickups gravados no fim da sessão), utilize o take definitivo no início ou posição correta.
-
-2. CONTEÚDO vs. CACOS & BASTIDOR:
-   - Toda fala genuinamente destinada ao público (ex: "Fala pessoal, tudo beleza?") deve ser MANTIDA.
-   - Toda hesitação, confirmação de bastidor entre erros (ex: erro seguido de silêncio, "Beleza.", pausa longa e recomeço) ou falas de direção ("corta", "volta", "aí", "gravando", palmas, pigarros) deve ser SUMARIAMENTE DESCARTADA.
-   - O corte deve iniciar direto na primeira palavra legítima do conteúdo.
-
-3. RETAKES & REPARAÇÃO SEMÂNTICA:
-   - Identifique todas as tentativas de uma mesma frase e selecione a melhor (normalmente a última tentativa completa).
-   - Se um take cometeu erro factual ou contradição e foi corrigido em seguida, utilize obrigatoriamente a versão corrigida.
-
-DIRETRIZES DE FORMATO:
-{pacing_rules}
-"""
+    template = _load_agentic_system_prompt_template()
+    return template.replace("{pacing_rules}", pacing_rules)
 
 
 def build_phase1_strategy_prompt(brief: str, takes_packed_content: str) -> str:
