@@ -63,14 +63,26 @@ Um probe mínimo confirmou que o NIM aceita o ciclo OpenAI de tool call, tool re
 - O ledger foi finalizado como `needs_human_review` com `OPERATOR_INTERRUPTED`.
 - Nenhuma EDL ou timeline foi publicada.
 
+### Sessão 3
+
+`session_20260821_015644_raw_video_2ff6e9`
+
+- Sessão isolada iniciada a partir das três fontes e com seeding dos transcripts canônicos correspondentes.
+- Primeira chamada da fase `diagnose` concluída com sucesso: duas `read_file`, 5.517 tokens de prompt, 47 tokens de saída e 10.663 ms de latência.
+- As chamadas subsequentes atingiram timeout de 120s da API remota (`PROVIDER_TRANSIENT`) em duas tentativas consecutivas por esgotamento de cota/rate limit na chave de API do provedor (NVIDIA NIM).
+- O teste foi cancelado pelo operador para atualização de credencial.
+- Nenhuma timeline ou EDL foi corrompida ou publicada (comportamento fail-closed estrito mantido).
+
 O `raw_video/timeline.xml` preexistente não foi alterado por esses smokes editoriais.
 
 ## Próxima continuação
 
-1. Criar uma terceira sessão isolada e repetir o smoke editorial reutilizando os transcripts canônicos; não reutilizar a sessão interrompida.
-2. Acompanhar `diagnose`, `plan`, `assemble` e `review` por `llm_usage.jsonl`, `agent_run.json` e artifacts, sem expor conteúdo bruto.
-3. Registrar tokens por fase, arquétipo selecionado, quantidade de beats/ranges, revisões e findings.
-4. Se a EDL editorial for aprovada, executar o fluxo público completo `alanocut` para validar refiner, quatro QCs, readiness e publicação de XML.
-5. Validar a qualidade dos cortes manualmente no Premiere Pro.
+1. Configurar a nova API key do provedor no `.env` da instalação em `%APPDATA%\alano-rought-cut-ai`.
+2. Criar uma nova sessão isolada e repetir o smoke editorial reutilizando os transcripts canônicos.
+3. Acompanhar `diagnose`, `plan`, `assemble` e `review` por `llm_usage.jsonl`, `agent_run.json` e artifacts, sem expor conteúdo bruto.
+4. Registrar tokens por fase, arquétipo selecionado, quantidade de beats/ranges, revisões e findings.
+5. Se a EDL editorial for aprovada, executar o fluxo público completo `alanocut` para validar refiner, quatro QCs, readiness e publicação de XML.
+6. Validar a qualidade dos cortes manualmente no Premiere Pro.
 
 Limitações conhecidas: ainda não há resume automático após crash; lock abandonado bloqueia a sessão de forma fail-closed; mídia totalmente silenciosa/sem words precisa de política explícita futura.
+
