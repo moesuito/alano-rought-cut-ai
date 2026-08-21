@@ -73,11 +73,21 @@ Um probe mínimo confirmou que o NIM aceita o ciclo OpenAI de tool call, tool re
 - O teste foi cancelado pelo operador para atualização de credencial.
 - Nenhuma timeline ou EDL foi corrompida ou publicada (comportamento fail-closed estrito mantido).
 
+### Sessão 4
+
+`session_20260821_020420_raw_video_d386c8`
+
+- Executada com nova credencial NVIDIA NIM no `.env`.
+- Primeira chamada da fase `diagnose` (`diagnose-1-1-1`): respondida com sucesso em 10.859 ms (5.517 tokens de prompt, 47 de completion), emitindo duas tool calls `read_file` para `brief.md` e `takes_packed.md`.
+- Segunda chamada (`diagnose-1-2-1` e `diagnose-1-2-2`): atingiu timeout de 120s do cliente HTTP (`PROVIDER_TRANSIENT`) em duas tentativas consecutivas de envio dos tool results para `https://integrate.api.nvidia.com/v1/chat/completions`.
+- **Diagnóstico técnico do travamento**: O endpoint sandbox da NVIDIA NIM (`z-ai/glm-5.2`) apresenta latência/enfileiramento superior a 120 segundos para processar o contexto multi-turno contendo mensagens de tool result volumosas (`takes_packed.md`), ou o backend remoto da NVIDIA sofre de throttling/fila severa no cluster. O timeout fixado de 120s no cliente Python encerra a tentativa como `PROVIDER_TRANSIENT` e aciona o retry com backoff.
+- O teste foi cancelado pelo operador. Nenhuma timeline ou EDL foi corrompida ou publicada (comportamento fail-closed estrito mantido).
+
 O `raw_video/timeline.xml` preexistente não foi alterado por esses smokes editoriais.
 
 ## Próxima continuação
 
-1. Configurar a nova API key do provedor no `.env` da instalação em `%APPDATA%\alano-rought-cut-ai`.
+1. Investigar a latência/timeout do provedor remoto (ou avaliar aumento de timeout / alternativa de backend OpenAI-compatible como Ollama/vLLM local ou outro modelo).
 2. Criar uma nova sessão isolada e repetir o smoke editorial reutilizando os transcripts canônicos.
 3. Acompanhar `diagnose`, `plan`, `assemble` e `review` por `llm_usage.jsonl`, `agent_run.json` e artifacts, sem expor conteúdo bruto.
 4. Registrar tokens por fase, arquétipo selecionado, quantidade de beats/ranges, revisões e findings.
