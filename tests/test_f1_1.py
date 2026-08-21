@@ -87,10 +87,16 @@ def test_model_hash_preflight(tmp_path):
         verify_model_hash(model_file)
     assert "Model SHA-256 mismatch" in str(excinfo.value)
 
-    # Correct hash
+
+def test_vendored_model_matches_verified_upstream_artifact():
     real_model = Path(__file__).parent.parent / "helpers" / "models" / "cb.rnnn"
-    if real_model.exists():
-        verify_model_hash(real_model)
+    assert real_model.is_file()
+    assert EXPECTED_MODEL_HASH == (
+        "F1357C4E5BE9DEE8467BEAD486DFCED2D75B640C26AD0B594FA7F102322371D9"
+    )
+
+    verify_model_hash(real_model)
+    assert b"\r\n" not in real_model.read_bytes()
 
 # 3. Local word-excluded noise floor tests
 def test_word_excluded_noise_floor():

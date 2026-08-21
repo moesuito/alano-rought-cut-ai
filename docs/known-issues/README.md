@@ -1,7 +1,7 @@
 # Known Issues
 
-Status: active.
-Updated: 2026-08-20
+Status: maintained; no open issue indexed.
+Updated: 2026-08-21
 
 Registre aqui problemas encontrados em testes manuais ou revisões. Cada problema ocupa um arquivo e entra no índice, preservando evidências e decisões entre sessões de desenvolvimento.
 
@@ -11,7 +11,7 @@ Esta pasta contém problemas **transversais** do produto. Notas locais permanece
 
 | ID | Area | Title | Priority | Status |
 | --- | --- | --- | --- | --- |
-| ISSUE-001 | Audio model | Vendored `cb.rnnn` diverges from documented hash | P1 | reported |
+| ISSUE-001 | Audio model | Preserve verified `cb.rnnn` bytes across checkouts | P1 | resolved |
 
 ## Conventions
 

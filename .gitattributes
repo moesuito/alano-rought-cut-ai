@@ -1,0 +1,2 @@
+# Preserve neural-network weight bytes across platforms and keep them out of text diffs.
+helpers/models/*.rnnn binary
