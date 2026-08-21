@@ -1,30 +1,20 @@
 # alano-rought-cut-ai
 
+Introducing **alano-rought-cut-ai** — a specialized autonomous AI engine for video rough cuts and Adobe Premiere Pro timeline XML export.
 
-Introducing **alano-rought-cut-ai** — a specialized AI assistant skill for rough video cutting and Adobe Premiere Pro timeline XML export.
+Current release: **v0.6.0** (Autonomous Agentic Loop Edition).
 
-Current release: **v0.4.0**.
-
-This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as a **Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
-
-The agent instructions use a capability-routed dual protocol. Capable agents read the complete operational workflow up front and execute end to end; context-constrained agents retain the modular, one-step-at-a-time fallback. `SKILL.md` and `AGENTS.md` route both kinds of agent explicitly.
+This repository is a customized fork of the open-source [video-use](https://github.com/browser-use/video-use) project (all credits to the original creators at browser-use). It has been streamlined and adapted to act exclusively as an **Autonomous Rough Cut Specialist**, discarding final rendering features, subtitles, color grading, overlays, and animations in favor of direct timeline integration with Premiere Pro.
 
 ## What it does
 
-- **Identifies and cuts out filler words** (`umm`, `uh`, false starts) and dead space between takes.
-- **Infers the video type and rough-cut structure** from the transcript before editing, instead of assuming a fixed format.
-- **Uses an explicit transcription provider per workspace**: local CUDA WhisperX/faster-whisper (with optional Community-1 diarization) or ElevenLabs Scribe with provider word timestamps.
-- **Compares repeated takes by meaning and delivery**, choosing the best version of each narrative beat.
-- **Turns every internal lexical gap strictly above 300ms into a jump cut**, with exact 300ms retention and narrow reasoned overrides for intentional pauses.
-- **Validates tight cuts against waveform energy**, so ASR timestamp drift does not become the only boundary signal.
-- **Uses lightweight preview renders for QA**, including render-level cut checks before exporting XML.
-- **Always persists a timed preview-audio transcript bound to the WAV hash**, then validates every join for repeated, clipped, orphaned, crossed, or semantically wrong content.
-- **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro 2026**.
-- **Names the Premiere XML sequence from context**, using names like `reels 35_cadastro_alano-cut` instead of a generic fixed timeline name.
-- **Round-trips corrected Premiere XML back to EDL JSON** for comparison against the agent cut.
-- **Maps audio to a single linked stereo track (A1)**, preventing Premiere Pro from importing duplicate mono tracks.
-- **Renders quick, lightweight preview audio (preview.wav)** for audio boundary checks, accompanied by a timeline mapping JSON file.
-- **Persists session memory** in `project.md` so editing sessions can resume seamlessly.
+- **Autonomous Agentic Editorial Loop (`helpers/agentic_editor.py`)**: Multi-turn cognitive editing engine that diagnoses the footage, maps retakes, drafts the timeline, and auto-critiques/refines the cut before delivery.
+- **Local GPU Acoustic Stack**: Universal GPU acceleration across NVIDIA, AMD, and Intel GPUs via Whisper Large v3 (Vulkan), Wav2Vec2 CTC Forced Alignment (DirectML), Pyannote Diarization (DirectML), and DeepFilterNet 3 (100 dB denoising).
+- **Interactive Terminal Experience (`alanocut`)**: Open a terminal in any video folder, run `alanocut`, choose format and brief, and get `./timeline.xml` with zero folder pollution.
+- **Identifies and cuts out filler words, false starts, and studio banter** (`"Beleza."`, `"Tá."`, `"Corta."`, `"Volta."` isolated between errors).
+- **Acoustic Snapper & Dynamic Pacing**: Word boundary preservation with $\ge 66$ms padding, 350ms standard gaps (long-form), 500ms list preservation (`is_list: true`), and 200ms rapid pacing for short-form (Reels/TikTok <= 90s).
+- **Generates a Final Cut Pro 7 XML timeline (`timeline.xml`)** ready to be imported directly into **Adobe Premiere Pro**.
+- **Zero Folder Pollution**: All session caches, transcripts, and logs live cleanly in `%APPDATA%/AlanoCut/sessions/<session_id>/`.
 
 ## Installation (Windows PowerShell)
 
