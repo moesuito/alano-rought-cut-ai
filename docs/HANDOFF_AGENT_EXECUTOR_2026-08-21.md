@@ -27,14 +27,13 @@ Resolvida. O blob RNNoise era o mesmo do upstream; `core.autocrlf=true` converti
 
 ## Evidência automatizada
 
-- Suíte final em Python 3.12: `405 passed, 1 skipped`.
-- O skip é um teste privado opt-in já existente.
-- Parser de `install.ps1`, `py_compile` e `git diff --check`: aprovados.
+- Suíte final completa em Python 3.12: `413 passed, 1 skipped` (em 28.91s).
+- O skip é um teste privado opt-in já existente (`test_lesson08_regression_suite_private_opt_in`).
+- Parser de `install.ps1`, `py_compile` (compileall de helpers e tests) e `git diff --check`: aprovados com zero erros.
 - Catálogo lexical real: três transcripts, 458 palavras, aceitos pelo contrato canônico.
 - Overlaps canônicos de palavra: até 250 ms são permitidos; o material real observado chegou a 47 ms.
-- Runtime global sincronizado em `%APPDATA%\alano-rought-cut-ai` com `.env`, `.venv` e `user-settings.json` preservados.
+- Runtime global sincronizado em `%APPDATA%\alano-rought-cut-ai` com `.env`, `.venv` e `user-settings.json` preservados via `install.ps1 -RuntimeSyncOnly`.
 - Smoke offline instalado importou todos os módulos novos e compilou cinco schemas locais.
-- Após as correções finais de estado, batch de tools e inventário, a suíte focada encerrou com `99 passed`.
 
 ## Smokes NVIDIA NIM / GLM-5.2
 
