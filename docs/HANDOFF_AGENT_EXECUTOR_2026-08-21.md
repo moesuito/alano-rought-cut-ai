@@ -83,12 +83,22 @@ Um probe mínimo confirmou que o NIM aceita o ciclo OpenAI de tool call, tool re
 - **Diagnóstico técnico do travamento**: O endpoint sandbox da NVIDIA NIM (`z-ai/glm-5.2`) apresenta latência/enfileiramento superior a 120 segundos para processar o contexto multi-turno contendo mensagens de tool result volumosas (`takes_packed.md`), ou o backend remoto da NVIDIA sofre de throttling/fila severa no cluster. O timeout fixado de 120s no cliente Python encerra a tentativa como `PROVIDER_TRANSIENT` e aciona o retry com backoff.
 - O teste foi cancelado pelo operador. Nenhuma timeline ou EDL foi corrompida ou publicada (comportamento fail-closed estrito mantido).
 
+### Sessão 5 (llama-server local — Ling-3.0-tiny-Q4_K_S.gguf)
+
+`http://127.0.0.1:8080/v1`
+
+- Servidor local `llama-server.exe` (Vulkan) iniciado com sucesso com o modelo `Ling-3.0-tiny-Q4_K_S.gguf`.
+- Probe de completude disparado para validar integração OpenAI-compatible.
+- **Falha identificada no parser de telemetria**: A chamada foi respondida pelo `llama-server`, mas rejeitada pelo cliente Python em `helpers/llm_client.py:L525` com `LLMResponseError: LLM_RESPONSE_INVALID: usage value is invalid`.
+- **Diagnóstico da causa raiz**: O `llama-server` (e versões modernas de APIs compatíveis) retorna objetos aninhados no payload de uso, como `"prompt_tokens_details": {"cached_tokens": 23}`. A função `_parse_usage` itera por todos os itens de `usage` exigindo `isinstance(count, int)`, o que levanta exceção ao encontrar sub-dicionários.
+- Seguindo a regra normativa, o código não foi modificado e a falha foi congelada para relatório.
+
 O `raw_video/timeline.xml` preexistente não foi alterado por esses smokes editoriais.
 
 ## Próxima continuação
 
-1. Investigar a latência/timeout do provedor remoto (ou avaliar aumento de timeout / alternativa de backend OpenAI-compatible como Ollama/vLLM local ou outro modelo).
-2. Criar uma nova sessão isolada e repetir o smoke editorial reutilizando os transcripts canônicos.
+1. Ajustar `_parse_usage` em `helpers/llm_client.py` para aceitar/ignorar com segurança sub-dicionários de detalhes de tokens (ex.: `prompt_tokens_details`, `completion_tokens_details`) sem invalidar o parse.
+2. Repetir o probe de completude e o smoke editorial com o `llama-server` local.
 3. Acompanhar `diagnose`, `plan`, `assemble` e `review` por `llm_usage.jsonl`, `agent_run.json` e artifacts, sem expor conteúdo bruto.
 4. Registrar tokens por fase, arquétipo selecionado, quantidade de beats/ranges, revisões e findings.
 5. Se a EDL editorial for aprovada, executar o fluxo público completo `alanocut` para validar refiner, quatro QCs, readiness e publicação de XML.
