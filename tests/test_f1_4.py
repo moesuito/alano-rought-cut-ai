@@ -175,6 +175,7 @@ def test_alanocut_controller_rejects_every_argument(argument):
 def test_runtime_packaging_excludes_development_agent_trees():
     installer = Path("install.ps1").read_text(encoding="utf-8")
     controller = Path("bin/alanocut.ps1").read_text(encoding="utf-8")
+    cmd_launcher = Path("bin/alanocut.cmd").read_text(encoding="utf-8")
 
     assert '$RuntimeDirectories = @("agent_knowledge", "bin", "helpers")' in installer
     assert 'foreach ($DevelopmentTree in @(".agents", ".squad"))' in installer
@@ -183,6 +184,25 @@ def test_runtime_packaging_excludes_development_agent_trees():
     assert "git clone" not in installer
     assert "Copy-Item" not in controller
     assert '"init"' not in controller
+    assert "%*" not in cmd_launcher
+    assert 'if not "%~1"==""' in cmd_launcher
+    assert "-File" in cmd_launcher
+    assert "exit /b %ERRORLEVEL%" in cmd_launcher
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CMD launcher")
+def test_cmd_launcher_rejects_arguments_before_starting_powershell(tmp_path):
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(tmp_path / "missing-runtime")
+    result = subprocess.run(
+        ["cmd", "/d", "/c", str(Path("bin/alanocut.cmd").resolve()), "--help"],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "Run only: alanocut" in (result.stdout + result.stderr)
 
 
 def test_fresh_runtime_declares_direct_tui_and_alignment_dependencies():
@@ -193,7 +213,7 @@ def test_fresh_runtime_declares_direct_tui_and_alignment_dependencies():
         for name in re.findall(r'^\s*"([A-Za-z0-9_.-]+)(?:[<>=!~].*)?",\s*$', project, re.MULTILINE)
     }
 
-    assert {"rich", "transformers", "onnx"} <= declared_names
+    assert {"rich", "transformers", "onnx", "jsonschema", "referencing"} <= declared_names
 
 
 def test_runtime_sync_uses_checkout_allowlist_and_preserves_local_state(tmp_path):
@@ -205,9 +225,6 @@ def test_runtime_sync_uses_checkout_allowlist_and_preserves_local_state(tmp_path
     (install_dir / "user-settings.json").write_text(
         '{"preserve": true}', encoding="utf-8"
     )
-    venv_marker = install_dir / ".venv" / "preserved.txt"
-    venv_marker.parent.mkdir()
-    venv_marker.write_text("keep", encoding="utf-8")
     for development_tree in (".agents", ".squad"):
         stale = install_dir / development_tree
         stale.mkdir()
@@ -234,7 +251,18 @@ def test_runtime_sync_uses_checkout_allowlist_and_preserves_local_state(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     assert (install_dir / "agent_knowledge" / "manifest.json").is_file()
     assert (install_dir / "bin" / "alanocut.ps1").is_file()
-    assert (install_dir / "helpers" / "interactive_cli.py").is_file()
+    for relative in (
+        "helpers/agent_artifacts.py",
+        "helpers/agent_telemetry.py",
+        "helpers/agent_tools.py",
+        "helpers/artifact_agent.py",
+        "helpers/editorial_edl_bridge.py",
+        "helpers/interactive_cli.py",
+        "helpers/knowledge_loader.py",
+        "helpers/llm_client.py",
+        "helpers/orchestrator.py",
+    ):
+        assert (install_dir / relative).is_file(), relative
     assert not (install_dir / ".agents").exists()
     assert not (install_dir / ".squad").exists()
     assert not (install_dir / "stale-runtime.txt").exists()
@@ -242,7 +270,205 @@ def test_runtime_sync_uses_checkout_allowlist_and_preserves_local_state(tmp_path
     assert json.loads((install_dir / "user-settings.json").read_text(encoding="utf-8")) == {
         "preserve": True
     }
+    assert not (install_dir / ".venv").exists()
+
+
+def test_runtime_sync_fails_closed_when_preserved_venv_is_incomplete(tmp_path):
+    appdata = tmp_path / "appdata"
+    incomplete_scripts = appdata / "alano-rought-cut-ai" / ".venv" / "Scripts"
+    incomplete_scripts.mkdir(parents=True)
+    venv_marker = incomplete_scripts.parent / "preserved.txt"
+    venv_marker.write_text("keep", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(appdata)
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(Path("install.ps1").resolve()), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_IMPORT_SMOKE_FAILED: global Python is missing" in (
+        result.stdout + result.stderr
+    )
     assert venv_marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_runtime_sync_rejects_reparse_source_root(tmp_path):
+    source_link = tmp_path / "source-link"
+    junction = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(source_link), str(Path.cwd())],
+        capture_output=True,
+        text=True,
+    )
+    if junction.returncode != 0:
+        pytest.skip("Could not create a Windows junction")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(tmp_path / "appdata")
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(source_link / "install.ps1"), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_SYNC_REPARSE_POINT" in (result.stdout + result.stderr)
+    assert not (tmp_path / "appdata" / "alano-rought-cut-ai").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_runtime_sync_rejects_reparse_source_top_level(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "agent_knowledge").mkdir()
+    (source / "bin").mkdir()
+    for relative in (
+        "install.ps1",
+        "config.json",
+        "pyproject.toml",
+        "agent_knowledge/manifest.json",
+        "bin/alanocut.cmd",
+        "bin/alanocut.ps1",
+    ):
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(Path(relative).read_bytes())
+    junction = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(source / "helpers"), str(Path("helpers").resolve())],
+        capture_output=True,
+        text=True,
+    )
+    if junction.returncode != 0:
+        pytest.skip("Could not create a Windows junction")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(tmp_path / "appdata")
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(source / "install.ps1"), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_SYNC_REPARSE_POINT" in (result.stdout + result.stderr)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_runtime_sync_rejects_reparse_destination_root(tmp_path):
+    appdata = tmp_path / "appdata"
+    appdata.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "must-survive.txt"
+    sentinel.write_text("safe", encoding="utf-8")
+    install_link = appdata / "alano-rought-cut-ai"
+    junction = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(install_link), str(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if junction.returncode != 0:
+        pytest.skip("Could not create a Windows junction")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(appdata)
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(Path("install.ps1").resolve()), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_SYNC_REPARSE_POINT" in (result.stdout + result.stderr)
+    assert sentinel.read_text(encoding="utf-8") == "safe"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_runtime_sync_rejects_reparse_top_level_before_removal(tmp_path):
+    appdata = tmp_path / "appdata"
+    install_dir = appdata / "alano-rought-cut-ai"
+    install_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "must-survive.txt"
+    sentinel.write_text("safe", encoding="utf-8")
+    junction = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(install_dir / "helpers"), str(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if junction.returncode != 0:
+        pytest.skip("Could not create a Windows junction")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(appdata)
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(Path("install.ps1").resolve()), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_SYNC_REPARSE_POINT" in (result.stdout + result.stderr)
+    assert sentinel.read_text(encoding="utf-8") == "safe"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_runtime_sync_rejects_nested_reparse_before_recursive_removal(tmp_path):
+    appdata = tmp_path / "appdata"
+    install_dir = appdata / "alano-rought-cut-ai"
+    stale_tree = install_dir / "stale-runtime" / "nested"
+    stale_tree.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "must-survive.txt"
+    sentinel.write_text("safe", encoding="utf-8")
+    junction = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(stale_tree / "external"), str(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if junction.returncode != 0:
+        pytest.skip("Could not create a Windows junction")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(appdata)
+    result = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(Path("install.ps1").resolve()), "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "RUNTIME_SYNC_REPARSE_POINT" in (result.stdout + result.stderr)
+    assert sentinel.read_text(encoding="utf-8") == "safe"
 
 
 def test_installer_fails_closed_when_virtual_environment_creation_fails(tmp_path):

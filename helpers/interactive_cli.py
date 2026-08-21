@@ -192,7 +192,7 @@ def interactive_main() -> None:
         label for key, _value, label in VIDEO_TYPE_OPTIONS if key == type_choice
     )
     summary_table.add_row("Formato Escolhido:", selected_label)
-    summary_table.add_row("Motor Editorial:", "[bold cyan]Modo Agêntico em Loops (Cognitive Multi-Turn Engine)[/bold cyan]")
+    summary_table.add_row("Motor Editorial:", "[bold cyan]Executor por artefatos (multi-turno)[/bold cyan]")
     summary_table.add_row("Briefing Editorial:", brief if brief else "[italic green]Automático (A IA decidirá os melhores takes)[/italic green]")
     summary_table.add_row("Arquivo de Entrega:", "[bold yellow]./timeline.xml[/bold yellow] (Premiere Pro)")
 
@@ -220,6 +220,33 @@ def interactive_main() -> None:
             console.print(f"\n[bold red]❌ Erro durante a execução:[/bold red] {e}")
             sys.exit(1)
 
+    if res.get("status") != "success":
+        console.clear()
+        display_header()
+        review_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        review_table.add_column("Métrica", style="yellow", width=25)
+        review_table.add_column("Resultado", style="bold white")
+        review_table.add_row("Status:", "[bold yellow]REVISÃO HUMANA NECESSÁRIA[/bold yellow]")
+        review_table.add_row("Código:", str(res.get("error_code", "REVIEW_REQUIRED")))
+        review_table.add_row("Estado do agente:", str(res.get("agent_state", "unknown")))
+        review_table.add_row("Estado do QC:", str(res.get("qc_status", "pending")))
+        review_table.add_row("Timeline publicada:", "[bold]não[/bold]")
+        review_table.add_row("Pasta da sessão:", f"[dim]{res.get('session_dir', '')}[/dim]")
+        review_table.add_row("Log estruturado:", f"[dim cyan]{res.get('session_log', '')}[/dim cyan]")
+        console.print(
+            Panel(
+                review_table,
+                title="⏸️ Pipeline pausado com segurança",
+                border_style="yellow",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+        console.print(
+            "\n[white]Nenhum XML foi publicado. Consulte os artefatos e gates da sessão antes de retomar.[/white]"
+        )
+        raise SystemExit(2)
+
     # 6. Final Success Panel
     console.clear()
     display_header()
@@ -236,7 +263,8 @@ def interactive_main() -> None:
     success_table.add_row("🎞️ Timeline Final:", f"[bold yellow]{xml_path}[/bold yellow]")
     success_table.add_row("✂️ Total de Cortes:", f"[bold white]{takes_count} takes selecionados[/bold white]")
     success_table.add_row("⏱️ Duração do Rough Cut:", f"[bold green]{format_seconds(dur_s)}[/bold green] ({dur_s:.1f}s)")
-    success_table.add_row("🔊 Controle de Áudio (QC):", "[bold green]APROVADO (Zero clipping / estalos)[/bold green]")
+    success_table.add_row("🤖 Estado do Agente:", f"[bold green]{res.get('agent_state', 'approved').upper()}[/bold green]")
+    success_table.add_row("🔊 Readiness / QC:", f"[bold green]{res.get('qc_status', 'pass').upper()}[/bold green]")
     success_table.add_row("📝 Relatório Editorial (.txt):", f"[bold cyan]{res.get('audit_txt', '')}[/bold cyan]")
     success_table.add_row("📜 Log Completo (.log):", f"[dim cyan]{res.get('session_log', '')}[/dim cyan]")
     success_table.add_row("📁 Pasta da Sessão:", f"[dim]{res['session_dir']}[/dim]")

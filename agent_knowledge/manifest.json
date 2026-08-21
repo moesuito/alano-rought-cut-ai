@@ -19,7 +19,7 @@
       "task": "tasks/plan.md",
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md"],
       "schema": "schemas/cut-plan.schema.json",
-      "reads": ["diagnosis.json", "takes_packed.md"],
+      "reads": ["diagnosis.json", "brief.md", "takes_packed.md"],
       "writes": ["cut_plan.json"],
       "dynamic": ["selected_archetype_or_core_only"]
     },
@@ -35,8 +35,8 @@
       "task": "tasks/review.md",
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md", "contracts/edl.md"],
       "schema": "schemas/review.schema.json",
-      "reads": ["diagnosis.json", "cut_plan.json", "edl.draft.json", "takes_packed.md", "transcripts/<source>.json"],
-      "writes": ["review.NNN.json", "edl.draft.json"]
+      "reads": ["diagnosis.json", "cut_plan.json", "edl.draft.json", "brief.md", "takes_packed.md", "transcripts/<source>.json"],
+      "writes": ["review.NNN.json"]
     }
   },
   "archetypes": {

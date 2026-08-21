@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -224,26 +226,27 @@ def convert_edl_to_xml(
     if not edl_path.exists():
         sys.exit(f"Error: EDL file not found at {edl_path}")
 
-    # Warn but do not block if QC check fails or is stale
+    # XML is a publication boundary: missing, stale, review, or failed gates block it.
     verify_script = Path(__file__).parent / "verify_edit_ready.py"
-    if verify_script.exists():
-        edit_dir = edl_path.parent
-        cmd = [
-            sys.executable, str(verify_script), str(edl_path),
-            "--transcripts", str(edit_dir / "transcripts"),
-            "--boundary-report", str(edit_dir / "edl_boundary_qc.json"),
-            "--audio-report", str(edit_dir / "preview_audio_qc.json"),
-            "--semantic-report", str(edit_dir / "edl_semantic_qc.json"),
-            "--transcript-report", str(edit_dir / "preview_transcript_qc.json"),
-            "--audio", str(edit_dir / "preview.wav"),
-            "--timeline-map", str(edit_dir / "preview_timeline.json")
-        ]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
-                print(f"Warning: QC verification failed or reports are stale (exit code {res.returncode}). Proceeding with XML generation.", file=sys.stderr)
-        except Exception as e:
-            print(f"Warning: could not run verification check: {e}", file=sys.stderr)
+    if not verify_script.is_file():
+        raise RuntimeError("READINESS_UNAVAILABLE: XML export is blocked")
+    edit_dir = edl_path.parent
+    cmd = [
+        sys.executable, str(verify_script), str(edl_path),
+        "--transcripts", str(edit_dir / "transcripts"),
+        "--boundary-report", str(edit_dir / "edl_boundary_qc.json"),
+        "--audio-report", str(edit_dir / "preview_audio_qc.json"),
+        "--semantic-report", str(edit_dir / "edl_semantic_qc.json"),
+        "--transcript-report", str(edit_dir / "preview_transcript_qc.json"),
+        "--audio", str(edit_dir / "preview.wav"),
+        "--timeline-map", str(edit_dir / "preview_timeline.json")
+    ]
+    try:
+        readiness = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception as exc:
+        raise RuntimeError("READINESS_FAILED: XML export is blocked") from exc
+    if readiness.returncode != 0:
+        raise RuntimeError("READINESS_FAILED: XML export is blocked")
 
     edl = json.loads(edl_path.read_text(encoding="utf-8"))
     sources = edl.get("sources", {})
@@ -491,11 +494,21 @@ def convert_edl_to_xml(
     # Output XML bytes
     xml_bytes = ET.tostring(root, encoding="utf-8")
 
-    # Save with custom header
+    # Save atomically with custom header.
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n')
-        f.write(xml_bytes)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".timeline-", suffix=".xml.tmp", dir=output_path.parent
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(b'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n')
+            output.write(xml_bytes)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
     print(f"\nSuccessfully generated Premiere-compatible XML:")
     print(f"  -> {output_path.resolve()}")

@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+from referencing import Registry, Resource
 
 
 KNOWLEDGE_DIR_ENV = "ALANOCUT_KNOWLEDGE_DIR"
@@ -21,6 +27,10 @@ class KnowledgeManifestError(RuntimeError):
     """Raised when the editorial knowledge library is absent or inconsistent."""
 
 
+class ArtifactSchemaError(RuntimeError):
+    """Raised when an artifact does not satisfy its declared offline schema."""
+
+
 @dataclass(frozen=True)
 class KnowledgeBundle:
     """A deterministic, auditable prompt bundle selected from the manifest."""
@@ -29,6 +39,32 @@ class KnowledgeBundle:
     manifest: dict[str, Any]
     sources: tuple[str, ...]
     content: str
+
+
+@dataclass(frozen=True)
+class ArtifactSchemaCatalog:
+    """Compiled Draft 2020-12 validators backed only by local schemas."""
+
+    root: Path
+    schemas: Mapping[str, Mapping[str, Any]]
+    validators: Mapping[str, Draft202012Validator]
+
+    def validate(self, schema_path: str, payload: object) -> None:
+        """Validate a payload without resolving network resources."""
+        validator = self.validators.get(schema_path)
+        if validator is None:
+            raise ArtifactSchemaError(f"Unknown artifact schema: {schema_path}")
+        errors = sorted(
+            validator.iter_errors(payload),
+            key=lambda error: tuple(str(part) for part in error.absolute_path),
+        )
+        if not errors:
+            return
+        first = errors[0]
+        location = ".".join(str(part) for part in first.absolute_path) or "$"
+        raise ArtifactSchemaError(
+            f"Artifact does not match {schema_path} at {location}: {first.message}"
+        ) from first
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, Any]:
@@ -268,7 +304,10 @@ def resolve_knowledge_root(override: str | os.PathLike[str] | None = None) -> Pa
     """
     explicit = override if override is not None else os.environ.get(KNOWLEDGE_DIR_ENV)
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        selected = Path(explicit).expanduser().absolute()
+        if selected.exists() or selected.is_symlink():
+            _reject_reparse(selected, "Editorial knowledge root")
+        return selected.resolve()
 
     candidates = [DEFAULT_CHECKOUT_KNOWLEDGE_DIR]
     appdata_dir = _appdata_knowledge_dir()
@@ -277,6 +316,7 @@ def resolve_knowledge_root(override: str | os.PathLike[str] | None = None) -> Pa
 
     for candidate in candidates:
         if candidate.is_dir():
+            _reject_reparse(candidate, "Editorial knowledge root")
             return candidate.resolve()
 
     rendered = ", ".join(str(path) for path in candidates)
@@ -294,7 +334,13 @@ def _as_relative_file(root: Path, value: Any, field: str) -> tuple[str, Path]:
         raise KnowledgeManifestError(f"Manifest field '{field}' escapes the knowledge root")
 
     root_resolved = root.resolve()
-    candidate = (root_resolved / relative).resolve()
+    unresolved = root_resolved / relative
+    current = root_resolved
+    for part in relative.parts:
+        current = current / part
+        if current.exists() or current.is_symlink():
+            _reject_reparse(current, f"Manifest field '{field}'")
+    candidate = unresolved.resolve()
     try:
         candidate.relative_to(root_resolved)
     except ValueError as exc:
@@ -307,6 +353,17 @@ def _as_relative_file(root: Path, value: Any, field: str) -> tuple[str, Path]:
             f"Manifest field '{field}' references a missing file: {value}"
         )
     return relative.as_posix(), candidate
+
+
+def _reject_reparse(path: Path, label: str) -> None:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise KnowledgeManifestError(f"{label} is unavailable") from exc
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(info.st_mode) or attributes & reparse_flag:
+        raise KnowledgeManifestError(f"{label} cannot be a filesystem link")
 
 
 def _require_path_list(root: Path, value: Any, field: str) -> list[str]:
@@ -420,6 +477,53 @@ def load_manifest(
         _as_relative_file(root, path, f"archetypes.{name}")
 
     return root, manifest
+
+
+def load_artifact_schema_catalog(
+    knowledge_dir: str | os.PathLike[str] | None = None,
+) -> ArtifactSchemaCatalog:
+    """Compile every manifest-declared artifact schema into an offline registry."""
+    root, manifest = load_manifest(knowledge_dir)
+    schema_paths: set[str] = set()
+    for phase in manifest["phases"].values():
+        schema_paths.add(str(phase["schema"]))
+        schema_paths.update(str(path) for path in phase.get("input_schemas", {}).values())
+
+    schemas: dict[str, Mapping[str, Any]] = {}
+    resources: list[tuple[str, Resource[Any]]] = []
+    for schema_path in sorted(schema_paths):
+        _, absolute = _as_relative_file(root, schema_path, "artifact.schema")
+        schema = _read_json_object(absolute, "Editorial artifact schema")
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise KnowledgeManifestError(
+                f"Schema '{schema_path}' is not valid Draft 2020-12"
+            ) from exc
+        schema_id = schema.get("$id")
+        if not isinstance(schema_id, str) or not schema_id:
+            raise KnowledgeManifestError(f"Schema '{schema_path}' has no $id")
+        frozen_schema = MappingProxyType(schema)
+        schemas[schema_path] = frozen_schema
+        resource = Resource.from_contents(schema)
+        resources.append((schema_id, resource))
+        resources.append((absolute.as_uri(), resource))
+
+    registry: Registry[Any] = Registry().with_resources(resources)
+    validators: dict[str, Draft202012Validator] = {}
+    for schema_path, schema in schemas.items():
+        try:
+            validators[schema_path] = Draft202012Validator(schema, registry=registry)
+        except (SchemaError, ValidationError) as exc:
+            raise KnowledgeManifestError(
+                f"Could not compile artifact schema: {schema_path}"
+            ) from exc
+
+    return ArtifactSchemaCatalog(
+        root=root,
+        schemas=MappingProxyType(schemas),
+        validators=MappingProxyType(validators),
+    )
 
 
 def _selected_paths(

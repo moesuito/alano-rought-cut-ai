@@ -5,13 +5,25 @@
 ### Added
 
 - Biblioteca editorial instalada em `agent_knowledge/`, com manifesto fail-closed, núcleo, arquétipos, contratos, tasks, schemas e exemplos separados das skills de desenvolvimento.
-- Documentação do futuro executor restrito de tools/artifacts e da telemetria de contexto e tokens para benchmark de modelos locais.
+- Executor editorial artifact-driven com fases `diagnose`, `plan`, `assemble` e `review`, contextos reconstruídos e loops de revisão limitados.
+- Tools `read_file`, `read_artifact` e `write_artifact` confinadas por fase, roots lógicas, orçamentos e allowlists.
+- Store de artefatos com revisões imutáveis, compare-and-swap, JSON Schema Draft 2020-12, invariantes semânticos, hashes e writes atômicos.
+- Telemetria sanitizada por chamada em `llm_usage.jsonl` e ledger agregado da sessão em `agent_run.json`.
+- Registry host-only de fontes opacas e bridge entre EDL editorial imutável e projeção técnica.
 
 ### Changed
 
 - A única UX pública passa a ser `alanocut` sem argumentos no diretório com os brutos; a TUI detecta mídia, coleta tipo e briefing opcional, usa o ambiente global, isola a sessão e entrega `timeline.xml` no diretório operado.
-- O motor ativo de três fases preserva seus JSONs por compatibilidade e usa o núcleo neutralizado dessa ponte mais um arquétipo de `agent_knowledge/`.
-- As tasks e schemas do futuro fluxo de quatro artefatos são validados como biblioteca, mas permanecem inativos até existir o executor de tools e artifacts.
+- O executor de quatro fases torna-se o único motor do fluxo público, sem fallback automático para o loop antigo de três prompts ou one-shot.
+- Todas as fontes detectadas no diretório formam uma operação editorial; nomes e paths são substituídos por IDs opacos antes do contexto da LLM.
+- `edl.json` editorial passa a ser imutável em `edit/agent/artifacts`; refinamento e reidratação de paths usam a projeção separada `edit/edl.json`.
+- Boundary QC, audio QC, semantic QC, preview transcript QC e readiness passam a bloquear a publicação. Somente todos em `pass` permitem o replace atômico de `<cwd>/timeline.xml`.
+- O cliente OpenAI-compatible passa a preservar tool calls, `usage`, modelo, `finish_reason`, request ID seguro e latência; configuração de LLM em pastas de mídia deixa de ser fonte confiável.
+
+### Fixed
+
+- `helpers/models/*.rnnn` passa a ser tratado como binário em `.gitattributes`, preservando os bytes verificados de `cb.rnnn` mesmo com `core.autocrlf=true` e resolvendo o ISSUE-001.
+- Estados ausentes, falhas do agente, exit de revisão do refinador e readiness incompleto deixam de produzir XML por aprovação implícita.
 
 ### Removed
 

@@ -1,32 +1,33 @@
 # Tools do agente editorial
 
-Status: contrato planejado e ainda não executável. O motor de compatibilidade de três fases não oferece estas tools à LLM.
+Status: implementado e ativo no fluxo público v0.6.
 
-## Objetivo e escopo
+## Escopo
 
-O agente editorial precisa ler sua inteligência, consultar os takes e persistir decisões de corte. Isso não exige shell nem acesso irrestrito ao sistema. A primeira versão planejada exporá somente três operações com raízes lógicas e contratos estreitos:
+O agente editorial lê sua inteligência, consulta evidência pronta e persiste decisões de corte. Ele não recebe shell, rede arbitrária ou filesystem genérico. `helpers/agent_tools.py` expõe somente:
 
 1. `read_file` para conhecimento e inputs imutáveis;
-2. `read_artifact` para estado produzido na sessão;
-3. `write_artifact` para novas decisões estruturadas.
+2. `read_artifact` para estado editorial validado da sessão;
+3. `write_artifact` para a única saída permitida da fase.
 
-O futuro executor realizará as operações em nome do modelo, validará entrada e saída e manterá a autoridade sobre caminhos, schemas, estados e aprovação. Os contratos e schemas em `agent_knowledge/` já são validados como biblioteca, mas isso não significa que as tool calls estejam implementadas.
+O host controla roots, allowlists, schemas, revisões, orçamentos e transições. O modelo nunca escolhe um path físico nem publica a EDL final.
 
-## Fronteiras de acesso
+## Recursos lógicos
 
-`agent_knowledge/` é biblioteca da instalação do AlanoCut e fonte da raiz lógica `knowledge`; ela não é materializada dentro do workspace do usuário. O modelo nunca recebe nem envia um caminho absoluto. O runtime resolve cada nome relativo contra raízes conhecidas:
-
-| Raiz lógica | Conteúdo | Permissão do agente |
+| Classe | Conteúdo | Permissão |
 |---|---|---|
-| `knowledge` | módulos editoriais distribuídos com o produto | somente leitura |
-| `input` | brief, takes, transcrições canônicas e `edl_template.json` da sessão | somente leitura |
-| `artifact` | outputs validados da sessão atual | leitura e escrita mediadas pelas tools |
+| `knowledge` | arquivos selecionados de `agent_knowledge/` para a fase | `read_file` |
+| `input` | `brief.md`, `takes_packed.md`, template e transcripts allowlisted da sessão | `read_file` |
+| `artifact` | predecessores validados do run atual | `read_artifact` |
+| `write` | um nome derivado da fase, como `diagnosis.json` | `write_artifact` |
 
-O runtime resolve a raiz lógica para um diretório canônico, rejeita traversal, links simbólicos que escapem da raiz, extensões não permitidas e arquivos maiores que o limite configurado. O agente não acessa `.env`, configuração de provedor, caches globais, mídia bruta ou arquivos de outras sessões.
+O envelope da fase informa somente nomes lógicos. `agent_knowledge/` permanece na instalação; inputs e artefatos ficam dentro da sessão. A pasta dos vídeos, `.env`, configuração de provedor, caches, código, mídia bruta, `source_registry.json` e outras sessões não são recursos do modelo.
+
+Paths absolutos, UNC, de dispositivo, com drive/ADS, `..`, backslash, NUL ou componente não allowlisted são rejeitados. Roots e componentes existentes não podem ser symlink, junction ou reparse point. A leitura compara identidade e metadados antes/depois para detectar mutação concorrente.
 
 ## Contrato comum
 
-Toda tool call contém um `call_id`, nome e argumentos JSON. Toda resposta do runtime contém:
+Cada resposta usa o mesmo envelope:
 
 ```json
 {
@@ -37,13 +38,13 @@ Toda tool call contém um `call_id`, nome e argumentos JSON. Toda resposta do ru
 }
 ```
 
-Em falha, `ok` é `false`, `result` é `null` e `error` usa um código estável, por exemplo `INVALID_ARGUMENT`, `NOT_FOUND`, `OUTSIDE_ALLOWED_ROOT`, `SCHEMA_MISMATCH`, `STATE_CONFLICT` ou `SIZE_LIMIT`. Texto de exceção interno e caminhos físicos não são devolvidos ao modelo.
+Em falha, `ok` é `false`, `result` é `null` e `error.code` é estável. Os códigos suportados incluem `INVALID_ARGUMENT`, `NOT_FOUND`, `OUTSIDE_ALLOWED_ROOT`, `SCHEMA_MISMATCH`, `SEMANTIC_MISMATCH`, `STATE_CONFLICT`, `SIZE_LIMIT`, `INVALID_JSON`, `INTEGRITY_FAILURE`, `READ_FAILED`, `BUDGET_EXCEEDED`, `NO_PROGRESS` e `NEEDS_HUMAN_REVIEW`.
+
+A mensagem de erro não ecoa exceção interna, conteúdo privado ou path físico.
 
 ## `read_file`
 
-Lê texto imutável das raízes `knowledge` ou `input`.
-
-### Argumentos
+### Chamada
 
 ```json
 {
@@ -58,24 +59,21 @@ Lê texto imutável das raízes `knowledge` ou `input`.
   "path": "archetypes/educational_explainer.md",
   "sha256": "<hash>",
   "bytes": 1234,
-  "content": "<texto>"
+  "content": "<texto UTF-8>"
 }
 ```
 
 ### Regras
 
-- `path` é relativo, normalizado e pertence ao manifesto da fase ou às entradas allowlisted da sessão;
-- o runtime decide se o recurso vem de `knowledge` ou `input`; o modelo não escolhe a raiz física;
-- artefatos nunca são aceitos por `read_file` e só podem ser consultados por `read_artifact`;
-- leitura parcial silenciosa é proibida; limite excedido retorna erro;
-- o hash representa exatamente os bytes lidos;
-- UTF-8 inválido, arquivo ausente ou mutação entre resolução e leitura falham de forma fechada.
+- `path` precisa estar na composição de conhecimento ou na allowlist de inputs da fase;
+- o runtime decide a root; o modelo não envia `knowledge/` ou `input/` como path físico;
+- artefatos nunca são lidos por esta tool;
+- UTF-8 inválido, arquivo ausente, mutável, linkado ou acima do limite falha por inteiro;
+- o hash cobre exatamente os bytes devolvidos.
 
 ## `read_artifact`
 
-Lê um artefato validado da sessão atual pelo nome lógico, nunca por caminho livre.
-
-### Argumentos
+### Chamada
 
 ```json
 {
@@ -84,7 +82,7 @@ Lê um artefato validado da sessão atual pelo nome lógico, nunca por caminho l
 }
 ```
 
-`revision` é opcional. Sem ela, o runtime retorna a última revisão válida. Um artefato inválido, pertencente a outra sessão ou produzido por uma fase incompatível não é exposto.
+`revision` é opcional. O resultado sempre precisa corresponder à última revisão válida; pedir uma revisão antiga não permite raciocinar sobre estado obsoleto.
 
 ### Resultado
 
@@ -98,18 +96,18 @@ Lê um artefato validado da sessão atual pelo nome lógico, nunca por caminho l
 }
 ```
 
+O store verifica associação ao `run_id`, índice, hash, tamanho, schema e revisões dos predecessores antes de expor o conteúdo.
+
 ## `write_artifact`
 
-Solicita a gravação de uma saída estruturada da fase atual.
-
-### Argumentos
+### Chamada
 
 ```json
 {
   "name": "edl.draft.json",
   "expected_revision": 0,
   "content": {
-    "version": 1
+    "schema_version": 1
   }
 }
 ```
@@ -118,94 +116,89 @@ Solicita a gravação de uma saída estruturada da fase atual.
 
 ```json
 {
-  "name": "edl.draft.json",
-  "revision": 1,
-  "schema": "schemas/edl.schema.json",
-  "sha256": "<hash>",
-  "state": "validated"
+  "artifacts": [
+    {
+      "name": "edl.draft.json",
+      "revision": 1,
+      "schema": "schemas/edl.schema.json",
+      "sha256": "<hash>",
+      "state": "validated"
+    }
+  ]
 }
 ```
 
+O array pode conter a review e uma nova draft quando uma revisão `refined` é confirmada transacionalmente.
+
 ### Regras
 
-- o nome precisa estar permitido para a fase atual;
-- o runtime escolhe o schema pela fase e pelo nome; a LLM não pode substituí-lo;
-- `expected_revision` precisa corresponder à revisão atual, impedindo sobrescrita concorrente ou baseada em estado antigo;
-- a escrita ocorre em arquivo temporário, seguida de validação e substituição atômica;
-- uma versão válida anterior não é sobrescrita em caso de falha;
-- JSON duplicado, não finito, grande demais ou com campos desconhecidos conforme o schema é rejeitado;
-- a LLM não publica `edl.json`; após uma revisão `approved`, o runtime copia de forma imutável a última `edl.draft.json` validada e ainda executa os gates determinísticos.
+- o nome precisa ser exatamente o output da fase;
+- todos os inputs obrigatórios e predecessores precisam ter sido lidos nesta fase;
+- `expected_revision` implementa compare-and-swap e bloqueia overwrite baseado em estado antigo;
+- o host escolhe schema e aplica revisão, hashes e referências aos predecessores;
+- JSON usa parse estrito: chaves duplicadas, valores não finitos, profundidade/tamanho excessivos e campos incompatíveis falham;
+- JSON Schema Draft 2020-12 e invariantes editoriais são validados offline;
+- a escrita usa staging, `fsync` e replace atômico; uma falha não promove output parcial;
+- `review.NNN.json` e a draft refinada entram na mesma transação lógica;
+- `edl.json` é host-only e nasce apenas de uma review aprovada para a última draft.
 
-## Artefatos previstos
+## Matriz por fase
 
-| Artefato | Produtor | Finalidade |
+| Fase | Leitura de artefato | Escrita |
 |---|---|---|
-| `diagnosis.json` | agente | diagnóstico, estrutura, retakes e incertezas |
-| `cut_plan.json` | agente | beats, ordem, cobertura e decisões editoriais |
-| `edl.draft.json` | agente | ranges preliminares rastreáveis |
-| `review.NNN.json` | agente | defeitos, evidências e ações da iteração |
-| `edl.json` | runtime após aprovação | cópia imutável da EDL editorial aprovada para o pipeline determinístico |
-| `agent_run.json` | runtime | estado, versões, hashes, loops e gates |
-| `llm_usage.jsonl` | runtime | uma linha de telemetria por chamada |
+| `diagnose` | nenhuma | `diagnosis.json` |
+| `plan` | `diagnosis.json` | `cut_plan.json` |
+| `assemble` | `diagnosis.json`, `cut_plan.json` | `edl.draft.json` |
+| `review` | `diagnosis.json`, `cut_plan.json`, `edl.draft.json` | `review.NNN.json` |
 
-O modelo nunca escreve `edl.json`, `agent_run.json` ou `llm_usage.jsonl` diretamente.
+Inputs de arquivo são definidos em `agent_knowledge/manifest.json`. Transcripts podem ser consultados apenas nas fases declaradas; o agente não obtém acesso a uma fonte porque adivinhou seu nome.
 
-## Loop de execução
+## Artefatos e autoridade
+
+| Artefato | Escritor | Papel |
+|---|---|---|
+| `diagnosis.json` | modelo via host | diagnóstico, retakes, evidência e incertezas |
+| `cut_plan.json` | modelo via host | beats, ordem, exclusões e pacing |
+| `edl.draft.json` | modelo/host | ranges editoriais ainda revisáveis |
+| `review.NNN.json` | modelo via host | achados, escopo de reparo e veredito |
+| `edl.json` | host | cópia editorial aprovada e imutável |
+| `agent_run.json` | host | estado agregado, chamadas e hashes |
+| `llm_usage.jsonl` | host | uma linha sanitizada por completion |
+
+Revisões físicas ficam sob `edit/agent/artifacts/.revisions/`; o índice associa cada nome, número, schema, hash, tamanho e timestamp ao run. O modelo não recebe essa estrutura física.
+
+## Execução de uma fase
 
 ```mermaid
 sequenceDiagram
     participant model as "Modelo editorial"
-    participant runtime as "Runtime do agente"
-    participant guard as "Validador e sandbox"
-    participant store as "Store da sessão"
+    participant runtime as "Runtime"
+    participant tools as "Executor de tools"
+    participant store as "Store versionado"
 
-    runtime->>model: "Tarefa, manifesto e tools permitidas"
+    runtime->>model: "Contexto novo e allowlists da fase"
     model->>runtime: "Tool call estruturada"
-    runtime->>guard: "Validar fase, argumentos e raiz"
-    alt chamada permitida
-        guard->>store: "Ler ou gravar atomicamente"
-        store-->>guard: "Conteúdo, revisão e hash"
-        guard-->>runtime: "Resultado estruturado"
-        runtime-->>model: "Tool result"
-    else chamada negada
-        guard-->>runtime: "Erro estável sem caminho físico"
-        runtime-->>model: "Tool error"
+    runtime->>tools: "Validar nome, argumentos e orçamento"
+    alt "leitura permitida"
+        tools-->>model: "Conteúdo lógico, hash e revisão"
+    else "write_artifact permitido e válido"
+        tools->>store: "CAS, schema, semântica e gravação atômica"
+        store-->>model: "Artefato validado"
+    else "falha"
+        tools-->>model: "Erro estável e sanitizado"
     end
-    model->>runtime: "Resposta final da fase"
-    runtime->>guard: "Validar schema e transição"
 ```
 
-Cada fase possui limite de chamadas, limite de bytes lidos/escritos e timeout. Repetição idêntica sem progresso, argumentos inválidos recorrentes ou estouro de orçamento encerram a fase como falha ou `needs_human_review`; não liberam um resultado parcial.
+Por padrão, cada fase limita completions, tool calls e bytes lidos/escritos; review também limita iterações. Repetições idênticas e completions sem tool contam como no-progress. Esgotar o orçamento termina em `needs_human_review`, sem artefato ou XML presumido.
 
-## Tool futura: `read_transcript_slice`
+## Segurança e telemetria
 
-Se a telemetria mostrar que os takes dominam o contexto, uma operação específica poderá consultar evidência por `source_id`, intervalo temporal, beat ou cursor. Ela deve:
+- A configuração da LLM vem somente da instalação confiável ou do ambiente do processo.
+- Source IDs opacos substituem nomes e paths no prompt. O registry físico é host-only.
+- API keys, headers, prompts, brief, transcrições, argumentos/resultados completos, respostas brutas e chain-of-thought não são registrados.
+- Logs podem conter fase, iteração, tool, contagens, latência, tokens, revisão, hash, status e código de erro.
+- Um lock existente bloqueia a escrita. Não há remoção automática de lock abandonado nem resume pós-crash nesta versão.
 
-- devolver palavras e timestamps canônicos sem reescrever a evidência;
-- incluir hash e coordenadas da fonte;
-- ter paginação e limite determinísticos;
-- impedir buscas fora das fontes registradas na sessão;
-- manter visível quando o resultado é parcial.
+## Extensões futuras
 
-Essa tool só deve ser adicionada após benchmark demonstrar necessidade. Busca semântica, banco vetorial e execução de código não pertencem ao MVP.
-
-## Segurança e privacidade
-
-- API keys e headers nunca entram em prompts, artefatos ou logs.
-- Prompts, transcrições, conteúdo de tool results e respostas brutas não são registrados por padrão.
-- Logs usam IDs, contagens, nomes lógicos, hashes, tamanhos, estados e códigos de erro.
-- O runtime não segue links simbólicos nem aceita caminhos UNC, de dispositivo, absolutos ou com segmentos ascendentes.
-- Toda sessão possui diretório e identificador próprios; o runtime verifica essa associação a cada operação.
-- Falhas não podem incluir conteúdo sensível em mensagens de exceção.
-
-## Testes obrigatórios antes de um corte real
-
-- traversal por `..`, caminho absoluto, UNC e link simbólico;
-- leitura e escrita fora da raiz ou de outra sessão;
-- allowlist de nomes, extensões, tamanho e fase;
-- JSON e schema inválidos;
-- conflito de `expected_revision`;
-- escrita atômica interrompida;
-- loop de tool calls sem progresso;
-- ausência ou adulteração de artefato predecessor;
-- garantia de que logs não contenham API key, brief, transcrição ou resposta bruta.
+`read_transcript_slice` só deve ser adicionado se a telemetria provar que transcripts completos dominam o contexto. Ele precisará preservar palavra, timestamp, hash, paginação e visibilidade de resultado parcial. Busca semântica, banco vetorial e execução de código não pertencem ao MVP atual.

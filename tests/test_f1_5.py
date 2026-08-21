@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import wave
 from pathlib import Path
 from fractions import Fraction
 import numpy as np
 import pytest
+import helpers.edl_to_fcpxml as xml_exporter
 
 from helpers.verify_edit_ready import main as verify_ready_main, compute_sha256
 from helpers.preview_transcript_qc import build_report, main as preview_transcript_main
@@ -449,7 +451,7 @@ def test_xml_rational_ntsc_mapping():
     assert tb == 60 and ntsc == "FALSE"
 
 
-def test_xml_sequence_fps_authority_wav_only(temp_workspace):
+def test_xml_sequence_fps_authority_wav_only(temp_workspace, monkeypatch):
     """Verify that WAV-only sources with sequence_fps 30 generates 30/FALSE XML."""
     edit_dir = temp_workspace["edit"]
 
@@ -476,7 +478,13 @@ def test_xml_sequence_fps_authority_wav_only(temp_workspace):
 
     xml_path = edit_dir / "timeline_wav_30.xml"
 
-    # Run convert_edl_to_xml
+    monkeypatch.setattr(
+        xml_exporter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    # Run convert_edl_to_xml after a simulated successful readiness gate.
     convert_edl_to_xml(edl_path, xml_path)
 
     assert xml_path.exists()
@@ -488,7 +496,7 @@ def test_xml_sequence_fps_authority_wav_only(temp_workspace):
     assert "<duration>30</duration>" in xml_content
 
 
-def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace):
+def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace, monkeypatch):
     """Verify that convert_edl_to_xml inserts 4-frame audio crossfades on track 1 between cuts."""
     edit_dir = temp_workspace["edit"]
     edl = {
@@ -506,6 +514,11 @@ def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace):
     edl_path.write_text(json.dumps(edl), encoding="utf-8")
     xml_path = edit_dir / "timeline_multi_cut.xml"
 
+    monkeypatch.setattr(
+        xml_exporter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
     convert_edl_to_xml(edl_path, xml_path, crossfade_frames=4)
 
     assert xml_path.exists()
@@ -516,6 +529,24 @@ def test_convert_edl_to_xml_inserts_audio_crossfade_transitions(temp_workspace):
     assert "<alignment>center</alignment>" in xml_content
     assert "<start>13</start>" in xml_content
     assert "<end>17</end>" in xml_content
+
+
+def test_convert_edl_to_xml_blocks_when_readiness_is_not_ready(
+    temp_workspace, monkeypatch
+):
+    edit_dir = temp_workspace["edit"]
+    edl_path = temp_workspace["edl_path"]
+    xml_path = edit_dir / "must_not_exist.xml"
+    monkeypatch.setattr(
+        xml_exporter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 2, "PRIVATE", "PRIVATE"),
+    )
+
+    with pytest.raises(RuntimeError, match="READINESS_FAILED"):
+        convert_edl_to_xml(edl_path, xml_path)
+
+    assert not xml_path.exists()
 
 
 def test_render_divergent_metadata_probe(temp_workspace, monkeypatch, capsys):
@@ -917,7 +948,13 @@ def test_xml_rational_30000_1001_mapping_parity(temp_workspace, monkeypatch):
     # Read timeline map
     timeline_map = json.loads(map_json.read_text(encoding="utf-8"))
 
-    # Convert EDL to XML
+    monkeypatch.setattr(
+        xml_exporter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    # Convert EDL to XML after a simulated successful readiness gate.
     xml_path = edit_dir / "timeline_parity.xml"
     convert_edl_to_xml(edl_path, xml_path)
 

@@ -47,7 +47,11 @@
     "sources": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": {"type": "string", "minLength": 1}
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^source:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      }
     },
     "ranges": {
       "type": "array",
@@ -58,7 +62,7 @@
         "required": ["id", "source", "start", "end", "beat_id", "quote", "reason", "is_list"],
         "properties": {
           "id": {"$ref": "#/$defs/id"},
-          "source": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
           "start": {"type": "number", "minimum": 0},
           "end": {"type": "number", "exclusiveMinimum": 0},
           "beat_id": {"$ref": "#/$defs/id"},

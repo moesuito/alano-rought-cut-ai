@@ -8,7 +8,7 @@ Cada execução possui uma raiz isolada. Entradas são somente leitura; saídas 
 |---|---|---|---|
 | `diagnosis.json` | diagnose | objetivo, incertezas, retakes, evidências e arquétipo | plan |
 | `cut_plan.json` | plan | beats ordenados, candidatos, exclusões e pacing | assemble |
-| `edl.draft.json` | assemble/review | ranges editoriais ainda não refinados acusticamente | review |
+| `edl.draft.json` | assemble/host após review refined | ranges editoriais ainda não refinados acusticamente | review |
 | `review.NNN.json` | review | checklist, achados e decisão de uma iteração | review/host |
 | `edl.json` | host após aprovação | cópia imutável da EDL editorial aprovada | pipeline determinístico |
 | `agent_run.json` | host | revisions, hashes, modelo, fases, tool calls e resultado | auditoria |
@@ -37,10 +37,13 @@ assemble -> draft | needs_human_review
 review -> refined -> nova revisão
 review -> approved -> host publica edl.json
 review -> needs_human_review
-limite/erro -> needs_human_review
+incerteza editorial/no-progress/limite de budget ou review -> needs_human_review
+provider/infraestrutura/integridade/persistência inválida -> failed
 ```
 
 `edl.json` só nasce de uma revisão `approved` cujo `edl_revision` referencia exatamente a última `edl.draft.json` validada. Alterar diagnóstico, plano ou EDL invalida aprovações dependentes.
+
+Em `refined`, a LLM grava somente `review.NNN.json` com a EDL completa em `revised_edl`; o host valida e persiste a revisão e a nova `edl.draft.json` na mesma transação. Defeitos que exigem novo plano, diagnóstico ou evidência terminam em `needs_human_review` no MVP.
 
 ## Logs
 

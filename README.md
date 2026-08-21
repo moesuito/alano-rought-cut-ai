@@ -19,12 +19,14 @@ Mídia original
   -> Wav2Vec2 forced alignment via DirectML
   -> Pyannote ONNX diarization via DirectML
   -> transcrição palavra a palavra
-  -> agente editorial multi-turno
-       diagnóstico e estratégia
-       montagem da EDL
-       crítica e refinamento em loops
+  -> agente editorial artifact-driven
+       diagnose -> diagnosis.json
+       plan -> cut_plan.json
+       assemble -> edl.draft.json
+       review -> review.NNN.json -> aprovação ou nova revisão
+  -> EDL editorial imutável
   -> boundary refiner determinístico
-  -> preview WAV + QC
+  -> preview WAV + quatro relatórios de QC
   -> readiness gate
   -> timeline.xml
 ```
@@ -35,17 +37,18 @@ O caminho de mídia é local. A LLM editorial usa uma API OpenAI-compatible: dur
 
 O agente recebe a transcrição pronta e trabalha somente na decisão editorial. Ele não transcreve, não faz análise acústica e não inventa percepção visual.
 
-O motor de compatibilidade v0.6 separa o trabalho em três fases:
+O motor ativo da v0.6 separa o trabalho em quatro fases:
 
-1. diagnóstico global, retakes e estratégia narrativa;
-2. plano concreto de montagem e EDL preliminar;
-3. crítica da própria edição, revisão e novos ciclos até aprovação.
+1. `diagnose`: compreensão global, retakes, incertezas e arquétipo;
+2. `plan`: beats, ordem narrativa, candidatos e exclusões;
+3. `assemble`: ranges apoiados na transcrição canônica;
+4. `review`: crítica estruturada, correção da EDL e novos loops até aprovação válida.
 
 O conhecimento editorial fica em [`agent_knowledge/`](agent_knowledge/README.md), biblioteca modular distribuída com a instalação e carregada pelo runtime. [`agent_knowledge/manifest.json`](agent_knowledge/manifest.json) declara identidade, princípios, contratos, arquétipos, tasks e schemas. As skills em [`.agents/skills/`](.agents/skills/) pertencem exclusivamente ao squad que desenvolve o produto e nunca entram no contexto do editor.
 
-Nesta reorganização, o motor atual preserva suas três fases e seus JSONs antigos por compatibilidade. O núcleo carregado foi tornado neutro para servir essa ponte; o motor usa identidade/núcleo e seleciona no máximo um arquétipo para o conteúdo. As tasks e schemas do futuro fluxo de quatro artefatos já podem ser validados pelo loader, mas ainda não são executados: isso depende da implementação do executor de tools e artefatos.
+O executor reconstrói o contexto em cada fase a partir do conhecimento mínimo, inputs imutáveis e artefatos predecessores. A LLM interage somente por `read_file`, `read_artifact` e `write_artifact`; não recebe shell, paths físicos ou acesso genérico ao filesystem. O fluxo público não faz fallback para o motor antigo de três prompts nem para o modo one-shot.
 
-O modo one-shot continua disponível apenas como compatibilidade enquanto a migração para o loop agêntico é validada.
+A EDL aprovada pela revisão fica imutável em `edit/agent/artifacts/edl.json`. O host cria separadamente `edit/edl.json`, a projeção técnica com os paths necessários ao refinamento, QC e XML. A LLM vê apenas referências opacas como `source:SRC_...`; o registro que associa esses IDs à mídia permanece host-only.
 
 ## GPU local
 
@@ -72,13 +75,15 @@ Depois, em uma pasta com os vídeos:
 alanocut
 ```
 
-Esse é o único comando público. A CLI não aceita subcomandos nem argumentos: a TUI detecta a mídia no diretório atual, pede o tipo de vídeo, aceita um briefing opcional e automatiza o pipeline. Existe um único `.venv` compartilhado na instalação global; cada execução cria uma sessão isolada em `%LOCALAPPDATA%\AlanoCut\sessions` e copia somente o `timeline.xml` final para a pasta onde `alanocut` foi executado.
+Esse é o único comando público. A CLI não aceita subcomandos nem argumentos: a TUI detecta a mídia no diretório atual, pede o tipo de vídeo, aceita um briefing opcional e automatiza o pipeline. Todos os arquivos detectados pertencem à mesma operação; por exemplo, três gravações podem ser takes/fontes de um único vídeo final.
+
+Existe um único `.venv` compartilhado na instalação global; cada execução cria uma sessão isolada em `%LOCALAPPDATA%\AlanoCut\sessions`. `timeline.xml` só é publicado atomicamente na pasta operada quando a revisão editorial, o refinamento, os quatro QCs e o readiness terminam em `pass`. Estado `review` ou warning bloqueante resulta em `needs_human_review`; falha técnica resulta em `failed`. Nenhum desses estados publica XML novo.
 
 O terminal interativo atual é uma interface provisória para validar o pipeline. A futura GUI desktop ainda será decidida entre alternativas como Electron e Tauri; não há compromisso de framework nesta versão.
 
 ## Configuração da LLM
 
-Use `.env` ou variáveis de ambiente:
+A configuração vem somente do `.env` da instalação confiável ou de variáveis de ambiente do processo. Arquivos `.env` e `alanocut.json` na pasta de mídia não podem redirecionar o provedor:
 
 ```dotenv
 LLM_API_KEY=
@@ -86,14 +91,14 @@ LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 LLM_MODEL=z-ai/glm-5.2
 ```
 
-Para um servidor local OpenAI-compatible, substitua `LLM_BASE_URL` e `LLM_MODEL`. Servidores locais que não exigem autenticação podem usar um valor sentinela em `LLM_API_KEY` enquanto o cliente ainda exigir o campo.
+Para um servidor local OpenAI-compatible, substitua `LLM_BASE_URL` e `LLM_MODEL` na instalação confiável. Endpoints remotos exigem HTTPS; HTTP é aceito somente em loopback. Servidores locais que não exigem autenticação podem usar um valor sentinela em `LLM_API_KEY` enquanto o cliente exigir o campo.
 
 ## Documentação
 
 - [`AGENTS.md`](AGENTS.md): direção do produto e regras de desenvolvimento.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): componentes e contratos.
-- [`docs/AGENTIC_LOOP_V0.6.0.md`](docs/AGENTIC_LOOP_V0.6.0.md): estado do agente multi-turno.
-- [`docs/AGENT_RUNTIME_TOOLS.md`](docs/AGENT_RUNTIME_TOOLS.md): tools mínimas e fronteiras do futuro executor.
+- [`docs/AGENTIC_LOOP_V0.6.0.md`](docs/AGENTIC_LOOP_V0.6.0.md): loop artifact-driven e estados fail-closed.
+- [`docs/AGENT_RUNTIME_TOOLS.md`](docs/AGENT_RUNTIME_TOOLS.md): tools, allowlists e store versionado do executor.
 - [`docs/LLM_CONTEXT_AND_TOKEN_BUDGET.md`](docs/LLM_CONTEXT_AND_TOKEN_BUDGET.md): telemetria e benchmark de modelos.
 - [`docs/TRANSCRIPTION_SETUP.md`](docs/TRANSCRIPTION_SETUP.md): stack local de transcrição.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): prioridades depois da consolidação.
@@ -101,16 +106,15 @@ Para um servidor local OpenAI-compatible, substitua `LLM_BASE_URL` e `LLM_MODEL`
 
 ## Estado conhecido da v0.6
 
-A branch contém a primeira implementação funcional do loop multi-turno. Ela ainda precisa de code review e testes reais mais amplos antes de ser tratada como release fechada.
+A branch contém o executor artifact-driven integrado ao caminho público. Ela ainda precisa de code review e testes editoriais reais mais amplos antes de ser tratada como release fechada.
 
 As dívidas já conhecidas incluem:
 
-- tornar parse, reflexão e limite de loops estritamente fail-closed;
-- conectar todos os gates documentados ao orquestrador antes do XML;
 - eliminar caminhos legados de transcrição em nuvem e WhisperX;
-- ampliar planejamento, decomposição de tarefas, memória de trabalho e critérios editoriais para modelos locais menores;
-- implementar o executor restrito de tools e artefatos antes de ativar o novo contrato de quatro fases;
-- validar Reels, YouTube, videoaulas e VSLs com mídia real.
+- ampliar planejamento, decomposição de tarefas e critérios editoriais para modelos locais menores;
+- validar Reels, YouTube, videoaulas e VSLs com mídia real;
+- implementar retomada automática após crash e uma política segura para mídia silenciosa sem palavras canônicas;
+- definir recuperação operacional para lock abandonado sem transformar estado incerto em aprovação.
 
 ## Origem
 

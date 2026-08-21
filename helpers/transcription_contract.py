@@ -51,6 +51,7 @@ DEFAULT_SEMANTIC_VERIFIER_REVISION = "536b0662742c02347bc0e980a01041f333bce120"
 DEFAULT_ALIGN_MODEL_REVISION = "634ac655299bcdc46c83bc01da9bab52d2987e4f"
 DEFAULT_DIARIZATION_MODEL_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
 DEFAULT_RECORDING_CUES = "corta,cortar,volta,refaz,regrava,gravando"
+DEFAULT_MAX_WORD_OVERLAP_SECONDS = 0.25
 EXPECTED_RNNOISE_MODEL_HASH = (
     "F1357C4E5BE9DEE8467BEAD486DFCED2D75B640C26AD0B594FA7F102322371D9"
 )
@@ -469,7 +470,7 @@ def convert_whisperx_result(
     config: WhisperXConfig,
     source_path: str | os.PathLike[str] | None = None,
     source_sha256: str | None = None,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> dict[str, Any]:
     """Convert an aligned WhisperX result into canonical Alano Cut schema v2.
 
@@ -666,7 +667,7 @@ def convert_elevenlabs_result(
     config: ElevenLabsConfig,
     source_path: str | os.PathLike[str] | None = None,
     source_sha256: str | None = None,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> dict[str, Any]:
     """Normalize Scribe word timestamps and speaker labels into schema v2."""
 
@@ -821,7 +822,7 @@ def convert_assemblyai_result(
     config: AssemblyAIConfig,
     source_path: str | os.PathLike[str] | None = None,
     source_sha256: str | None = None,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> dict[str, Any]:
     """Normalize AssemblyAI word timestamps and speaker labels into schema v2."""
 
@@ -981,7 +982,7 @@ def convert_vulkan_whisper_result(
     diarization: list[dict[str, Any]] | None = None,
     source_path: str | os.PathLike[str] | None = None,
     source_sha256: str | None = None,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> dict[str, Any]:
     """Normalize whisper.cpp Vulkan tokens or parsed word records into schema v2."""
 
@@ -1144,7 +1145,7 @@ def convert_vulkan_whisper_result(
 def validate_transcript(
     transcript: Mapping[str, Any],
     *,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> None:
     """Validate provider-neutral schema v2 and complete word timing coverage."""
 
@@ -1355,7 +1356,9 @@ def analyze_alignment_quality(
 
 
 def validate_normative_transcript(
-    transcript: Mapping[str, Any], *, max_overlap_seconds: float = 0.25
+    transcript: Mapping[str, Any],
+    *,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> None:
     """Validate the complete provider-specific runtime/model binding."""
     validate_transcript(transcript, max_overlap_seconds=max_overlap_seconds)
@@ -1544,7 +1547,7 @@ def validate_normative_transcript(
 def validate_provisional_normative_transcript(
     transcript: Mapping[str, Any],
     *,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> list[dict[str, Any]]:
     """Validate a transcript whose only open issue is scopeable activity.
 
@@ -1620,7 +1623,7 @@ def validate_normative_transcript_for_intervals(
     transcript: Mapping[str, Any],
     selected_intervals: Iterable[tuple[float, float]],
     *,
-    max_overlap_seconds: float = 0.25,
+    max_overlap_seconds: float = DEFAULT_MAX_WORD_OVERLAP_SECONDS,
 ) -> list[dict[str, Any]]:
     """Validate a source transcript for the intervals actually used by an EDL.
 

@@ -13,6 +13,147 @@ $RuntimeDirectories = @("agent_knowledge", "bin", "helpers")
 $RuntimeFiles = @(".env.example", "config.json", "LICENSE", "pyproject.toml", "README.md")
 $PreservedInstallEntries = @(".env", ".venv", "user-settings.json")
 
+function Assert-PathInsideRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$AllowRoot
+    )
+
+    $ResolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $ResolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $Comparison = [System.StringComparison]::OrdinalIgnoreCase
+    $Separator = [System.IO.Path]::DirectorySeparatorChar
+    $IsRoot = [string]::Equals($ResolvedPath, $ResolvedRoot, $Comparison)
+    $IsChild = $ResolvedPath.StartsWith("$ResolvedRoot$Separator", $Comparison)
+    if ((!$AllowRoot -and $IsRoot) -or (!$IsRoot -and !$IsChild)) {
+        throw "RUNTIME_SYNC_UNSAFE_PATH: $Label is outside its expected root."
+    }
+    return $ResolvedPath
+}
+
+function Assert-NotReparsePoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        $Item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return
+    }
+    if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "RUNTIME_SYNC_REPARSE_POINT: $Label cannot be a junction or symbolic link."
+    }
+}
+
+function Assert-TreeHasNoReparsePoints {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    Assert-NotReparsePoint -Path $Root -Label $Label
+    Get-ChildItem -LiteralPath $Root -Force -Recurse | ForEach-Object {
+        if (($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "RUNTIME_SYNC_REPARSE_POINT: $Label contains a junction or symbolic link."
+        }
+    }
+}
+
+function Assert-AlanoRuntimeFiles {
+    param([Parameter(Mandatory = $true)][string]$RuntimeRoot)
+
+    foreach ($RequiredPath in @(
+        "agent_knowledge\manifest.json",
+        "bin\alanocut.cmd",
+        "bin\alanocut.ps1",
+        "helpers\agent_artifacts.py",
+        "helpers\agent_telemetry.py",
+        "helpers\agent_tools.py",
+        "helpers\artifact_agent.py",
+        "helpers\editorial_edl_bridge.py",
+        "helpers\interactive_cli.py",
+        "helpers\knowledge_loader.py",
+        "helpers\llm_client.py",
+        "helpers\orchestrator.py",
+        "config.json",
+        "pyproject.toml"
+    )) {
+        $Candidate = Join-Path $RuntimeRoot $RequiredPath
+        Assert-PathInsideRoot -Path $Candidate -Root $RuntimeRoot -Label $RequiredPath | Out-Null
+        Assert-NotReparsePoint -Path $Candidate -Label $RequiredPath
+        if (!(Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            throw "RUNTIME_SOURCE_INCOMPLETE: missing $RequiredPath"
+        }
+    }
+}
+
+function Invoke-AlanoRuntimeImportSmoke {
+    param([Parameter(Mandatory = $true)][string]$RuntimeRoot)
+
+    $VenvRoot = Join-Path $RuntimeRoot ".venv"
+    Assert-PathInsideRoot -Path $VenvRoot -Root $RuntimeRoot -Label ".venv" | Out-Null
+    Assert-NotReparsePoint -Path $VenvRoot -Label "Global virtual environment"
+    $PythonPath = Join-Path $VenvRoot "Scripts\python.exe"
+    Assert-PathInsideRoot -Path $PythonPath -Root $VenvRoot -Label "Global Python" | Out-Null
+    Assert-NotReparsePoint -Path $PythonPath -Label "Global Python"
+    if (!(Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
+        throw "RUNTIME_IMPORT_SMOKE_FAILED: global Python is missing."
+    }
+
+    $SmokeScript = @'
+import importlib
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(root))
+os.environ["ALANOCUT_KNOWLEDGE_DIR"] = str(root / "agent_knowledge")
+for name in (
+    "helpers.agent_artifacts",
+    "helpers.agent_telemetry",
+    "helpers.agent_tools",
+    "helpers.artifact_agent",
+    "helpers.editorial_edl_bridge",
+    "helpers.knowledge_loader",
+    "helpers.llm_client",
+    "helpers.orchestrator",
+    "helpers.interactive_cli",
+):
+    module = importlib.import_module(name)
+    Path(module.__file__).resolve(strict=True).relative_to(root)
+
+from helpers.knowledge_loader import load_artifact_schema_catalog
+catalog = load_artifact_schema_catalog()
+if catalog.root != (root / "agent_knowledge").resolve(strict=True) or not catalog.schemas:
+    raise RuntimeError("installed knowledge catalog is unavailable")
+'@
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 rewrites embedded quotes in multiline native
+        # `-c` arguments.  Base64 keeps the Python source opaque to the shell
+        # while still avoiding a persistent temporary script on disk.
+        $SmokeBase64 = [Convert]::ToBase64String(
+            [System.Text.Encoding]::UTF8.GetBytes($SmokeScript)
+        )
+        $SmokeBootstrap = "import base64;exec(base64.b64decode('$SmokeBase64'))"
+        $ErrorActionPreference = "Continue"
+        & $PythonPath -I -c $SmokeBootstrap $RuntimeRoot 1>$null 2>$null
+        $SmokeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($SmokeExitCode -ne 0) {
+        throw "RUNTIME_IMPORT_SMOKE_FAILED: installed modules or dependencies are invalid."
+    }
+}
+
 function Sync-AlanoRuntime {
     param(
         [Parameter(Mandatory = $true)][string]$SourceRoot,
@@ -36,43 +177,66 @@ function Sync-AlanoRuntime {
         throw "Refusing to synchronize overlapping source and destination paths."
     }
 
-    foreach ($RequiredPath in @(
-        "agent_knowledge\manifest.json",
-        "bin\alanocut.ps1",
-        "helpers\interactive_cli.py",
-        "config.json",
-        "pyproject.toml"
-    )) {
-        if (!(Test-Path -LiteralPath (Join-Path $SourceRoot $RequiredPath))) {
-            throw "Runtime source is incomplete; missing $RequiredPath"
-        }
-    }
+    Assert-NotReparsePoint -Path $ResolvedSource -Label "Runtime source root"
+    Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
+
+    Assert-AlanoRuntimeFiles -RuntimeRoot $ResolvedSource
 
     if (!(Test-Path -LiteralPath $DestinationRoot)) {
         New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
     }
+    Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
 
-    Get-ChildItem -LiteralPath $DestinationRoot -Force |
+    Get-ChildItem -LiteralPath $ResolvedDestination -Force |
         Where-Object { $PreservedInstallEntries -notcontains $_.Name } |
-        Remove-Item -Recurse -Force
+        ForEach-Object {
+            $RemovalPath = Assert-PathInsideRoot -Path $_.FullName -Root $ResolvedDestination -Label $_.Name
+            Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
+            if ($_.PSIsContainer) {
+                Assert-TreeHasNoReparsePoints -Root $RemovalPath -Label "Runtime entry '$($_.Name)'"
+            } else {
+                Assert-NotReparsePoint -Path $RemovalPath -Label "Runtime entry '$($_.Name)'"
+            }
+            Remove-Item -LiteralPath $RemovalPath -Recurse -Force
+        }
 
     foreach ($Directory in $RuntimeDirectories) {
-        Copy-Item -LiteralPath (Join-Path $SourceRoot $Directory) -Destination $DestinationRoot -Recurse -Force
+        $SourceDirectory = Assert-PathInsideRoot -Path (Join-Path $ResolvedSource $Directory) -Root $ResolvedSource -Label $Directory
+        $DestinationDirectory = Assert-PathInsideRoot -Path (Join-Path $ResolvedDestination $Directory) -Root $ResolvedDestination -Label $Directory
+        Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
+        Assert-NotReparsePoint -Path $DestinationDirectory -Label "Runtime destination '$Directory'"
+        if (Test-Path -LiteralPath $DestinationDirectory) {
+            throw "RUNTIME_SYNC_CONFLICT: destination entry already exists for $Directory"
+        }
+        Assert-TreeHasNoReparsePoints -Root $SourceDirectory -Label "Runtime source '$Directory'"
+        Copy-Item -LiteralPath $SourceDirectory -Destination $ResolvedDestination -Recurse -Force
     }
     foreach ($File in $RuntimeFiles) {
-        $SourceFile = Join-Path $SourceRoot $File
+        $SourceFile = Assert-PathInsideRoot -Path (Join-Path $ResolvedSource $File) -Root $ResolvedSource -Label $File
         if (Test-Path -LiteralPath $SourceFile) {
-            Copy-Item -LiteralPath $SourceFile -Destination $DestinationRoot -Force
+            $DestinationFile = Assert-PathInsideRoot -Path (Join-Path $ResolvedDestination $File) -Root $ResolvedDestination -Label $File
+            Assert-NotReparsePoint -Path $ResolvedSource -Label "Runtime source root"
+            Assert-NotReparsePoint -Path $SourceFile -Label "Runtime source '$File'"
+            Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
+            Assert-NotReparsePoint -Path $DestinationFile -Label "Runtime destination '$File'"
+            if (Test-Path -LiteralPath $DestinationFile) {
+                throw "RUNTIME_SYNC_CONFLICT: destination entry already exists for $File"
+            }
+            Copy-Item -LiteralPath $SourceFile -Destination $DestinationFile
         }
     }
 
     # Defense in depth for installations upgraded from a development checkout.
     foreach ($DevelopmentTree in @(".agents", ".squad")) {
-        $DevelopmentPath = Join-Path $DestinationRoot $DevelopmentTree
+        $DevelopmentPath = Assert-PathInsideRoot -Path (Join-Path $ResolvedDestination $DevelopmentTree) -Root $ResolvedDestination -Label $DevelopmentTree
         if (Test-Path -LiteralPath $DevelopmentPath) {
+            Assert-NotReparsePoint -Path $ResolvedDestination -Label "Runtime destination root"
+            Assert-NotReparsePoint -Path $DevelopmentPath -Label "Development tree '$DevelopmentTree'"
             Remove-Item -LiteralPath $DevelopmentPath -Recurse -Force
         }
     }
+
+    Assert-AlanoRuntimeFiles -RuntimeRoot $ResolvedDestination
 }
 
 Write-Host "==========================================================" -ForegroundColor Green
@@ -92,6 +256,10 @@ Sync-AlanoRuntime -SourceRoot $SourceRoot -DestinationRoot $InstallDir
 # Internal, non-public hook for validating runtime packaging without creating a
 # virtual environment, downloading models, changing PATH or running setup.
 if ($RuntimeSyncOnly) {
+    $ExistingVenv = Join-Path $InstallDir ".venv"
+    if (Test-Path -LiteralPath $ExistingVenv) {
+        Invoke-AlanoRuntimeImportSmoke -RuntimeRoot $InstallDir
+    }
     Write-Host "Runtime synchronization completed." -ForegroundColor Green
     exit 0
 }
@@ -129,6 +297,8 @@ $PythonPath = Join-Path $VenvDir "Scripts\python.exe"
 if (!(Test-Path -LiteralPath $PythonPath)) {
     throw "The shared virtual environment is incomplete; Python is missing at $PythonPath."
 }
+
+Invoke-AlanoRuntimeImportSmoke -RuntimeRoot $InstallDir
 
 # 4. Prefetch and validate DeepFilterNet 3 neural model
 Write-Host "Prefetching and validating DeepFilterNet 3 neural denoiser..." -ForegroundColor Cyan

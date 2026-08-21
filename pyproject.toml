@@ -18,6 +18,8 @@ dependencies = [
     "rich>=13,<16",
     "transformers>=4.45,<6",
     "onnx>=1.16,<2",
+    "jsonschema>=4.23,<5",
+    "referencing>=0.35,<1",
 ]
 
 [build-system]

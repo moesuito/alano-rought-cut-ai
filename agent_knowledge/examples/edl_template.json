@@ -8,6 +8,7 @@
     "sequence_fps": "30000/1001"
   },
   "sources": {
-    "C0104": "C0104.MP4"
+    "C0103": "source:C0103",
+    "C0104": "source:C0104"
   }
 }

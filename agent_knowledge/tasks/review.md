@@ -15,7 +15,7 @@ Objetivo: criticar a EDL contra brief, diagnóstico, plano e evidência — não
 
 ## Decisão
 
-- `refined`: existe defeito corrigível; inclua a EDL completa revisada, grave uma nova revisão de `edl.draft.json` e execute outro loop.
+- `refined`: existe defeito corrigível somente na EDL; inclua a EDL completa revisada. O host grava a revisão e a nova `edl.draft.json` transacionalmente e executa outro loop.
 - `approved`: todos os checks passaram e a revisão aponta para exatamente a última EDL validada. O host publica `edl.json`.
 - `needs_human_review`: a evidência é insuficiente, as restrições são incompatíveis, uma tool falhou sem recuperação ou o limite de loops foi alcançado.
 
@@ -23,4 +23,4 @@ Não aprove por ausência de achado superficial. Não retorne apenas diffs; uma 
 
 ## Saída
 
-Grave `review.NNN.json` válido contra `schemas/review.schema.json`. O host controla `NNN` e a associação à revisão da EDL.
+Grave `review.NNN.json` válido contra `schemas/review.schema.json`. Cada finding declara `repair_scope`. O host controla `NNN`, a associação à revisão da EDL e a persistência de `revised_edl`; um reparo que exija `plan`, `diagnosis` ou nova `evidence` termina em revisão humana nesta versão.

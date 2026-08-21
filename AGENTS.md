@@ -42,9 +42,10 @@ mídia original
   -> diarização Pyannote ONNX via DirectML
   -> transcrição canônica palavra a palavra
   -> agente editorial multi-turno
-       1. diagnóstico e estratégia
-       2. plano de montagem e EDL preliminar
-       3. crítica, revisão e novos loops
+       1. diagnose: diagnóstico e estratégia
+       2. plan: plano de beats e decisões
+       3. assemble: EDL editorial preliminar
+       4. review: crítica, revisão e novos loops
   -> refinamento determinístico de boundaries
   -> preview WAV e gates de QC
   -> readiness gate
@@ -71,10 +72,12 @@ Modelos menores e locais são um requisito de arquitetura. Prefira tarefas menor
 - `agent_knowledge/`: biblioteca instalada do agente editorial embutido.
 - `agent_knowledge/manifest.json`: manifesto fail-closed para identidade, núcleo, contratos, arquétipos, tasks e schemas.
 - `agent_knowledge/core/system_prompt.md`: identidade editável fora do Python.
-- `helpers/prompts/agentic_prompts.py`: composição das mensagens do motor atual de três fases e adaptação de formato.
-- `helpers/prompts/editor_system_prompt.md`: prompt legado do modo one-shot, mantido enquanto esse modo existir.
+- `helpers/artifact_agent.py`: executor ativo de `diagnose -> plan -> assemble -> review`.
+- `helpers/agent_tools.py`: tools confinadas por fase e por nome lógico.
+- `helpers/agent_artifacts.py`: validação e persistência versionada dos artefatos.
+- `helpers/prompts/agentic_prompts.py` e `helpers/prompts/editor_system_prompt.md`: compatibilidade interna legada; não são fallback do fluxo público.
 
-O motor atual preserva seus três formatos JSON por compatibilidade. O núcleo foi tornado neutro para essa ponte e o carregamento combina somente identidade/núcleo mais um arquétipo selecionado. As tasks e schemas do futuro fluxo de quatro artefatos podem ser validados, mas não são executáveis até existir o executor de tools e artefatos. Não volte a embutir o conhecimento editorial inteiro no código Python.
+O fluxo público executa as tasks e schemas de quatro fases. Cada fase reconstrói seu contexto, usa somente `read_file`, `read_artifact` e `write_artifact` e termina apenas depois de uma escrita validada. Não volte a embutir o conhecimento editorial inteiro no código Python nem reintroduza fallback automático para os motores legados.
 
 `.agents/skills/` é o squad de desenvolvimento. Esse conteúdo não é conhecimento do editor, não é distribuído como contexto da LLM e não é copiado para pastas de vídeo.
 
@@ -86,10 +89,12 @@ O motor atual preserva seus três formatos JSON por compatibilidade. O núcleo f
 - Retakes devem ser resolvidos pela correção, completude, clareza e continuidade; recência é apenas desempate.
 - Vídeos curtos e longos têm pacing diferente.
 - O EDL é a autoridade editorial entre a LLM e o pipeline determinístico.
+- O EDL editorial aprovado é imutável; refinamento e paths físicos vivem numa projeção técnica separada.
+- A LLM recebe apenas IDs opacos de fonte; o registro de paths pertence ao host.
 - XML só pode representar mídia original e uma EDL pronta.
 - Estados ausentes, inválidos, `review`, `warning`, hashes antigos ou falhas de parse não podem virar aprovação implícita.
 
-O contrato atual do produto está em `docs/ARCHITECTURE.md`, `docs/AGENTIC_LOOP_V0.6.0.md` e nos módulos carregados de `agent_knowledge/`. O código ainda possui gaps entre esse contrato e o orquestrador; trate-os como dívida conhecida até o próximo code review, não como comportamento aprovado.
+O contrato atual do produto está em `docs/ARCHITECTURE.md`, `docs/AGENTIC_LOOP_V0.6.0.md` e nos módulos carregados de `agent_knowledge/`. O orquestrador deve permanecer fail-closed: agente, refinador, qualquer um dos quatro QCs ou readiness em `review` termina em `needs_human_review`; falha técnica termina em `failed`. Nenhum desses estados publica `timeline.xml`.
 
 ## Protocolo de desenvolvimento
 
@@ -110,7 +115,7 @@ Depois de validar uma mudança destinada a teste pelo usuário, sincronize a ár
 ## Prioridades após a consolidação
 
 1. Code review completo da v0.6 e inventário de dívidas.
-2. Tornar o agente e o orquestrador estritamente fail-closed.
+2. Validar e endurecer continuamente o comportamento fail-closed do agente e do orquestrador.
 3. Evoluir o loop para planejamento, tarefas, execução, crítica e validação mais ricos.
 4. Testar cortes reais em Reels, YouTube, videoaulas e VSLs.
 5. Medir a qualidade com modelos locais menores.

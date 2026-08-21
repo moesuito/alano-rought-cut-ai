@@ -2,148 +2,120 @@
 
 ## Objetivo
 
-Substituir a dependência de uma única resposta excepcionalmente competente por um processo editorial decomponível, verificável e compatível com modelos menores, inclusive locais.
+Trocar uma única resposta excepcionalmente competente por um processo editorial decomponível, verificável e adequado a modelos menores. A LLM recebe a transcrição pronta; transcrição, análise acústica, refinamento temporal, preview, QC e XML continuam sob autoridade do host.
 
-A LLM recebe a transcrição pronta. Transcrição, análise acústica, refinamento temporal, preview, QC e exportação XML continuam determinísticos e fora do agente.
+## Estado implementado
 
-## Estado atual
+`helpers/artifact_agent.py` é o motor do fluxo público. Ele executa quatro fases e só aceita uma fase como concluída depois de uma tool call `write_artifact` validada:
 
-`helpers/agentic_editor.py` mantém uma conversa crescente e executa três fases:
+| Fase | Contexto e leituras | Saída | Gate |
+|---|---|---|---|
+| `diagnose` | brief, takes, identidade e princípios | `diagnosis.json` | status `ready`, fontes/evidências válidas e incertezas explícitas |
+| `plan` | diagnosis, brief, takes e arquétipo selecionado ou core-only | `cut_plan.json` | beats rastreáveis, ordem contígua e revisão atual do diagnosis |
+| `assemble` | diagnosis, plano, takes, template e transcrições permitidas | `edl.draft.json` | ranges em fonte e boundary canônicos, citação literal e cobertura de beats obrigatórios |
+| `review` | diagnosis, plano, draft, brief, takes e transcrições permitidas | `review.NNN.json` | `approved`, `refined` com nova EDL completa ou `needs_human_review` |
 
-1. **Estratégia:** envia brief e `takes_packed.md` completos, diagnostica o material, resolve retakes e propõe blocos narrativos.
-2. **Montagem:** transforma a estratégia em ranges preliminares do EDL.
-3. **Reflexão:** critica a EDL e pode devolvê-la refinada; o ciclo repete até aprovação ou limite configurado.
+O diagnóstico escolhe no máximo um arquétipo. `custom` usa apenas o core. O conhecimento vem de `agent_knowledge/manifest.json`; tasks, contratos e schemas da fase são efetivamente carregados e executados, não apenas validados como biblioteca.
 
-Hoje `helpers/knowledge_loader.py` valida `agent_knowledge/manifest.json` e compõe o núcleo editorial fora do Python; `helpers/prompts/agentic_prompts.py` ainda compõe as tarefas e os formatos JSON do motor de três fases. O cliente `helpers/llm_client.py` retorna somente o texto da resposta: ainda não preserva `usage`, metadados do modelo nem `finish_reason`.
+O motor antigo de três prompts e o modo one-shot podem permanecer no repositório como compatibilidade interna, mas o caminho padrão não os chama e não faz fallback automático para eles.
 
-### Nota de migração
+## Contexto reconstruído
 
-O motor atual preserva as três fases e seus JSONs antigos por compatibilidade. Nesta reorganização, o núcleo carregado foi tornado neutro para essa ponte; o motor carrega de `agent_knowledge/` somente identidade/núcleo e o arquétipo correspondente à escolha explícita da TUI. A escolha `custom` não carrega arquétipo. As tasks e schemas de `diagnosis.json`, `cut_plan.json`, `edl.draft.json` e `review.NNN.json` são validados como biblioteca, mas não estão ativados no loop atual. Eles dependem do futuro executor de tools e artefatos.
+Cada fase, inclusive cada iteração de review, começa com uma conversa nova formada por:
 
-Esta implementação é uma fundação, não o contrato final. Ela ainda:
+1. identidade, princípios, task, contratos e schema selecionados pelo manifesto;
+2. envelope com fase, hint de conteúdo quando aplicável, briefing autorizado, número da revisão e recursos lógicos permitidos;
+3. descrições curtas das três tools;
+4. resultados das tools usados somente durante aquela fase.
 
-- cresce o contexto ao reenviar todo o histórico;
-- mantém estado importante apenas na conversa e no retorno em memória;
-- aceita alguns fallbacks fail-open;
-- não oferece tool calls de arquivos ao modelo;
-- não mede tokens por chamada e por sessão.
-
-## Arquitetura desejada
-
-O agente futuro será **artifact-driven**: cada fase lê somente o conhecimento, os inputs e os artefatos necessários; produz um artefato validado; e inicia a fase seguinte com um contexto explícito e mínimo. O histórico do chat deixa de ser a única memória de trabalho.
+O histórico de chat de uma fase não é reenviado à próxima. A memória durável é formada pelos artefatos versionados e pelo ledger host-only. Isso reduz crescimento cumulativo e torna a mesma tarefa comparável entre provedores.
 
 ```mermaid
 flowchart TD
-    A["Brief e takes prontos"] --> B["Carregar conhecimento mínimo da fase"]
-    B --> C["Compreender conteúdo"]
-    C --> D["Persistir diagnosis.json"]
-    D --> E["Planejar beats e decisões"]
-    E --> F["Persistir cut_plan.json"]
-    F --> G["Montar ranges com evidência"]
-    G --> H["Persistir edl.draft.json"]
-    H --> I["Criticar plano, evidência e EDL"]
-    I -->|"há correções"| J["Persistir review.NNN.json"]
-    J --> E
-    I -->|"aprovável"| K["Validar contratos fail-closed"]
-    K -->|"falha"| J
-    K -->|"sucesso"| L["Persistir edl.json"]
-    L --> M["Entregar ao pipeline determinístico"]
+    inputs["Brief, takes e transcrição pronta"] --> diagnose["diagnose"]
+    diagnose --> diagnosis["diagnosis.json rN"]
+    diagnosis --> plan["plan"]
+    plan --> cutplan["cut_plan.json rN"]
+    cutplan --> assemble["assemble"]
+    assemble --> draft["edl.draft.json rN"]
+    draft --> review["review NNN"]
+    review -->|"refined somente na EDL"| nextdraft["nova edl.draft.json"]
+    nextdraft --> review
+    review -->|"defeito fora da EDL"| human["needs_human_review"]
+    review -->|"approved para a draft atual"| final["host publica edl.json imutável"]
+    final --> deterministic["pipeline determinístico"]
 ```
 
-### Conhecimento modular
+## Loop de tools
 
-O conhecimento do editor vive em `agent_knowledge/`, biblioteca distribuída com a instalação e carregada pelo runtime. Ele é separado das skills do ambiente de desenvolvimento e nunca deve ser copiado ou preparado em um workspace de usuário. O runtime não carrega a árvore inteira por padrão.
+O modelo recebe somente:
 
-Em cada fase, o orquestrador montará um manifesto de contexto com:
+- `read_file`: conhecimento e inputs imutáveis allowlisted;
+- `read_artifact`: última revisão válida de um predecessor permitido;
+- `write_artifact`: única saída permitida da fase, com `expected_revision`.
 
-- identidade e invariantes editoriais sempre obrigatórios;
-- nenhum arquétipo no diagnóstico; depois dele, somente o módulo indicado por `selected_archetype`, que pode ser `null` para `custom`;
-- o contrato da fase atual;
-- somente os artefatos predecessores necessários;
-- evidência da transcrição pertinente à decisão.
+Antes de escrever, a fase precisa ter lido os inputs obrigatórios e todos os predecessores declarados. O host escolhe schema, nome de saída, número de revisão e transição. Texto livre, inclusive JSON correto devolvido como mensagem comum, não conclui a fase.
 
-O agente pode descobrir e ler módulos adicionais com `read_file`, mas a seleção e as raízes permitidas pertencem ao runtime. Skills de desenvolvimento em `.agents/skills/` nunca entram automaticamente no contexto editorial.
+Uma review `refined` inclui `revised_edl`. O host valida e grava `review.NNN.json` e a nova revisão de `edl.draft.json` na mesma transação. No MVP, apenas defeitos com `repair_scope: edl` podem seguir por esse loop. Reparo de plano, diagnóstico ou evidência é persistido como `needs_human_review`.
 
-### Fases e artefatos
+O contrato completo das operações está em [AGENT_RUNTIME_TOOLS.md](AGENT_RUNTIME_TOOLS.md).
 
-| Fase | Entradas mínimas | Saída obrigatória | Gate para avançar |
-|---|---|---|---|
-| Compreensão | brief, takes e invariantes | `diagnosis.json` | schema válido, fontes conhecidas, arquétipo selecionado ou `null`, e incertezas explícitas |
-| Planejamento | análise, brief e contrato de planejamento | `cut_plan.json` | beats rastreáveis, cobertura do objetivo e decisões de retake justificadas |
-| Montagem | plano, contrato EDL e evidência necessária | `edl.draft.json` | ranges válidos, fonte existente e precisão não superior à evidência |
-| Crítica | análise, plano, EDL e evidência citada | `review.NNN.json` | veredito estruturado e cada defeito ligado a uma correção ou bloqueio |
-| Finalização editorial | último draft e críticas resolvidas | `edl.json` | schemas, referências e aprovação editorial válidos |
+## EDL editorial e projeção técnica
 
-`agent_run.json` registra o estado da sessão; `llm_usage.jsonl` é escrito pelo runtime, não pelo modelo. Os schemas já vivem em `agent_knowledge/schemas/`, mas o executor que os aplica às tool calls ainda precisa ser implementado.
+A LLM trabalha apenas com IDs opacos e com o mapa `source:<ID>`. Paths, nomes originais e identidade física da mídia ficam em `source_registry.json`, fora das tools e prompts.
 
-## Tool loop mínimo
+Quando a review aprova exatamente a última revisão da draft, o host publica uma vez:
 
-A primeira versão do executor deverá expor somente:
+```text
+edit/agent/artifacts/edl.json   # autoridade editorial imutável
+edit/edl.json                   # projeção técnica com paths host-only
+```
 
-- `read_file`: lê conhecimento ou input imutável dentro de raízes permitidas;
-- `read_artifact`: lê um artefato da sessão pelo nome lógico;
-- `write_artifact`: grava uma saída versionada e compatível com o schema esperado da fase.
+O refinador altera somente a projeção técnica. Assim, um ajuste acústico de frame não reescreve silenciosamente o que a LLM aprovou.
 
-Uma futura `read_transcript_slice` poderá fornecer trechos por fonte, intervalo ou cursor quando enviar todos os takes deixar de ser eficiente. Ela não faz parte do escopo inicial.
-
-O runtime executa a chamada, valida os argumentos, realiza a operação e devolve resultado estruturado ao modelo. O modelo não recebe shell, caminhos absolutos nem acesso genérico ao filesystem. O contrato completo está em [AGENT_RUNTIME_TOOLS.md](AGENT_RUNTIME_TOOLS.md).
-
-## Estados e contratos fail-closed
+## Estados e falhas
 
 ```mermaid
 stateDiagram-v2
     [*] --> running
-    running --> needs_revision: "crítica ou gate falhou"
-    needs_revision --> running: "nova iteração válida"
-    running --> approved: "EDL e gates editoriais válidos"
-    running --> failed: "erro irrecuperável"
-    running --> needs_human_review: "limite de loops atingido"
-    approved --> [*]
-    failed --> [*]
+    running --> running: "review refined e nova draft válida"
+    running --> approved: "review aprova a draft atual"
+    running --> needs_human_review: "incerteza editorial, no-progress ou limite de budget/review"
+    running --> failed: "falha técnica de provider, infraestrutura, integridade ou persistência"
+    approved --> deterministic: "projeção técnica"
+    deterministic --> published: "4 QCs e readiness em pass"
+    deterministic --> needs_human_review: "refiner ou gate pediu review"
+    deterministic --> failed: "falha técnica"
+    published --> [*]
     needs_human_review --> [*]
+    failed --> [*]
 ```
 
-Antes de considerar o agente aprovado:
+Comportamentos fail-closed:
 
-- toda resposta obrigatória precisa ser JSON válido e compatível com seu schema versionado;
-- todo range precisa apontar para fonte e timestamps existentes;
-- estratégia, plano e EDL precisam compartilhar beats rastreáveis;
-- ausência de arquivo, hash divergente, versão desconhecida ou artifact antigo bloqueia o avanço;
-- tool call desconhecida, inválida ou fora do escopo é erro, nunca autorização implícita;
-- falha de parse nunca pode assumir `APPROVED`;
-- atingir o limite de loops resulta em `needs_human_review`, não em sucesso;
-- a crítica avalia brief, análise, plano, evidência e EDL, não somente o JSON dos ranges;
-- o XML permanece bloqueado até os gates determinísticos de refinamento e QC passarem.
+- JSON duplicado, número não finito, schema inválido ou invariantes semânticos divergentes bloqueiam a escrita;
+- ranges precisam coincidir com boundaries das palavras e a `quote` precisa corresponder à evidência literal do intervalo;
+- leitura de artefato antigo, hash alterado ou `expected_revision` incorreto gera conflito;
+- tool desconhecida, path fora da allowlist, link/reparse point ou acesso entre sessões falha;
+- repetição idêntica sem progresso, estouro de chamadas/bytes e ausência recorrente de tool encerram a fase;
+- o limite de review termina em `needs_human_review`, nunca em aprovação presumida;
+- review aprovada não basta para publicar XML: boundary, áudio, semântica, transcrição do preview e readiness precisam passar.
 
-O runtime é a autoridade sobre estados, schemas e transições. A LLM propõe decisões editoriais; não pode autodeclarar que uma validação técnica ocorreu.
+## Telemetria sem chain-of-thought
 
-## Controle de contexto
+`edit/agent/llm_usage.jsonl` registra uma linha sanitizada por chamada: fase, iteração, modelo, latência, `finish_reason`, tokens retornados pelo provedor, nomes das tools, validação, resultado e código de erro.
 
-Cada chamada deve nascer de um envelope explícito:
+`edit/agent/agent_run.json` agrega estado, fase, iterações, quantidade de chamadas, totais de prompt/completion e cadeia de nomes, revisões e hashes dos artefatos. `session.log` acrescenta somente resumos estruturados, como arquétipo, quantidade de beats e ranges.
 
-1. instruções imutáveis e contrato da fase;
-2. manifesto dos módulos de conhecimento carregados;
-3. referências ou conteúdo dos artefatos necessários;
-4. evidência de transcrição necessária;
-5. orçamento de output e tools disponíveis.
+A TUI apresenta as etapas, o conjunto das quatro fases e estados reais. O detalhamento de nomes de tools e decisões estruturadas fica na telemetria e na auditoria da sessão; não inclui pensamento privado. Prompt, brief, transcrição, conteúdo de tool results, resposta bruta, chain-of-thought, segredo e path físico não entram nesses logs.
 
-Após validar e persistir um artefato, mensagens intermediárias, resultados repetidos de tool calls e respostas inválidas não devem ser carregados indefinidamente. O runtime reconstrói a próxima chamada a partir do estado persistido e registra hashes para auditoria.
+## Modelo e contexto
 
-## Telemetria e escolha de modelo
+GLM-5.2 via NVIDIA NIM é a baseline de desenvolvimento. A hipótese de uma janela local de 128K continua aberta e precisa ser medida com `llm_usage.jsonl`; a janela anunciada de 1M não é requisito do produto. Consulte [LLM_CONTEXT_AND_TOKEN_BUDGET.md](LLM_CONTEXT_AND_TOKEN_BUDGET.md).
 
-Cada chamada deve registrar consumo informado pelo provedor, ou uma estimativa identificada como tal, além de fase, iteração, latência, tools, validação e resultado. Prompts, transcrições, API keys e respostas brutas não entram no log operacional por padrão.
+## Limitações atuais
 
-O GLM-5.2 via NVIDIA NIM será o baseline inicial. Modelos locais menores só devem substituir esse baseline após executar o mesmo conjunto de casos, schemas e gates. A hipótese inicial de contexto confortável é 128K, não uma garantia. Critérios e candidatos estão em [LLM_CONTEXT_AND_TOKEN_BUDGET.md](LLM_CONTEXT_AND_TOKEN_BUDGET.md).
-
-## Critério para iniciar testes do agente
-
-Antes de um corte real, precisam existir:
-
-- schemas versionados para todos os artefatos;
-- implementação restrita das três tools;
-- runtime fail-closed para parse, tool call, schema, loops e aprovação;
-- telemetria por chamada e agregação por sessão;
-- fixtures sintéticas que provem isolamento de filesystem e transições de estado;
-- harness que execute o mesmo caso no baseline e nos modelos candidatos.
-
-Até esses itens existirem, o contrato de quatro artefatos descreve o alvo arquitetural e não deve ser interpretado como funcionalidade já entregue. Somente o motor de compatibilidade de três fases está ativo.
+- Não há resume automático pós-crash. Os artefatos permitem auditoria, mas uma nova chamada `alanocut` cria outra sessão.
+- Um `.artifact.lock` abandonado bloqueia aquele store; remover lock sem provar abandono não é automatizado.
+- Transcrição canônica sem palavras falha como input inválido. Uma política para fonte silenciosa ainda precisa ser desenhada.
+- `read_transcript_slice`, busca semântica e memória vetorial não fazem parte do MVP; transcripts inteiros continuam disponíveis nas fases que precisam de evidência.

@@ -238,10 +238,9 @@ def test_production_manifest_enforces_artifact_ownership_and_template_input():
     assert manifest["phases"]["assemble"]["input_schemas"] == {
         "edl_template.json": "schemas/edl-template.schema.json"
     }
-    assert manifest["phases"]["review"]["writes"] == [
-        "review.NNN.json",
-        "edl.draft.json",
-    ]
+    # A refined review carries the complete EDL, but only the host persists the
+    # review and derived draft in one transaction.
+    assert manifest["phases"]["review"]["writes"] == ["review.NNN.json"]
     diagnosis_schema = json.loads(
         (root / "schemas" / "diagnosis.schema.json").read_text(encoding="utf-8")
     )

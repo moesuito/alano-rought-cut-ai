@@ -25,7 +25,11 @@
     "sources": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": {"type": "string", "minLength": 1}
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^source:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      }
     }
   }
 }

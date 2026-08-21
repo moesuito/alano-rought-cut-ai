@@ -12,6 +12,8 @@ O objetivo não é encontrar o menor modelo que ocasionalmente produz uma boa ed
 - revisa o próprio plano em loops curtos;
 - falha de forma explícita quando não consegue concluir.
 
+A baseline é configurada somente no `.env` da instalação confiável ou no ambiente do processo. Arquivos da pasta de mídia não podem trocar endpoint ou modelo. O contrato aceita NIM remoto por HTTPS e servidores locais OpenAI-compatible por HTTP em loopback.
+
 ## Fatos confirmados nas fontes oficiais
 
 - A página do [GLM-5.2 no NVIDIA NIM](https://build.nvidia.com/z-ai/glm-5.2/modelcard) informa janela de input de 1.000.000 tokens, conversas multi-turno, tool calling e output estruturado. O exemplo oficial usa o endpoint OpenAI-compatible `https://integrate.api.nvidia.com/v1` e o identificador `z-ai/glm-5.2` na [página de integração](https://build.nvidia.com/z-ai/glm-5.2). O milhão de tokens é capacidade anunciada, não evidência de que o AlanoCut precise dela.
@@ -73,20 +75,18 @@ Se o p95 ultrapassar o gate, a ordem de ação é:
 4. dividir análise e planejamento em unidades coerentes;
 5. somente então testar uma janela maior, por exemplo 160K ou 256K.
 
-## Telemetria por chamada
+## Telemetria implementada
 
-Uma linha de `llm_usage.jsonl` deve conter, no mínimo:
+Cada completion gera uma linha sanitizada em `edit/agent/llm_usage.jsonl`:
 
-| Grupo | Campos |
+| Grupo | Campos atuais |
 |---|---|
-| Identidade | `run_id`, `call_id`, `phase`, `iteration`, timestamp UTC |
-| Modelo | provider lógico, model ID retornado, janela configurada, modo de reasoning quando exposto |
-| Tokens | input/prompt, output/completion, total, cached e reasoning quando disponíveis |
-| Proveniência | `usage_source: provider` ou `usage_source: estimate`, tokenizer/estimador e flag de completude |
-| Execução | latência, retries, HTTP status, request ID seguro, `finish_reason`, streaming |
-| Tools | quantidade, nomes, erros e bytes lidos/escritos; nunca conteúdo |
-| Qualidade | parse, schema, evidence gate, estado final da fase e motivo de bloqueio |
-| Artefatos | nomes lógicos, versões, hashes e tamanhos |
+| Identidade | timestamp UTC, `run_id`, `call_id`, `phase`, `iteration` |
+| Modelo | ID configurado para a execução |
+| Tokens | `prompt_tokens`, `completion_tokens`, `total_tokens` quando informados e `source` normalizada |
+| Execução | latência e `finish_reason` sanitizado |
+| Tools | nomes das tools chamadas, nunca argumentos ou resultados |
+| Qualidade | status de validação, outcome e código estável de erro |
 
 Não registrar:
 
@@ -96,35 +96,30 @@ Não registrar:
 - raciocínio oculto do provedor;
 - caminho físico completo quando um nome lógico basta.
 
-O log de sessão agrega chamadas em `agent_run.json`: tokens totais, máximo e p95 de ocupação, latência, loops, retries, erros de schema/tool e resultado editorial. Preço pode ser calculado somente com uma tabela de preço versionada e identificada; não deve ser inferido do model ID.
+`edit/agent/agent_run.json` agrega estado, fase, iterações, quantidade de chamadas, totais de prompt/completion, último erro e nomes/revisões/hashes dos artefatos. O ledger não calcula ainda p50/p95, ocupação da janela, preço ou retries. Essas métricas devem ser derivadas do corpus com uma janela configurada e, no caso de preço, uma tabela versionada; nunca inferidas apenas do model ID.
 
 ## `usage` do provedor e estimativa
 
-Quando a resposta OpenAI-compatible contiver `usage`, o runtime preserva os campos do provedor e os normaliza sem recontar. A referência da OpenAI mostra `prompt_tokens`, `completion_tokens` e `total_tokens` no [objeto de Chat Completions](https://platform.openai.com/docs/api-reference/chat/object). Backends compatíveis podem omitir campos ou tokenizar de forma diferente; por isso o payload bruto de `usage` pode ser guardado como metadado estruturado não sensível.
+Quando a resposta OpenAI-compatible contém `usage`, o cliente estruturado preserva os campos inteiros validados e a telemetria normaliza `prompt_tokens`, `completion_tokens` e `total_tokens`. A referência da OpenAI mostra esses campos no [objeto de Chat Completions](https://platform.openai.com/docs/api-reference/chat/object). Backends compatíveis podem omitir campos ou tokenizar de forma diferente.
 
-Se `usage` não vier:
+Se `usage` não vier, as contagens ficam ausentes. Ainda não existe estimador por tokenizer; portanto, uma chamada sem contagem não pode participar de percentis como se fosse zero. Uma futura estimativa deverá identificar tokenizer/versão e nunca se misturar à contagem do provedor sem distinção.
 
-- usar o tokenizer exato do modelo quando disponível;
-- registrar o resultado como `usage_source: estimate` e identificar versão do tokenizer;
-- nunca misturar estimativa e contagem do provedor sem distinção;
-- marcar a chamada como `usage_complete: false` quando output ou reasoning não puderem ser estimados.
-
-No streaming, solicitar `stream_options.include_usage` apenas quando o backend declarar suporte. As referências de [Chat Completions da OpenAI](https://platform.openai.com/docs/api-reference/chat/object) e de [limitações da Mistral](https://docs.mistral.ai/resources/known-limitations) observam que essa opção precisa ser explícita e que uma interrupção pode impedir a chegada do evento final de uso. Nesse caso, a telemetria usa estimativa e registra interrupção; não inventa uma contagem exata.
-
-O cliente atual é não streaming, mas descarta `usage`. A implementação futura deve retornar um envelope com conteúdo, uso, modelo efetivo, request ID, `finish_reason` e latência.
+O cliente atual é não streaming. Seu envelope estruturado já retorna conteúdo, tool calls, `usage`, modelo efetivo, request ID seguro, `finish_reason` e latência. Streaming permanece fora do runtime ativo; quando for avaliado, `include_usage` e interrupção precisam de contrato específico.
 
 ## Crescimento do histórico
 
 Reenviar a conversa inteira faz o input crescer a cada loop e cobra novamente por instruções, respostas e tool results anteriores. Além do custo, isso aumenta distração e reduz a previsibilidade de modelos menores.
 
-O runtime artifact-driven deve:
+O runtime artifact-driven implementa:
 
 - iniciar cada fase a partir de um envelope reconstruído;
 - persistir a decisão válida antes de descartar mensagens intermediárias;
 - carregar artefatos por referência e conteúdo somente quando necessários;
 - retirar respostas inválidas e tool results duplicados do próximo prompt;
 - manter hashes e eventos no estado técnico, fora do chat;
-- compactar somente com regra determinística e rastreável.
+- reconstruir cada iteração de review em uma conversa nova.
+
+Dentro de uma fase, a conversa cresce apenas com as tool calls necessárias até `write_artifact`. Não existe compactação heurística: ao persistir o artefato, a fase seguinte recomeça do estado durável.
 
 Não se deve resumir uma transcrição e depois tratar o resumo como evidência temporal. A montagem usa palavras e timestamps canônicos, diretamente ou via slice verificável.
 
@@ -167,11 +162,11 @@ Um modelo local só vira default se:
 
 O resultado pode ser híbrido: 8B ou 14B para compreensão e validações estreitas, com 24B–30B reservado a planejamento global ou recuperação de casos difíceis. Essa separação também deve ser provada pelo benchmark; não será assumida apenas pelo número de parâmetros.
 
-## Próximos passos antes do primeiro teste real
+## Próximos passos de medição
 
-1. Fazer o cliente preservar `usage` e metadados da resposta.
-2. Criar `llm_usage.jsonl` e agregação em `agent_run.json`.
-3. Implementar envelopes de fase e descarte seguro do histórico.
-4. Fixar schemas e fixtures de benchmark.
-5. Executar o GLM-5.2 como baseline.
-6. Comparar primeiro um 14B, depois o piso 8B e, se necessário, a faixa 24B–30B.
+1. Executar o GLM-5.2/NIM no corpus e registrar chamadas sem conteúdo privado.
+2. Calcular por fora do runtime p50, p95, máximo e taxa de chamadas sem `usage`.
+3. Associar cada run à janela configurada para medir `context_ratio` sem inferir capacidade pelo nome do modelo.
+4. Fixar fixtures e rubrica humana para qualidade editorial, retakes e cobertura de beats.
+5. Comparar primeiro um 14B local, depois o piso 8B e, se necessário, a faixa 24B–30B.
+6. Adicionar estimativa versionada somente para provedores que omitem `usage`.

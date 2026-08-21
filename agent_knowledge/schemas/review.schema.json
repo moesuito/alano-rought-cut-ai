@@ -34,10 +34,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["code", "severity", "range_id", "evidence", "repair"],
+        "required": ["code", "severity", "repair_scope", "range_id", "evidence", "repair"],
         "properties": {
           "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$"},
           "severity": {"enum": ["blocking", "warning"]},
+          "repair_scope": {"enum": ["edl", "plan", "diagnosis", "evidence"]},
           "range_id": {"type": ["string", "null"]},
           "evidence": {"type": "string", "minLength": 1, "maxLength": 1000},
           "repair": {"type": "string", "minLength": 1, "maxLength": 1000}

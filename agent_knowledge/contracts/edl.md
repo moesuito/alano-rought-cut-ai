@@ -6,7 +6,7 @@ O host entrega à fase de montagem `edl_template.json`, validado contra `schemas
 
 ## Regras
 
-- `sources` mapeia cada ID usado para a referência de mídia entregue pelo host; o agente apenas preserva o mapa recebido e não cria novos IDs ou paths.
+- `sources` mapeia cada ID usado para a referência opaca `source:<ID>` entregue pelo host; paths físicos permanecem fora do prompt e só entram na projeção técnica posterior.
 - `ranges` está na ordem da timeline final.
 - `start` e `end` são segundos na fonte e precisam corresponder a limites lexicais existentes, com `end > start`.
 - `beat_id` liga cada range a um beat do plano. Um beat pode usar vários ranges e um range pertence a um beat.

@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -75,6 +77,9 @@ class SessionContext:
     total_duration_s: float = 0.0
     timeline_xml_path: str = ""
     status: str = "initialized"
+    agent_state: str = "pending"
+    last_error_code: str = ""
+    qc_status: str = "pending"
 
     @property
     def dir(self) -> Path:
@@ -111,6 +116,30 @@ class SessionContext:
     @property
     def session_log_file(self) -> Path:
         return self.dir / "session.log"
+
+    @property
+    def agent_dir(self) -> Path:
+        return self.edit_dir / "agent"
+
+    @property
+    def agent_inputs_dir(self) -> Path:
+        return self.agent_dir / "inputs"
+
+    @property
+    def agent_artifacts_dir(self) -> Path:
+        return self.agent_dir / "artifacts"
+
+    @property
+    def agent_run_file(self) -> Path:
+        return self.agent_dir / "agent_run.json"
+
+    @property
+    def llm_usage_file(self) -> Path:
+        return self.agent_dir / "llm_usage.jsonl"
+
+    @property
+    def source_registry_file(self) -> Path:
+        return self.agent_dir / "source_registry.json"
 
     @property
     def audit_txt_file(self) -> Path:
@@ -163,21 +192,60 @@ def export_deliverable(
     target_dir: Path,
     output_filename: str = "timeline.xml"
 ) -> Path:
-    """Copy the final timeline XML from AppData session cache to user's working directory."""
+    """Atomically publish exactly ``timeline.xml`` to the operated directory."""
+    if output_filename != "timeline.xml":
+        raise ValueError("The public deliverable name is fixed to timeline.xml")
+
     src_xml = session.session_xml_file
-    if not src_xml.exists():
-        raise FileNotFoundError(f"Session timeline.xml was not found at {src_xml}")
+    _require_regular_path(src_xml, "Session timeline.xml")
 
-    target_dir = target_dir.resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = Path(target_dir)
+    _reject_reparse(target_dir, "The operated directory")
+    target_dir = target_dir.resolve(strict=True)
+    if not target_dir.is_dir():
+        raise FileNotFoundError("The operated directory is unavailable")
+    _reject_reparse(target_dir, "The operated directory")
 
-    dest_xml = target_dir / output_filename
-    shutil.copy2(src_xml, dest_xml)
+    dest_xml = target_dir / "timeline.xml"
+    if dest_xml.exists() or dest_xml.is_symlink():
+        _reject_reparse(dest_xml, "The destination timeline.xml")
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".timeline-", suffix=".xml.tmp", dir=target_dir
+    )
+    temporary_path = Path(temporary)
+    try:
+        with src_xml.open("rb") as source, os.fdopen(descriptor, "wb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        _require_regular_path(src_xml, "Session timeline.xml")
+        _reject_reparse(target_dir, "The operated directory")
+        os.replace(temporary_path, dest_xml)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
     session.timeline_xml_path = str(dest_xml)
     session.status = "completed"
     session.save()
     return dest_xml
+
+
+def _reject_reparse(path: Path, label: str) -> None:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise FileNotFoundError(f"{label} is unavailable") from exc
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(info.st_mode) or attributes & reparse_flag:
+        raise ValueError(f"{label} cannot be a filesystem link")
+
+
+def _require_regular_path(path: Path, label: str) -> None:
+    _reject_reparse(path, label)
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} is not a regular file")
 
 
 def list_sessions() -> list[dict[str, Any]]:
