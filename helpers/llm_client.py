@@ -212,8 +212,8 @@ def send_chat_completion_structured(
     messages: Sequence[Mapping[str, object]],
     config: Mapping[str, str] | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 3500,
-    timeout_seconds: float = 120,
+    max_tokens: int | None = None,
+    timeout_seconds: float = 1200,
     tools: Sequence[Mapping[str, object]] | None = None,
     tool_choice: str | Mapping[str, object] | None = None,
 ) -> ChatCompletionResult:
@@ -227,8 +227,9 @@ def send_chat_completion_structured(
         "model": model,
         "messages": list(messages),
         "temperature": temperature,
-        "max_tokens": max_tokens,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if tools is not None:
         payload["tools"] = list(tools)
     if tool_choice is not None:
@@ -382,15 +383,16 @@ def _is_loopback_host(hostname: str) -> bool:
     if hostname.casefold() == "localhost":
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_loopback or ip in ipaddress.ip_network("100.64.0.0/10")
     except ValueError:
         return False
 
 
-def _validate_request_options(temperature: float, max_tokens: int, timeout_seconds: float) -> None:
+def _validate_request_options(temperature: float, max_tokens: int | None, timeout_seconds: float) -> None:
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature):
         raise LLMConfigurationError("LLM_CONFIG_INVALID: temperature must be finite")
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+    if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0):
         raise LLMConfigurationError("LLM_CONFIG_INVALID: max_tokens must be positive")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise LLMConfigurationError("LLM_CONFIG_INVALID: timeout must be positive")
@@ -456,12 +458,13 @@ def _parse_completion(
     if content is not None and not isinstance(content, str):
         raise LLMResponseError("LLM_RESPONSE_INVALID: content must be text or null")
     tool_calls = _parse_tool_calls(message.get("tool_calls", []))
-    if content is None and not tool_calls:
-        raise LLMResponseError("LLM_RESPONSE_INVALID: content or tool calls are required")
 
     finish_reason = choice.get("finish_reason")
     if finish_reason is not None and not _is_safe_metadata(finish_reason, 128):
         raise LLMResponseError("LLM_RESPONSE_INVALID: finish_reason is invalid")
+    if content is None and not tool_calls:
+        if finish_reason not in {"length", "content_filter"} and "filter" not in str(finish_reason).lower():
+            raise LLMResponseError("LLM_RESPONSE_INVALID: content or tool calls are required")
     response_model = data.get("model", requested_model)
     if not _is_safe_metadata(response_model, 512):
         raise LLMResponseError("LLM_RESPONSE_INVALID: model is invalid")
@@ -491,18 +494,22 @@ def _parse_tool_calls(value: object) -> tuple[ToolCall, ...]:
         call_id, function = item.get("id"), item.get("function")
         if not _is_safe_metadata(call_id, 256) or call_id in call_ids or not isinstance(function, dict):
             raise LLMResponseError("LLM_RESPONSE_INVALID: tool call is invalid")
-        name, arguments_text = function.get("name"), function.get("arguments")
+        name, arguments_data = function.get("name"), function.get("arguments")
         if (
             not isinstance(name, str)
             or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) is None
-            or not isinstance(arguments_text, str)
         ):
-            raise LLMResponseError("LLM_RESPONSE_INVALID: tool function is invalid")
-        try:
-            encoded_arguments = arguments_text.encode("utf-8")
-        except UnicodeError:
-            raise LLMResponseError("LLM_TOOL_ARGUMENTS_INVALID: JSON object is invalid") from None
-        arguments = _parse_json_object(encoded_arguments, "LLM_TOOL_ARGUMENTS_INVALID")
+            raise LLMResponseError("LLM_RESPONSE_INVALID: tool function name is invalid")
+        if isinstance(arguments_data, dict):
+            arguments = arguments_data
+        elif isinstance(arguments_data, str):
+            try:
+                encoded_arguments = arguments_data.encode("utf-8")
+            except UnicodeError:
+                raise LLMResponseError("LLM_TOOL_ARGUMENTS_INVALID: JSON object is invalid") from None
+            arguments = _parse_json_object(encoded_arguments, "LLM_TOOL_ARGUMENTS_INVALID")
+        else:
+            raise LLMResponseError("LLM_RESPONSE_INVALID: tool function arguments are invalid")
         parsed_calls.append(ToolCall(call_id=call_id, name=name, arguments=arguments))
         call_ids.add(call_id)
     return tuple(parsed_calls)

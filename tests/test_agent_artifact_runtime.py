@@ -432,8 +432,8 @@ def test_tools_require_phase_reads_and_write_with_host_authority(tmp_path: Path)
     )
     assert denied["error"]["code"] == "STATE_CONFLICT"
 
-    for logical in ("brief.md", "takes_packed.md"):
-        assert tools.execute(ToolCallView(f"read-{logical}", "read_file", {"path": logical}))[
+    for index, logical in enumerate(("brief.md", "transcripts/C0104.json"), 1):
+        assert tools.execute(ToolCallView(f"read-file-{index}", "read_file", {"path": logical}))[
             "ok"
         ]
     written = tools.execute(
@@ -551,10 +551,10 @@ class _SuccessfulProvider:
 
     def _reads(self, phase: str) -> list[_FakeToolCall]:
         file_reads = {
-            "diagnose": ["brief.md", "takes_packed.md"],
-            "plan": ["brief.md", "takes_packed.md"],
-            "assemble": ["takes_packed.md", "edl_template.json"],
-            "review": ["brief.md", "takes_packed.md"],
+            "diagnose": ["brief.md", "transcripts/C0104.json"],
+            "plan": ["brief.md", "transcripts/C0104.json"],
+            "assemble": ["transcripts/C0104.json", "edl_template.json"],
+            "review": ["brief.md", "transcripts/C0104.json"],
         }[phase]
         artifact_reads = {
             "diagnose": [],
@@ -673,7 +673,7 @@ class _InvalidCallIdProvider:
             model="fake-local-8b",
             content=None,
             tool_calls=[
-                _FakeToolCall("bad/tool/id", "read_file", {"path": "takes_packed.md"})
+                _FakeToolCall("bad/tool/id", "read_file", {"path": "transcripts/C0104.json"})
             ],
             finish_reason="tool_calls",
             usage={},
@@ -696,7 +696,7 @@ class _BatchFailureProvider:
         )
         valid_reads = [
             _FakeToolCall("read-brief", "read_file", {"path": "brief.md"}),
-            _FakeToolCall("read-takes", "read_file", {"path": "takes_packed.md"}),
+            _FakeToolCall("read-takes", "read_file", {"path": "transcripts/C0104.json"}),
         ]
         write = _FakeToolCall(
             "write-diagnosis",

@@ -226,7 +226,7 @@ class AgentToolExecutor:
                 "call_id": call_id,
                 "ok": False,
                 "result": None,
-                "error": {"code": code, "message": _safe_error_message(code)},
+                "error": {"code": code, "message": _safe_error_message(code, exc.message)},
             }
         except Exception:
             return {
@@ -403,10 +403,10 @@ class AgentToolExecutor:
         }
 
     def _require_predecessor_reads(self) -> None:
-        required_files = {"takes_packed.md"}
-        if "brief.md" in self._input_allowlist:
-            required_files.add("brief.md")
-        if self.phase == "assemble":
+        required_files = {
+            f for f in self._input_allowlist if f.startswith("transcripts/")
+        }
+        if self.phase == "assemble" and "edl_template.json" in self._input_allowlist:
             required_files.add("edl_template.json")
         missing_files = required_files - self._read_files
         required_artifacts = set(self._artifact_read_allowlist)
@@ -530,7 +530,7 @@ def _strict_json_size(value: Mapping[str, Any]) -> int:
         raise ArtifactError("INVALID_JSON", "Artifact content is not strict JSON") from exc
 
 
-def _safe_error_message(code: str) -> str:
+def _safe_error_message(code: str, detail: str = "") -> str:
     messages = {
         "BATCH_ABORTED": "Tool call was skipped after an earlier batch failure",
         "INVALID_ARGUMENT": "Tool arguments are invalid",
@@ -547,4 +547,7 @@ def _safe_error_message(code: str) -> str:
         "NO_PROGRESS": "Tool loop made no progress",
         "NEEDS_HUMAN_REVIEW": "The decision requires human review",
     }
-    return messages.get(code, "Tool call failed")
+    base = messages.get(code, "Tool call failed")
+    if detail and detail != base:
+        return f"{base}: {detail}"
+    return base

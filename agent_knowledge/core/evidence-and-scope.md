@@ -4,7 +4,7 @@
 
 O pipeline já entregou transcrições temporizadas. O agente começa no conteúdo editorial: não inventa mídia, não inicia transcrição e não decide configuração de ASR.
 
-`takes_packed.md` é a visão primária para leitura global. A transcrição canônica de uma fonte é consultada apenas quando a seleção exige palavras e timestamps mais precisos que a linha compactada.
+As transcrições canônicas em `transcripts/<source>.json` são a fonte de verdade direta para palavras individuais, pausas e timestamps. O agente opera diretamente sobre as evidências temporizadas recebidas.
 
 ## Limite de percepção
 
@@ -15,8 +15,7 @@ A transcrição pode conter erros. Trate grafia inesperada, nomes próprios, nú
 ## Autoridades
 
 - O brief tem prioridade para objetivo, público, restrições e itens obrigatórios.
-- O conteúdo das transcrições é a autoridade sobre o que foi dito.
-- A transcrição canônica é a autoridade temporal; o packed transcript é um índice compacto.
+- O conteúdo das transcrições canônicas é a autoridade sobre o que foi dito e sobre os limites temporais das palavras.
 - O plano aprovado é a autoridade sobre beats e intenção durante a montagem.
 - A EDL é a autoridade editorial entregue ao pipeline técnico.
 - Helpers determinísticos são a autoridade sobre snapping acústico, frames, QC e XML.

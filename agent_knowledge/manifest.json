@@ -12,14 +12,14 @@
       "task": "tasks/diagnose.md",
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md"],
       "schema": "schemas/diagnosis.schema.json",
-      "reads": ["brief.md", "takes_packed.md"],
+      "reads": ["brief.md", "transcripts/<source>.json"],
       "writes": ["diagnosis.json"]
     },
     "plan": {
       "task": "tasks/plan.md",
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md"],
       "schema": "schemas/cut-plan.schema.json",
-      "reads": ["diagnosis.json", "brief.md", "takes_packed.md"],
+      "reads": ["diagnosis.json", "brief.md", "transcripts/<source>.json"],
       "writes": ["cut_plan.json"],
       "dynamic": ["selected_archetype_or_core_only"]
     },
@@ -28,14 +28,14 @@
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md", "contracts/edl.md"],
       "schema": "schemas/edl.schema.json",
       "input_schemas": {"edl_template.json": "schemas/edl-template.schema.json"},
-      "reads": ["diagnosis.json", "cut_plan.json", "takes_packed.md", "transcripts/<source>.json", "edl_template.json"],
+      "reads": ["diagnosis.json", "cut_plan.json", "transcripts/<source>.json", "edl_template.json"],
       "writes": ["edl.draft.json"]
     },
     "review": {
       "task": "tasks/review.md",
       "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md", "contracts/edl.md"],
       "schema": "schemas/review.schema.json",
-      "reads": ["diagnosis.json", "cut_plan.json", "edl.draft.json", "brief.md", "takes_packed.md", "transcripts/<source>.json"],
+      "reads": ["diagnosis.json", "cut_plan.json", "edl.draft.json", "brief.md", "transcripts/<source>.json"],
       "writes": ["review.NNN.json"]
     }
   },

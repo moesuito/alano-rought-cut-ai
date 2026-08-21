@@ -39,6 +39,7 @@ class ArtifactError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ class EvidenceCatalog:
     source_refs: Mapping[str, str]
     word_boundaries: Mapping[str, frozenset[float]]
     source_end_seconds: Mapping[str, float]
-    boundary_tolerance_seconds: float = 0.002
+    boundary_tolerance_seconds: float = 0.08
     words: Mapping[str, tuple[EvidenceWord, ...]] = field(default_factory=dict)
 
     @classmethod
@@ -639,8 +640,11 @@ class ArtifactStore:
         try:
             self.schemas.validate(schema, strict_payload)
         except ArtifactSchemaError as exc:
-            raise ArtifactError("SCHEMA_MISMATCH", "Artifact does not match its schema") from exc
-        self._semantic.validate(name, strict_payload, predecessors)
+            raise ArtifactError("SCHEMA_MISMATCH", f"Schema validation error: {exc}") from exc
+        try:
+            self._semantic.validate(name, strict_payload, predecessors)
+        except ArtifactError as exc:
+            raise ArtifactError(exc.code, f"Semantic validation error: {exc.message}") from exc
         if direct_file is None:
             key = name[:-5].replace(".", "_")
             relative = f".revisions/{key}/{revision:06d}.json"

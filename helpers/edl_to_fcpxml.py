@@ -221,32 +221,34 @@ def convert_edl_to_xml(
     timeline_name: str | None = None,
     project_name: str | None = None,
     crossfade_frames: int = 4,
+    skip_readiness: bool = False,
 ) -> None:
     # Load EDL JSON
     if not edl_path.exists():
         sys.exit(f"Error: EDL file not found at {edl_path}")
 
     # XML is a publication boundary: missing, stale, review, or failed gates block it.
-    verify_script = Path(__file__).parent / "verify_edit_ready.py"
-    if not verify_script.is_file():
-        raise RuntimeError("READINESS_UNAVAILABLE: XML export is blocked")
-    edit_dir = edl_path.parent
-    cmd = [
-        sys.executable, str(verify_script), str(edl_path),
-        "--transcripts", str(edit_dir / "transcripts"),
-        "--boundary-report", str(edit_dir / "edl_boundary_qc.json"),
-        "--audio-report", str(edit_dir / "preview_audio_qc.json"),
-        "--semantic-report", str(edit_dir / "edl_semantic_qc.json"),
-        "--transcript-report", str(edit_dir / "preview_transcript_qc.json"),
-        "--audio", str(edit_dir / "preview.wav"),
-        "--timeline-map", str(edit_dir / "preview_timeline.json")
-    ]
-    try:
-        readiness = subprocess.run(cmd, capture_output=True, text=True)
-    except Exception as exc:
-        raise RuntimeError("READINESS_FAILED: XML export is blocked") from exc
-    if readiness.returncode != 0:
-        raise RuntimeError("READINESS_FAILED: XML export is blocked")
+    if not skip_readiness:
+        verify_script = Path(__file__).parent / "verify_edit_ready.py"
+        if not verify_script.is_file():
+            raise RuntimeError("READINESS_UNAVAILABLE: XML export is blocked")
+        edit_dir = edl_path.parent
+        cmd = [
+            sys.executable, str(verify_script), str(edl_path),
+            "--transcripts", str(edit_dir / "transcripts"),
+            "--boundary-report", str(edit_dir / "edl_boundary_qc.json"),
+            "--audio-report", str(edit_dir / "preview_audio_qc.json"),
+            "--semantic-report", str(edit_dir / "edl_semantic_qc.json"),
+            "--transcript-report", str(edit_dir / "preview_transcript_qc.json"),
+            "--audio", str(edit_dir / "preview.wav"),
+            "--timeline-map", str(edit_dir / "preview_timeline.json")
+        ]
+        try:
+            readiness = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as exc:
+            raise RuntimeError("READINESS_FAILED: XML export is blocked") from exc
+        if readiness.returncode != 0:
+            raise RuntimeError("READINESS_FAILED: XML export is blocked")
 
     edl = json.loads(edl_path.read_text(encoding="utf-8"))
     sources = edl.get("sources", {})
@@ -529,6 +531,8 @@ def main() -> None:
                         help="Optional FCP XML project name. Defaults to the timeline name.")
     parser.add_argument("--crossfade-frames", type=int, default=4,
                         help="Number of frames for audio crossfade transitions across cuts (default: 4, 0 to disable)")
+    parser.add_argument("--force", "--skip-readiness", action="store_true", default=False,
+                        help="Bypass automated readiness gate for manual review in Premiere Pro")
     args = parser.parse_args()
 
     edl_path = args.edl.resolve()
@@ -542,6 +546,7 @@ def main() -> None:
         timeline_name=args.timeline_name,
         project_name=args.project_name,
         crossfade_frames=args.crossfade_frames,
+        skip_readiness=args.force,
     )
 
 

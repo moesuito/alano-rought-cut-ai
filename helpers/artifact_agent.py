@@ -46,6 +46,10 @@ class TransientCompletionError(RuntimeError):
     """Retryable provider failure normalized by the completion adapter."""
 
 
+class ModelResponseError(RuntimeError):
+    """Model produced malformed or invalid response structure recoverable by retrying."""
+
+
 class StructuredCompletionProvider:
     """Adapt ``send_chat_completion_structured`` without coupling the runner to config."""
 
@@ -54,7 +58,7 @@ class StructuredCompletionProvider:
         completion: Callable[..., "ChatCompletionResult"],
         *,
         config: Mapping[str, str],
-        timeout_seconds: float = 120,
+        timeout_seconds: float = 1200,
     ) -> None:
         self._completion = completion
         self._config = dict(config)
@@ -66,9 +70,9 @@ class StructuredCompletionProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float,
-        max_tokens: int,
+        max_tokens: int | None = None,
     ) -> "ChatCompletionResult":
-        from helpers.llm_client import LLMTransientError
+        from helpers.llm_client import LLMTransientError, LLMResponseError
 
         try:
             return self._completion(
@@ -82,6 +86,8 @@ class StructuredCompletionProvider:
             )
         except LLMTransientError as exc:
             raise TransientCompletionError("provider request failed transiently") from exc
+        except LLMResponseError as exc:
+            raise ModelResponseError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -89,7 +95,7 @@ class AgentBudget:
     max_completion_calls_per_phase: int = 12
     max_review_iterations: int = 4
     max_empty_completions: int = 2
-    max_tokens_per_completion: int = 6_000
+    max_tokens_per_completion: int | None = None
     max_provider_retries_per_phase: int = 2
     tool_budget: ToolBudget = ToolBudget()
 
@@ -296,6 +302,30 @@ class ArtifactDrivenEditor:
                     delay = float(provider_retries + 1)
                     provider_retries += 1
                     self._sleep(delay)
+                except ModelResponseError as exc:
+                    self._record_completion(
+                        phase=phase,
+                        iteration=phase_iteration,
+                        call_number=call_number,
+                        provider_attempt=provider_attempt,
+                        completion=None,
+                        latency_ms=_elapsed_ms(started),
+                        tool_names=(),
+                        outcome="retry",
+                        validation_status="schema_mismatch",
+                        error_code="SCHEMA_MISMATCH",
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"A chamada de ferramenta falhou com erro de formatação ({exc}). "
+                                "Grave o artefato via write_artifact com JSON válido e todos os campos obrigatórios."
+                            ),
+                        }
+                    )
+                    completion = None
+                    break
                 except Exception as exc:
                     self._record_completion(
                         phase=phase,
@@ -310,6 +340,9 @@ class ArtifactDrivenEditor:
                         error_code="COMPLETION_FAILED",
                     )
                     raise ArtifactError("COMPLETION_FAILED", "Completion provider failed") from exc
+
+            if completion is None:
+                continue
 
             tool_calls = _completion_tool_calls(completion)
             if not tool_calls:
@@ -376,6 +409,7 @@ class ArtifactDrivenEditor:
             if error_code in {"BUDGET_EXCEEDED", "NO_PROGRESS", "NEEDS_HUMAN_REVIEW"}:
                 raise ArtifactError(error_code, "Phase cannot continue")
             if error_code is not None:
+                _prune_failed_writes(messages)
                 continue
             if executor.successful_write:
                 artifact_name = next(iter(executor.allowed_resources["write"]))
@@ -560,3 +594,33 @@ def _object_value(value: object, field: str) -> object | None:
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int(round((time.perf_counter() - started) * 1000)))
+
+
+def _prune_failed_writes(messages: list[dict[str, Any]]) -> None:
+    """Keep all read operations, but keep only the most recent failed write attempt."""
+    write_assistant_indices: list[int] = []
+    for idx, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, Sequence):
+                for tc in tool_calls:
+                    func = tc.get("function", {}) if isinstance(tc, Mapping) else getattr(tc, "function", {})
+                    name = func.get("name") if isinstance(func, Mapping) else getattr(func, "name", None)
+                    if name == "write_artifact":
+                        write_assistant_indices.append(idx)
+                        break
+
+    if len(write_assistant_indices) > 1:
+        indices_to_remove: set[int] = set()
+        for old_idx in write_assistant_indices[:-1]:
+            indices_to_remove.add(old_idx)
+            # Remove associated tool response messages immediately following
+            next_idx = old_idx + 1
+            while next_idx < len(messages) and messages[next_idx].get("role") == "tool":
+                indices_to_remove.add(next_idx)
+                next_idx += 1
+
+        pruned = [msg for idx, msg in enumerate(messages) if idx not in indices_to_remove]
+        messages.clear()
+        messages.extend(pruned)
+

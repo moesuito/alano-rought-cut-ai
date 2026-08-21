@@ -2,7 +2,7 @@
 
 ## Edite intenções, não palavras isoladas
 
-“Beleza”, “corta”, “volta”, “ok” ou “aí” pode ser conteúdo legítimo ou fala de produção. Classifique pela função comunicativa, pelo contexto anterior e posterior e pelo papel no vídeo. Remova slate, preparação, instrução à equipe e negociação de take quando forem bastidor; preserve a mesma expressão quando ela servir à audiência.
+“Beleza”, “corta”, “volta”, “ok”, “tá” ou “aí” pode ser conteúdo legítimo ou fala de produção. Classifique pela função comunicativa, pelo contexto anterior e posterior e pelo papel no vídeo. Remova slate, preparação de take, instrução à equipe, hesitações e negociação de take quando forem bastidor; posicione o início do corte (`start`) diretamente na primeira palavra da fala com função narrativa útil.
 
 ## Leia o material inteiro antes de decidir
 

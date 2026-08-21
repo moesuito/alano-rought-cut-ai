@@ -199,7 +199,9 @@ def run_autonomous_rough_cut(
             run_id=session.session_id,
             model=config["model"],
             provider=StructuredCompletionProvider(
-                send_chat_completion_structured, config=config, timeout_seconds=120
+                send_chat_completion_structured,
+                config=config,
+                timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", "1200")),
             ),
             store=store,
             input_root=session.agent_inputs_dir,
@@ -380,7 +382,7 @@ def _prepare_agent_inputs(
     marker_map: dict[str, str] = {}
     sources: dict[str, str] = {}
     transcripts: dict[str, dict[str, Any]] = {}
-    input_files = {"brief.md": "brief.md", "takes_packed.md": "takes_packed.md", "edl_template.json": "edl_template.json"}
+    input_files = {"brief.md": "brief.md", "edl_template.json": "edl_template.json"}
     registry: list[dict[str, Any]] = []
     for item in inventory:
         source_id = str(item["source_id"])
@@ -393,17 +395,29 @@ def _prepare_agent_inputs(
         _rewrite_transcript_source_fields(payload, item, source_id)
         _assert_no_physical_markers(payload, item)
         transcripts[source_id] = payload
-        transcript_bytes = _strict_json_bytes(payload)
+        _write_new_file(session.transcripts_dir / f"{source_id}.json", _strict_json_bytes(payload))
+
+        compact_words = []
+        for w in payload.get("words", []):
+            if isinstance(w, dict) and w.get("text") and w.get("start") is not None and w.get("end") is not None:
+                compact_words.append({
+                    "text": str(w["text"]).strip(),
+                    "start": round(float(w["start"]), 2),
+                    "end": round(float(w["end"]), 2),
+                })
+        compact_agent_payload = {"source": source_id, "words": compact_words}
         logical_name = f"transcripts/{source_id}.json"
-        _write_new_file(inputs / logical_name, transcript_bytes)
-        _write_new_file(session.transcripts_dir / f"{source_id}.json", transcript_bytes)
+        _write_new_file(inputs / logical_name, _strict_json_bytes(compact_agent_payload))
         input_files[logical_name] = logical_name
         registry.append({"source_id": source_id, "filename": item["filename"], "path": item["path"], "file_identity": item["file_identity"]})
 
     safe_brief = _replace_physical_markers(brief, marker_map)
-    safe_takes = _rewrite_packed_sources(session.takes_packed_file.read_text(encoding="utf-8"), marker_map)
     _assert_text_has_no_source_markers(safe_brief, inventory)
-    _assert_text_has_no_source_markers(safe_takes, inventory)
+    if session.takes_packed_file.is_file():
+        safe_takes = _rewrite_packed_sources(session.takes_packed_file.read_text(encoding="utf-8"), marker_map)
+        _assert_text_has_no_source_markers(safe_takes, inventory)
+        _write_new_file(inputs / "takes_packed.md", safe_takes.encode("utf-8"))
+        input_files["takes_packed.md"] = "takes_packed.md"
     template = {
         "version": 1,
         "metadata": {
@@ -414,7 +428,6 @@ def _prepare_agent_inputs(
         "sources": sources,
     }
     _write_new_file(inputs / "brief.md", safe_brief.encode("utf-8"))
-    _write_new_file(inputs / "takes_packed.md", safe_takes.encode("utf-8"))
     _write_new_file(inputs / "edl_template.json", _strict_json_bytes(template))
     _write_new_file(session.source_registry_file, _strict_json_bytes({"version": 1, "run_id": session.session_id, "sources": registry}))
     return {"brief": safe_brief, "template": template, "transcripts": transcripts, "input_files": input_files}

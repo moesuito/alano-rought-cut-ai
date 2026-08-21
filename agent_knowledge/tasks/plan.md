@@ -5,7 +5,8 @@ Objetivo: transformar o diagnóstico em beats narrativos verificáveis antes de 
 ## Entradas
 
 - última revisão válida de `diagnosis.json`;
-- `takes_packed.md`;
+- `brief.md`, quando fornecido;
+- `transcripts/<source>.json` de cada fonte;
 - o único arquétipo indicado por `selected_archetype`, quando esse campo não for nulo; diagnósticos `custom` usam somente o core.
 
 ## Procedimento
@@ -21,4 +22,41 @@ Não produza ranges definitivos nesta fase. Um candidato pode usar o range compa
 
 ## Saída
 
-Grave `cut_plan.json` válido contra `schemas/cut-plan.schema.json`. Todo beat obrigatório precisa de pelo menos um candidato, ou a fase termina em `needs_human_review` com a lacuna explícita.
+Grave `cut_plan.json` via `write_artifact` com todos os campos obrigatórios:
+
+```json
+{
+  "schema_version": 1,
+  "artifact": "cut_plan",
+  "revision": 1,
+  "diagnosis_revision": 1,
+  "status": "ready",
+  "archetype": "educational_explainer",
+  "narrative_objective": "Apresentar a plataforma Ticto e seus 3 perfis de usuário.",
+  "pacing_strategy": "Cortes diretos e transições limpas mantendo o fluxo didático.",
+  "target_duration_seconds": 90.0,
+  "beats": [
+    {
+      "id": "BEAT_1",
+      "position": 1,
+      "purpose": "Abertura e introdução.",
+      "required": true,
+      "selection_requirements": ["Clareza e identificação"],
+      "candidates": [
+        {
+          "source": "SRC_66F16BBAFBCC0127",
+          "start": 127.58,
+          "end": 133.00,
+          "quote": "Olá, sejam muito bem-vindos ao treinamento completo da Ticto.",
+          "selection_note": "Abertura oficial do vídeo com energia e clareza."
+        }
+      ],
+      "transition_intent": "hard_cut"
+    }
+  ],
+  "global_exclusions": [],
+  "open_questions": []
+}
+```
+
+Preencha os beats com IDs únicos e posições contíguas (1, 2, 3...). Obtenha os timestamps `start` e `end` lendo as palavras em `transcripts/<source>.json`. Emita a chamada `write_artifact` diretamente.

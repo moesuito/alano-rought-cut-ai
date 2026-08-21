@@ -23,4 +23,29 @@ Não aprove por ausência de achado superficial. Não retorne apenas diffs; uma 
 
 ## Saída
 
-Grave `review.NNN.json` válido contra `schemas/review.schema.json`. Cada finding declara `repair_scope`. O host controla `NNN`, a associação à revisão da EDL e a persistência de `revised_edl`; um reparo que exija `plan`, `diagnosis` ou nova `evidence` termina em revisão humana nesta versão.
+Grave `review.001.json` via `write_artifact` com todos os campos obrigatórios:
+
+```json
+{
+  "schema_version": 1,
+  "artifact": "review",
+  "iteration": 1,
+  "edl_revision": 1,
+  "status": "approved",
+  "checklist": {
+    "brief": true,
+    "beats": true,
+    "retakes": true,
+    "redundancy": true,
+    "continuity": true,
+    "evidence": true,
+    "pacing": true,
+    "justifications": true
+  },
+  "findings": [],
+  "summary": "A montagem preliminar cumpre o brief, removeu os retakes descartados e preservou a integridade e continuidade narrativa.",
+  "revised_edl": null
+}
+```
+
+Quando a montagem cumprir o objetivo editorial, use `status: "approved"` e `revised_edl: null`. Emita a chamada `write_artifact` diretamente.

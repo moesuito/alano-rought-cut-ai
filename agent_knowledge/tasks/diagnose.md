@@ -4,8 +4,8 @@ Objetivo: compreender o projeto inteiro antes de decidir a montagem.
 
 ## Entradas
 
-- brief, quando fornecido;
-- `takes_packed.md` completo;
+- `brief.md`, quando fornecido;
+- `transcripts/<source>.json` de cada fonte;
 - módulos `always` do manifesto.
 
 ## Procedimento
@@ -21,4 +21,59 @@ Não selecione a timeline final e não grave uma EDL nesta fase.
 
 ## Saída
 
-Grave `diagnosis.json` válido contra `schemas/diagnosis.schema.json`. Use `ready` quando houver base suficiente para planejar; não use confiança alta para esconder evidência fraca.
+Grave `diagnosis.json` via `write_artifact` com todos os campos obrigatórios:
+
+```json
+{
+  "schema_version": 1,
+  "artifact": "diagnosis",
+  "revision": 1,
+  "status": "ready",
+  "content_type": "videoaula",
+  "selected_archetype": "educational_explainer",
+  "confidence": 0.9,
+  "narrative_objective": "Apresentar a plataforma Ticto e os seus 3 perfis de usuário.",
+  "audience": "Produtores, afiliados e empreendedores digitais.",
+  "platform_or_use": "Treinamento / Videoaula",
+  "recording_style": "multi_take",
+  "runtime_target": {
+    "source": "inferred",
+    "min_seconds": 60,
+    "max_seconds": 120,
+    "rationale": "Ritmo dinâmico para videoaula introdutória."
+  },
+  "assumptions": ["Audio principal nas fontes gravadas."],
+  "uncertainties": [],
+  "retake_families": [],
+  "production_speech": [],
+  "must_keep": [],
+  "must_avoid": [
+    {
+      "evidence": {
+        "source": "SRC_66F16BBAFBCC0127",
+        "start": 118.96,
+        "end": 122.50,
+        "quote": "Beleza."
+      },
+      "reason": "Caco de bastidor isolado antes do início da fala real."
+    }
+  ],
+  "candidate_beats": [
+    {
+      "id": "BEAT_1",
+      "purpose": "Abertura e introdução.",
+      "required": true,
+      "evidence": [
+        {
+          "source": "SRC_66F16BBAFBCC0127",
+          "start": 127.58,
+          "end": 133.00,
+          "quote": "Olá, sejam muito bem-vindos ao treinamento completo da Ticto."
+        }
+      ]
+    }
+  ]
+}
+```
+
+IMPORTANTE: Use sempre os IDs de fonte reais de `edl_template.json` e os timestamps `start`/`end` exatos das palavras lidas em `transcripts/<source>.json`. Nunca corte no meio de uma palavra. Mantenha o diagnóstico executivo e conciso, emitindo `write_artifact` diretamente sem rodeios.
