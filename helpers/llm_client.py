@@ -518,7 +518,12 @@ def _parse_usage(value: object) -> dict[str, int]:
         if (
             not isinstance(key, str)
             or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key) is None
-            or isinstance(count, bool)
+        ):
+            raise LLMResponseError("LLM_RESPONSE_INVALID: usage value is invalid")
+        if isinstance(count, dict):
+            continue
+        if (
+            isinstance(count, bool)
             or not isinstance(count, int)
             or count < 0
         ):

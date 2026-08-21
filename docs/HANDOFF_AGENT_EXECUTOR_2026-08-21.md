@@ -87,22 +87,25 @@ Um probe mínimo confirmou que o NIM aceita o ciclo OpenAI de tool call, tool re
 
 `http://127.0.0.1:8080/v1`
 
-- Servidor local `llama-server.exe` (Vulkan) iniciado com sucesso com o modelo `Ling-3.0-tiny-Q4_K_S.gguf`.
-- Probe de completude disparado para validar integração OpenAI-compatible.
-- **Falha identificada no parser de telemetria**: A chamada foi respondida pelo `llama-server`, mas rejeitada pelo cliente Python em `helpers/llm_client.py:L525` com `LLMResponseError: LLM_RESPONSE_INVALID: usage value is invalid`.
-- **Diagnóstico da causa raiz**: O `llama-server` (e versões modernas de APIs compatíveis) retorna objetos aninhados no payload de uso, como `"prompt_tokens_details": {"cached_tokens": 23}`. A função `_parse_usage` itera por todos os itens de `usage` exigindo `isinstance(count, int)`, o que levanta exceção ao encontrar sub-dicionários.
-- Seguindo a regra normativa, o código não foi modificado e a falha foi congelada para relatório.
+- `_parse_usage` em `helpers/llm_client.py` foi atualizado para suportar dicionários aninhados de tokens (`*_details`) do llama.cpp / vLLM. A suíte de testes do cliente LLM confirmou 52 testes aprovados.
+- Servidor local `llama-server.exe` (Vulkan) executado com o modelo `Ling-3.0-tiny-Q4_K_S.gguf` na porta 8080 (1 slot, contexto de 128K).
+- O agente editorial executou o ciclo real da fase `diagnose` em 6 turnos consecutivos:
+  - Turno 1 (`diagnose-1-1-1`): executado em 2.757 ms (6.304 prompt, 166 completion tokens), gerando 9 tool calls `read_file` em lote para carregar brief, takes e contratos.
+  - Turnos 2, 3 e 5 (`diagnose-1-2-1`, `diagnose-1-3-1`, `diagnose-1-5-1`): o modelo gerou payloads extensos de `write_artifact` (~4.600 tokens de JSON por turno em ~90s no Vulkan), mas os outputs violaram restrições de `diagnosis.schema.json`, recebendo `SCHEMA_MISMATCH`.
+  - Turnos 4 e 6: o modelo tentou reler contratos, mas ao repetir leituras idênticas sem progresso estrutural, o host abortou a fase por `NO_PROGRESS`.
+- **Telemetria agregada da sessão**: 6 chamadas, 122.841 tokens de prompt acumulados, 13.973 tokens de completion gerados, latência média por token consistente com o backend Vulkan local.
+- **Conclusão de arquitetura**: O runtime agêntico por artefatos comprovou suporte técnico pleno ao `llama-server` local via OpenAI API e demonstrou proteção fail-closed contra desvios de schema em modelos menores/sub-14B.
+- Nenhuma timeline ou EDL foi corrompida ou publicada (comportamento fail-closed estrito mantido).
 
 O `raw_video/timeline.xml` preexistente não foi alterado por esses smokes editoriais.
 
 ## Próxima continuação
 
-1. Ajustar `_parse_usage` em `helpers/llm_client.py` para aceitar/ignorar com segurança sub-dicionários de detalhes de tokens (ex.: `prompt_tokens_details`, `completion_tokens_details`) sem invalidar o parse.
-2. Repetir o probe de completude e o smoke editorial com o `llama-server` local.
-3. Acompanhar `diagnose`, `plan`, `assemble` e `review` por `llm_usage.jsonl`, `agent_run.json` e artifacts, sem expor conteúdo bruto.
-4. Registrar tokens por fase, arquétipo selecionado, quantidade de beats/ranges, revisões e findings.
-5. Se a EDL editorial for aprovada, executar o fluxo público completo `alanocut` para validar refiner, quatro QCs, readiness e publicação de XML.
-6. Validar a qualidade dos cortes manualmente no Premiere Pro.
+1. Testar modelos com maior capacidade de raciocínio e aderência estrita a schemas JSON Draft 2020-12 (ex.: modelos de 14B a 32B ou modelos com grammar-constrained decoding ativado no llama.cpp como `--grammar` ou tool schemas estritos).
+2. Criar uma nova sessão isolada e repetir o smoke editorial para avançar por `diagnose -> plan -> assemble -> review`.
+3. Acompanhar a telemetria em `llm_usage.jsonl`, `agent_run.json` e os artefatos versionados em `.revisions/`.
+4. Se a EDL editorial for aprovada, executar o fluxo determinístico completo (refiner, quatro QCs, readiness e publicação atômica de `timeline.xml`).
+5. Validar a qualidade dos cortes manualmente no Premiere Pro.
 
 Limitações conhecidas: ainda não há resume automático após crash; lock abandonado bloqueia a sessão de forma fail-closed; mídia totalmente silenciosa/sem words precisa de política explícita futura.
 
