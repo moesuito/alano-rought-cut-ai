@@ -57,8 +57,8 @@ def display_header() -> None:
     """Render modern gradient ASCII header."""
     header_text = Text()
     header_text.append("🎬 ALANO ROUGH CUT AI ", style="bold cyan")
-    header_text.append("v0.5.0\n", style="bold yellow")
-    header_text.append("Autonomous Video Rough Cut Engine — Local GPU + Editorial LLM", style="dim white")
+    header_text.append("v0.6.0\n", style="bold yellow")
+    header_text.append("Autonomous Agentic Rough Cut Engine — Local GPU + Multi-Turn Cognitive LLM", style="dim white")
 
     panel = Panel(
         Align.center(header_text),
@@ -187,6 +187,7 @@ def interactive_main() -> None:
     summary_table.add_row("Pasta do Projeto:", str(working_dir))
     summary_table.add_row("Arquivos Brutos:", f"{len(inventory)} vídeos")
     summary_table.add_row("Formato Escolhido:", f"{video_type.upper()} ({'Short-form <= 90s' if video_type == 'reels' else 'Long-form educacional'})")
+    summary_table.add_row("Motor Editorial:", "[bold cyan]Modo Agêntico em Loops (Cognitive Multi-Turn Engine)[/bold cyan]")
     summary_table.add_row("Briefing Editorial:", brief if brief else "[italic green]Automático (A IA decidirá os melhores takes)[/italic green]")
     summary_table.add_row("Arquivo de Entrega:", "[bold yellow]./timeline.xml[/bold yellow] (Premiere Pro)")
 

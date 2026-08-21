@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from helpers.agentic_editor import run_agentic_editorial_loop
 from helpers.llm_client import generate_editorial_plan, get_llm_config, load_env_file
 from helpers.session_manager import (
     SessionContext,
@@ -109,6 +110,7 @@ def run_autonomous_rough_cut(
     force_transcribe: bool = False,
     timeline_name: str | None = None,
     output_xml_filename: str = "timeline.xml",
+    mode: str = "agentic",
     llm_config: dict[str, str] | None = None,
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
@@ -143,7 +145,7 @@ def run_autonomous_rough_cut(
     env["PYTHONPATH"] = f"{PROJECT_ROOT};{PROJECT_ROOT / 'helpers'};{env.get('PYTHONPATH', '')}"
     env["PYTHONIOENCODING"] = "utf-8"
 
-    session.log(f"=== AlanoCut Rough Cut Pipeline Started ===")
+    session.log(f"=== AlanoCut Rough Cut Pipeline Started (Mode: {mode.upper()}) ===")
     session.log(f"Working directory: {raw_dir}")
     session.log(f"Video format type: {video_type}")
     session.log(f"Briefing: {brief if brief else '(None - 100% Autonomous Mode)'}")
@@ -219,19 +221,41 @@ def run_autonomous_rough_cut(
     # -------------------------------------------------------------
     # Step 04 & 05 & 06: Cognitive LLM Editorial Decision
     # -------------------------------------------------------------
-    update_progress("4/7", "Montando plano de corte inteligente com LLM...")
     editorial_brief = brief.strip()
     if not editorial_brief:
         editorial_brief = f"Corte autônomo para {video_type}. Identifique os melhores takes, elimine falsos inícios, hesitações e falas de direção."
 
-    session.log(f"Calling LLM for editorial cut plan (brief: {editorial_brief})...")
-    cut_plan = generate_editorial_plan(
-        brief=editorial_brief,
-        takes_packed_content=takes_packed_content,
-        video_type=video_type,
-        config=llm_config,
-    )
-    session.log(f"LLM produced {len(cut_plan)} editorial cut range(s).")
+    strategy_data = {}
+    reflection_history = []
+
+    if mode.lower() == "agentic":
+        update_progress("4/7", "Executando Motor Agêntico em Loops (Diagnóstico, Montagem e Crítica)...")
+        session.log(f"Starting Agentic Editorial Loop Engine (mode=agentic, video_type={video_type})...")
+        agentic_res = run_agentic_editorial_loop(
+            brief=editorial_brief,
+            takes_packed_content=takes_packed_content,
+            video_type=video_type,
+            config=llm_config,
+            progress_callback=update_progress,
+            log_callback=session.log,
+        )
+        cut_plan = agentic_res["edl_ranges"]
+        strategy_data = agentic_res.get("strategy", {})
+        reflection_history = agentic_res.get("reflection_history", [])
+        (active_edit_dir / "editorial_strategy.json").write_text(
+            json.dumps(strategy_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        session.log(f"Agentic loop approved {len(cut_plan)} cuts after {agentic_res.get('iterations_count', 1)} reflection cycle(s).")
+    else:
+        update_progress("4/7", "Montando plano de corte inteligente em chamada única (One-Shot)...")
+        session.log(f"Calling LLM for editorial cut plan (one-shot, brief: {editorial_brief})...")
+        cut_plan = generate_editorial_plan(
+            brief=editorial_brief,
+            takes_packed_content=takes_packed_content,
+            video_type=video_type,
+            config=llm_config,
+        )
+        session.log(f"LLM produced {len(cut_plan)} editorial cut range(s).")
 
     if not timeline_name:
         sanitized_slug = "".join(c if c.isalnum() or c in "_-" else "_" for c in video_type).lower()
@@ -246,6 +270,7 @@ def run_autonomous_rough_cut(
             "timeline_name": timeline_name,
             "video_type": video_type,
             "sequence_fps": "30000/1001",
+            "editorial_mode": mode,
         },
         "sources": sources_map,
         "ranges": [
@@ -341,6 +366,7 @@ def run_autonomous_rough_cut(
         f"Session ID:         {session.session_id}",
         f"Date:               {session.created_at}",
         f"Working Directory:  {raw_dir}",
+        f"Editorial Engine:   {mode.upper()} LOOP",
         f"Video Format:       {video_type.upper()}",
         f"Briefing:           {brief if brief else '(None - 100% Autonomous LLM Decision)'}",
         f"Deliverable XML:    {final_user_xml}",
@@ -355,10 +381,33 @@ def run_autonomous_rough_cut(
         m = item.get("meta", {})
         audit_lines.append(f"  [{idx:02d}] {item['filename']} | {m.get('width', 0)}x{m.get('height', 0)} @ {m.get('fps', '')} fps | Dur: {m.get('duration', 0):.1f}s")
 
+    if strategy_data:
+        audit_lines.extend([
+            f"",
+            f"--------------------------------------------------------------------------------",
+            f"2. AGENTIC STRATEGY & DIAGNOSIS:",
+            f"--------------------------------------------------------------------------------",
+            f"  Content Type:     {strategy_data.get('content_type', video_type)}",
+            f"  Objective:        {strategy_data.get('narrative_objective', 'N/A')}",
+            f"  Recording Style:  {strategy_data.get('recording_style', 'N/A')}",
+        ])
+        if strategy_data.get("elimination_list"):
+            audit_lines.append(f"  Eliminations:     {', '.join(strategy_data['elimination_list'])}")
+
+    if reflection_history:
+        audit_lines.extend([
+            f"",
+            f"--------------------------------------------------------------------------------",
+            f"3. AUTONOMOUS REFLECTION & QUALITY AUDIT CYCLES ({len(reflection_history)} loop(s)):",
+            f"--------------------------------------------------------------------------------",
+        ])
+        for r in reflection_history:
+            audit_lines.append(f"  [Loop #{r['loop']}] Status: {r['status']} | Notes: {r.get('notes', [])}")
+
     audit_lines.extend([
         f"",
         f"--------------------------------------------------------------------------------",
-        f"2. EDITORIAL CUTS & TAKE SELECTION RATIONALE:",
+        f"4. FINAL EDITORIAL CUTS & TAKE SELECTION RATIONALE:",
         f"--------------------------------------------------------------------------------",
     ])
     for idx, cut in enumerate(ranges, 1):
@@ -395,11 +444,12 @@ def run_autonomous_rough_cut(
         "takes_count": session.cuts_count,
         "total_duration_s": session.total_duration_s,
         "timeline_name": timeline_name,
+        "mode": mode,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Alano Rough Cut AI Autonomous Orchestrator (Mode 1)")
+    parser = argparse.ArgumentParser(description="Alano Rough Cut AI Autonomous Orchestrator (Mode 1 & Agentic Loop)")
     parser.add_argument("raw_dir", nargs="?", default=".", help="Directory containing raw video files (default: current directory)")
     parser.add_argument("--edit-dir", default=None, help="Custom directory for edit cache (default: AppData/AlanoCut)")
     parser.add_argument("--brief", "-b", default="", help="Optional user editorial brief / instructions")
@@ -409,6 +459,7 @@ def main() -> None:
     parser.add_argument("--force-transcribe", action="store_true", help="Force re-transcription of all audio")
     parser.add_argument("--timeline-name", default=None, help="Custom name for the output sequence")
     parser.add_argument("--output-xml", default="timeline.xml", help="Output filename in raw directory (default: timeline.xml)")
+    parser.add_argument("--mode", "-m", default="agentic", choices=["agentic", "one-shot"], help="Editorial decision mode (agentic or one-shot)")
 
     args = parser.parse_args()
     raw_path = Path(args.raw_dir)
@@ -425,6 +476,7 @@ def main() -> None:
             force_transcribe=args.force_transcribe,
             timeline_name=args.timeline_name,
             output_xml_filename=args.output_xml,
+            mode=args.mode,
         )
         print(f"\n✅ Concluído! Timeline gerada em: {res['timeline_xml']}")
     except Exception as e:

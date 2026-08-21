@@ -158,14 +158,14 @@ def build_editorial_system_prompt(video_type: str = "aula") -> str:
     return template.replace("{pacing_rules}", pacing_rules)
 
 
-def generate_editorial_plan(
-    brief: str,
-    takes_packed_content: str,
-    video_type: str = "aula",
+def send_chat_completion(
+    messages: list[dict[str, str]],
     config: dict[str, str] | None = None,
-    timeout_seconds: int = 90,
-) -> list[dict[str, Any]]:
-    """Send structured editorial prompt to OpenAI-compatible LLM and return parsed cut list."""
+    temperature: float = 0.1,
+    max_tokens: int = 3500,
+    timeout_seconds: int = 120,
+) -> str:
+    """Send OpenAI-compatible chat completion request and return raw content string."""
     if config is None:
         config = get_llm_config()
 
@@ -178,23 +178,11 @@ def generate_editorial_plan(
             "LLM API Key is missing. Set LLM_API_KEY in your .env file or environment."
         )
 
-    system_prompt = build_editorial_system_prompt(video_type=video_type)
-    user_prompt = f"""BRIEFING DO USUÁRIO:
-{brief}
-
-TRANSCRIÇÕES AGRUPADAS (takes_packed.md):
-{takes_packed_content}
-
-Analise os takes e retorne o JSON array ordenado com o plano de corte ideal."""
-
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 3000,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
 
     endpoint = f"{base_url}/chat/completions"
@@ -215,7 +203,7 @@ Analise os takes e retorne o JSON array ordenado com o plano de corte ideal."""
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             resp_body = resp.read().decode("utf-8")
             data = json.loads(resp_body)
-            raw_content = data["choices"][0]["message"]["content"]
+            return str(data["choices"][0]["message"]["content"])
     except urllib.error.HTTPError as e:
         err_text = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(
@@ -223,6 +211,35 @@ Analise os takes e retorne o JSON array ordenado com o plano de corte ideal."""
         ) from e
     except Exception as e:
         raise RuntimeError(f"Failed to communicate with LLM API: {e}") from e
+
+
+def generate_editorial_plan(
+    brief: str,
+    takes_packed_content: str,
+    video_type: str = "aula",
+    config: dict[str, str] | None = None,
+    timeout_seconds: int = 90,
+) -> list[dict[str, Any]]:
+    """Send structured editorial prompt to OpenAI-compatible LLM and return parsed cut list."""
+    system_prompt = build_editorial_system_prompt(video_type=video_type)
+    user_prompt = f"""BRIEFING DO USUÁRIO:
+{brief}
+
+TRANSCRIÇÕES AGRUPADAS (takes_packed.md):
+{takes_packed_content}
+
+Analise os takes e retorne o JSON array ordenado com o plano de corte ideal."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    raw_content = send_chat_completion(
+        messages=messages,
+        config=config,
+        timeout_seconds=timeout_seconds,
+    )
 
     cleaned_json = clean_json_response(raw_content)
     try:
