@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanocut.local/schemas/edl-template.schema.json",
+  "title": "Immutable technical template for the editorial EDL",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "metadata", "sources"],
+  "properties": {
+    "version": {"const": 1},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeline_name", "video_type", "content_number", "content_slug",
+        "sequence_fps"
+      ],
+      "properties": {
+        "timeline_name": {"type": "string", "minLength": 1, "maxLength": 160},
+        "video_type": {"type": "string", "minLength": 1, "maxLength": 80},
+        "content_number": {"type": ["string", "null"], "maxLength": 40},
+        "content_slug": {"type": "string", "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$", "maxLength": 100},
+        "sequence_fps": {"type": "string", "pattern": "^[1-9][0-9]*/[1-9][0-9]*$"}
+      }
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    }
+  }
+}

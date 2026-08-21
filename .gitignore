@@ -43,8 +43,7 @@ yarn.lock
 media/
 *.log
 
-# Session artifacts if someone invokes the skill inside the project dir
-# (normally outputs go to <videos_dir>/edit/ — keep these as a safety net)
+# Runtime/session artifacts if the TUI is invoked inside the source checkout
 edit/
 transcripts/
 animations/
@@ -58,7 +57,7 @@ base.mp4
 base_preview.mp4
 master.srt
 takes_packed.md
-edl.json
+/edl.json
 project.md
 raw_video/
 audio/
@@ -71,15 +70,14 @@ edl_semantic_qc.json
 backups/
 
 
-# --- orchestrator-worker-harness (local working state) ---
-task.md
-orchestrator-state.md
-docs/scratches/
-
 # Linked git worktrees kept inside this workspace
 .worktrees/
 
+# Local squad execution state and web-research cache
+.squad/memory.md
+.firecrawl/
+
 # Private regression manifests
-regression_manifest.json
-manifest.json
+/regression_manifest.json
+/manifest.json
 

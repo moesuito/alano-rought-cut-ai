@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "artifact": "diagnosis",
+  "revision": 1,
+  "status": "ready",
+  "content_type": "custom",
+  "selected_archetype": null,
+  "confidence": 0.72,
+  "narrative_objective": "Organizar o depoimento livre em uma explicação curta e coerente.",
+  "audience": "Público indicado no briefing.",
+  "platform_or_use": "uso personalizado",
+  "recording_style": "mixed",
+  "runtime_target": {
+    "source": "none",
+    "min_seconds": null,
+    "max_seconds": null,
+    "rationale": "O briefing não fixa duração."
+  },
+  "assumptions": [],
+  "uncertainties": [],
+  "retake_families": [],
+  "production_speech": [],
+  "must_keep": [],
+  "must_avoid": [],
+  "candidate_beats": [
+    {
+      "id": "CORE_MESSAGE",
+      "purpose": "Preservar a mensagem central identificada no material.",
+      "required": true,
+      "evidence": [
+        {
+          "source": "C0001",
+          "start": 3.2,
+          "end": 12.8,
+          "quote": "Esta é a ideia principal que precisamos preservar."
+        }
+      ]
+    }
+  ]
+}

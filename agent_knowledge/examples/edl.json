@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "metadata": {
+    "timeline_name": "reels_secret_key_alano-cut",
+    "video_type": "reels",
+    "content_number": null,
+    "content_slug": "secret_key",
+    "sequence_fps": "30000/1001",
+    "diagnosis_revision": 1,
+    "plan_revision": 1,
+    "required_beats": [
+      {
+        "id": "HOOK_RISK",
+        "description": "Explicar que a chave é mostrada uma única vez.",
+        "evidence_any_of": [["uma única vez"], ["só vai ver", "uma vez"]]
+      },
+      {
+        "id": "ACTION_SAVE",
+        "description": "Orientar a salvar a chave antes de continuar.",
+        "evidence_any_of": [["copie", "guarde"], ["salve agora"]]
+      }
+    ]
+  },
+  "sources": {
+    "C0104": "C0104.MP4"
+  },
+  "ranges": [
+    {
+      "id": "RANGE_001",
+      "source": "C0104",
+      "start": 18.1,
+      "end": 23.4,
+      "beat_id": "HOOK_RISK",
+      "quote": "Você só vai ver a chave uma vez, então salve agora.",
+      "reason": "Abre com o risco e elimina o primeiro take incompleto.",
+      "is_list": false
+    },
+    {
+      "id": "RANGE_002",
+      "source": "C0104",
+      "start": 23.7,
+      "end": 29.2,
+      "beat_id": "ACTION_SAVE",
+      "quote": "Copie e guarde em um lugar seguro antes de continuar.",
+      "reason": "Entrega a ação necessária sem repetir a explicação.",
+      "is_list": false
+    }
+  ],
+  "total_duration_s": 10.8
+}

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — consolidação do runtime v0.6
+
+### Added
+
+- Biblioteca editorial instalada em `agent_knowledge/`, com manifesto fail-closed, núcleo, arquétipos, contratos, tasks, schemas e exemplos separados das skills de desenvolvimento.
+- Documentação do futuro executor restrito de tools/artifacts e da telemetria de contexto e tokens para benchmark de modelos locais.
+
+### Changed
+
+- A única UX pública passa a ser `alanocut` sem argumentos no diretório com os brutos; a TUI detecta mídia, coleta tipo e briefing opcional, usa o ambiente global, isola a sessão e entrega `timeline.xml` no diretório operado.
+- O motor ativo de três fases preserva seus JSONs por compatibilidade e usa o núcleo neutralizado dessa ponte mais um arquétipo de `agent_knowledge/`.
+- As tasks e schemas do futuro fluxo de quatro artefatos são validados como biblioteca, mas permanecem inativos até existir o executor de tools e artifacts.
+
+### Removed
+
+- Entry points, templates, planos ativos e documentação do antigo harness externo de workspaces e agentes de desenvolvimento. O squad em `.agents/skills/` substitui esse modelo; o histórico removido continua disponível no Git.
+
 ## v0.6.0 - 2026-08-20
 
 ### Added

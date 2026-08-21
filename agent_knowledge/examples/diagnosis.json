@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "artifact": "diagnosis",
+  "revision": 1,
+  "status": "ready",
+  "content_type": "social talking-head",
+  "selected_archetype": "social_talking_head",
+  "confidence": 0.88,
+  "narrative_objective": "Explicar por que a chave precisa ser salva no momento da criação.",
+  "audience": "Usuários fazendo a configuração inicial do produto.",
+  "platform_or_use": "reels",
+  "recording_style": "multi_take",
+  "runtime_target": {
+    "source": "explicit",
+    "min_seconds": 30,
+    "max_seconds": 60,
+    "rationale": "O brief pede um Reels curto e autocontido."
+  },
+  "assumptions": ["O termo 'chave' nas falas se refere à secret key do produto."],
+  "uncertainties": [],
+  "retake_families": [
+    {
+      "id": "RETAKE_SECRET_KEY",
+      "narrative_function": "Explicar que a chave aparece uma única vez.",
+      "candidates": [
+        {"source": "C0103", "start": 2.42, "end": 6.85, "quote": "A chave aparece uma única vez."},
+        {"source": "C0104", "start": 18.1, "end": 23.4, "quote": "Você só vai ver a chave uma vez, então salve agora."}
+      ],
+      "winner": 1,
+      "decision_reason": "A segunda versão inclui a consequência e a ação necessária."
+    }
+  ],
+  "production_speech": [
+    {
+      "evidence": {"source": "C0104", "start": 16.2, "end": 17.1, "quote": "Volta, vou de novo."},
+      "reason": "Instrução de gravação antes do retake."
+    }
+  ],
+  "must_keep": [
+    {
+      "evidence": {"source": "C0104", "start": 18.1, "end": 23.4, "quote": "Você só vai ver a chave uma vez, então salve agora."},
+      "reason": "Contém a informação e a ação centrais."
+    }
+  ],
+  "must_avoid": [],
+  "candidate_beats": [
+    {
+      "id": "HOOK_RISK",
+      "purpose": "Abrir com o risco de perder acesso à chave.",
+      "required": true,
+      "evidence": [
+        {"source": "C0104", "start": 18.1, "end": 23.4, "quote": "Você só vai ver a chave uma vez, então salve agora."}
+      ]
+    }
+  ]
+}

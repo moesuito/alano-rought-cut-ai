@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import wave
@@ -154,54 +155,121 @@ def test_private_regression_opt_in():
             assert full_path.exists(), f"Source file from manifest missing: {full_path}"
 
 
-def test_alanocut_init_smoke(tmp_path):
-    """Verify that alanocut init runs and sets up the workspace."""
-    env = os.environ.copy()
-    env["USERPROFILE"] = str(tmp_path / "home")
-    env["APPDATA"] = str(tmp_path / "appdata")
-    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
-    env["ELEVENLABS_API_KEY"] = "test-key"
-    env["ALANOCUT_SKIP_CREDENTIAL_VALIDATION"] = "1"
-    (tmp_path / "home").mkdir()
-    
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    
+@pytest.mark.parametrize("argument", ["--help", "-h", "help", "init", "sessions"])
+def test_alanocut_controller_rejects_every_argument(argument):
+    """The public controller accepts literally zero arguments."""
     ps_script = Path("bin/alanocut.ps1").absolute()
-    
     res = subprocess.run(
         [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script),
-            "init", "--provider", "elevenlabs", "--non-interactive",
+            argument,
         ],
-        cwd=str(workspace),
-        env=env,
         capture_output=True,
-        text=True
+        text=True,
     )
-    
-    assert res.returncode == 0, f"alanocut init failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
-    
-    # Check created files
-    assert (workspace / "helpers").exists()
-    assert (workspace / "AGENTS.md").exists()
-    assert (workspace / "SKILL.md").exists()
-    assert (workspace / "pyproject.toml").exists()
-    assert (workspace / ".gitignore").exists()
-    assert (workspace / "config.json").exists()
-    assert (workspace / "alanocut.json").exists()
-    assert (workspace / ".agents").exists()
-    assert (workspace / "raw_video").exists()
-    assert (workspace / "raw_video/edit").exists()
+
+    assert res.returncode != 0
+    assert "Run only: alanocut" in (res.stdout + res.stderr)
 
 
-def test_alanocut_update_smoke():
-    """Verify that alanocut update runs successfully."""
-    ps_script = Path("bin/alanocut.ps1").absolute()
-    res = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_script), "update"],
-        capture_output=True,
-        text=True
+def test_runtime_packaging_excludes_development_agent_trees():
+    installer = Path("install.ps1").read_text(encoding="utf-8")
+    controller = Path("bin/alanocut.ps1").read_text(encoding="utf-8")
+
+    assert '$RuntimeDirectories = @("agent_knowledge", "bin", "helpers")' in installer
+    assert 'foreach ($DevelopmentTree in @(".agents", ".squad"))' in installer
+    assert "$PSScriptRoot" in installer
+    assert "gh release" not in installer
+    assert "git clone" not in installer
+    assert "Copy-Item" not in controller
+    assert '"init"' not in controller
+
+
+def test_fresh_runtime_declares_direct_tui_and_alignment_dependencies():
+    """A clean shared venv must contain every import needed before first export."""
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+    declared_names = {
+        name.lower()
+        for name in re.findall(r'^\s*"([A-Za-z0-9_.-]+)(?:[<>=!~].*)?",\s*$', project, re.MULTILINE)
+    }
+
+    assert {"rich", "transformers", "onnx"} <= declared_names
+
+
+def test_runtime_sync_uses_checkout_allowlist_and_preserves_local_state(tmp_path):
+    appdata = tmp_path / "appdata"
+    install_dir = appdata / "alano-rought-cut-ai"
+    install_dir.mkdir(parents=True)
+
+    (install_dir / ".env").write_text("PRESERVE_ENV=1", encoding="utf-8")
+    (install_dir / "user-settings.json").write_text(
+        '{"preserve": true}', encoding="utf-8"
     )
-    # It might warn about gh CLI, but should exit with 0 if it skips or succeeds
-    assert res.returncode == 0, f"alanocut update failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    venv_marker = install_dir / ".venv" / "preserved.txt"
+    venv_marker.parent.mkdir()
+    venv_marker.write_text("keep", encoding="utf-8")
+    for development_tree in (".agents", ".squad"):
+        stale = install_dir / development_tree
+        stale.mkdir()
+        (stale / "must-disappear.txt").write_text("stale", encoding="utf-8")
+    (install_dir / "stale-runtime.txt").write_text("remove", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(appdata)
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(Path("install.ps1").resolve()),
+            "-RuntimeSyncOnly",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (install_dir / "agent_knowledge" / "manifest.json").is_file()
+    assert (install_dir / "bin" / "alanocut.ps1").is_file()
+    assert (install_dir / "helpers" / "interactive_cli.py").is_file()
+    assert not (install_dir / ".agents").exists()
+    assert not (install_dir / ".squad").exists()
+    assert not (install_dir / "stale-runtime.txt").exists()
+    assert (install_dir / ".env").read_text(encoding="utf-8") == "PRESERVE_ENV=1"
+    assert json.loads((install_dir / "user-settings.json").read_text(encoding="utf-8")) == {
+        "preserve": True
+    }
+    assert venv_marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_installer_fails_closed_when_virtual_environment_creation_fails(tmp_path):
+    """PowerShell 5.1 must not treat a non-zero native exit as success."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "python.cmd").write_text("@echo off\r\nexit /b 7\r\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment["APPDATA"] = str(tmp_path / "appdata")
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(Path("install.ps1").resolve()),
+            "-NonInteractive",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "Virtual environment creation failed with exit code 7" in (
+        result.stdout + result.stderr
+    )

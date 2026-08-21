@@ -10,11 +10,13 @@ from helpers.agentic_editor import (
     validate_and_normalize_cuts,
 )
 from helpers.prompts.agentic_prompts import (
+    _infer_archetype,
     build_phase1_strategy_prompt,
     build_phase2_assembly_prompt,
     build_phase3_reflection_prompt,
     get_agentic_system_prompt,
 )
+from helpers.interactive_cli import VIDEO_TYPE_OPTIONS, resolve_working_directory
 
 
 def test_validate_and_normalize_cuts():
@@ -38,24 +40,80 @@ def test_validate_and_normalize_cuts():
     assert res[1]["is_list"] is True
 
 
-def test_agentic_prompts_generation():
+def test_agentic_prompts_generation(monkeypatch):
+    monkeypatch.delenv("ALANOCUT_KNOWLEDGE_DIR", raising=False)
     short_prompt = get_agentic_system_prompt("reels")
-    assert "System Prompt do Agente Editorial Multi-Turno" in short_prompt
-    assert "<= 90 segundos" in short_prompt
+    assert "# O Editor" in short_prompt
+    assert "knowledge:core/editorial-principles.md" in short_prompt
+    assert "knowledge:archetypes/social_talking_head.md" in short_prompt
+    assert "knowledge:archetypes/educational_explainer.md" not in short_prompt
+    assert "knowledge:tasks/" not in short_prompt
+    assert "knowledge:schemas/" not in short_prompt
+    assert "HOOK" in short_prompt
+    assert "500ms" not in short_prompt
+    assert "micropaus" not in short_prompt.lower()
 
     long_prompt = get_agentic_system_prompt("aula")
-    assert "500ms" in long_prompt
+    assert "knowledge:archetypes/educational_explainer.md" in long_prompt
+    assert "knowledge:archetypes/social_talking_head.md" not in long_prompt
+    assert "TESE" in long_prompt
+    assert "500ms" not in long_prompt
+
+    custom_prompt = get_agentic_system_prompt("custom")
+    assert "knowledge:archetypes/" not in custom_prompt
 
     p1 = build_phase1_strategy_prompt("Test brief", "Sample transcripts")
     assert "TAREFA 1" in p1
     assert "Test brief" in p1
+    assert "knowledge:tasks/" not in p1
+    assert "knowledge:schemas/" not in p1
+    for content_type in (
+        "videoaula", "tutorial", "reels", "podcast", "interview",
+        "talking_head", "vsl", "product_demo", "testimonial",
+        "documentary", "event_recap", "custom",
+    ):
+        assert content_type in p1
 
     p2 = build_phase2_assembly_prompt('{"content_type": "aula"}')
     assert "TAREFA 2" in p2
+    assert "knowledge:tasks/" not in p2
+    assert "knowledge:schemas/" not in p2
 
     p3 = build_phase3_reflection_prompt('[{"source": "C001"}]', iteration=1)
     assert "TAREFA 3" in p3
     assert "Loop #1" in p3
+    assert "knowledge:tasks/" not in p3
+    assert "knowledge:schemas/" not in p3
+
+
+def test_tui_choices_map_explicitly_to_available_archetypes():
+    expected = {
+        "videoaula": "educational_explainer",
+        "tutorial": "tutorial",
+        "reels": "social_talking_head",
+        "podcast": "podcast_excerpt",
+        "interview": "interview",
+        "talking_head": "social_talking_head",
+        "vsl": "sales_vsl",
+        "product_demo": "product_demo",
+        "testimonial": "testimonial_case_study",
+        "documentary": "documentary_narrative",
+        "event_recap": "event_recap",
+        "custom": None,
+    }
+
+    selected_values = [value for _key, value, _label in VIDEO_TYPE_OPTIONS]
+    assert selected_values == list(expected)
+    assert {value: _infer_archetype(value) for value in selected_values} == expected
+
+
+def test_interactive_cli_uses_exact_current_directory(tmp_path, monkeypatch):
+    operated_directory = tmp_path / "operated"
+    legacy_raw_video = operated_directory / "raw_video"
+    legacy_raw_video.mkdir(parents=True)
+    monkeypatch.chdir(operated_directory)
+
+    assert resolve_working_directory() == operated_directory.resolve()
 
 
 @patch("helpers.agentic_editor.send_chat_completion")

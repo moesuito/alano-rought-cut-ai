@@ -15,17 +15,17 @@ Atualizado em 2026-08-20.
 
 ### Entrada e sessão
 
-- `helpers/interactive_cli.py`: terminal interativo provisório.
-- `helpers/orchestrator.py`: coordena o run de vídeo único.
-- `helpers/session_manager.py`: mantém sessões em `%LOCALAPPDATA%\AlanoCut\sessions` e copia somente a entrega final para a pasta do usuário.
+- `bin/alanocut.ps1`: aceita somente `alanocut` sem argumentos e inicia o runtime no `.venv` global.
+- `helpers/interactive_cli.py`: terminal interativo provisório; detecta mídia no diretório atual, coleta tipo e briefing opcional.
+- `helpers/orchestrator.py`: coordena uma execução de vídeo.
+- `helpers/session_manager.py`: cria uma sessão exclusiva em `%LOCALAPPDATA%\AlanoCut\sessions` e copia somente `timeline.xml` para o diretório operado.
 
 ### Transcrição local
 
-- `helpers/transcribe.py` e `helpers/transcribe_batch.py`: entrada do pipeline de transcrição.
-- `helpers/deepfilter_audio.py`: denoising para análise/ASR.
-- `helpers/whisper_vulkan.py`: Whisper local acelerado por Vulkan.
-- `helpers/wav2vec2_directml.py`: alinhamento CTC palavra a palavra.
-- `helpers/pyannote_directml.py`: diarização ONNX via DirectML.
+- `helpers/audio_analysis.py`, `helpers/transcribe.py` e `helpers/transcribe_batch.py`: análise de áudio e entrada do pipeline de transcrição local.
+- `helpers/vulkan_runtime.py`: resolução e validação do runtime Whisper/Vulkan.
+- `helpers/forced_alignment.py`: alinhamento CTC palavra a palavra com Wav2Vec2/DirectML.
+- `helpers/directml_diarization.py`: diarização ONNX via DirectML.
 - `helpers/transcription_contract.py`: schema canônico e proveniência.
 - `helpers/pack_transcripts.py`: visão editorial condensada em `takes_packed.md`.
 
@@ -34,11 +34,15 @@ WhisperX e provedores cloud ainda aparecem em módulos de compatibilidade, mas e
 ### Inteligência editorial
 
 - `helpers/agentic_editor.py`: conversa persistente e loop multi-turno.
-- `helpers/prompts/agentic_editor_system_prompt.md`: persona e conhecimento editorial.
-- `helpers/prompts/agentic_prompts.py`: tarefas, contexto dinâmico e schemas JSON.
+- `helpers/knowledge_loader.py`: resolve e valida de forma fail-closed a biblioteca editorial instalada.
+- `agent_knowledge/manifest.json`: catálogo versionado de identidade, núcleo, contratos, arquétipos, tasks e schemas.
+- `agent_knowledge/core/system_prompt.md`: identidade do editor fora do Python.
+- `helpers/prompts/agentic_prompts.py`: mensagens e formatos JSON do motor de compatibilidade de três fases.
 - `helpers/llm_client.py`: cliente OpenAI-compatible para backends remotos ou locais.
 
-O agente executa estratégia, montagem e crítica. A direção pretendida é evoluir para planejamento e tarefas explícitas, com estado verificável e loops que funcionem em modelos locais menores.
+`agent_knowledge/` faz parte da instalação/runtime; não é copiado para a pasta de mídia. `.agents/skills/` pertence somente ao squad de desenvolvimento e não compõe prompts editoriais.
+
+O agente atual executa estratégia, montagem e crítica com seus JSONs antigos. Nesta migração, o núcleo carregado foi tornado neutro e compatível com esse motor; ele combina identidade/núcleo e no máximo um arquétipo selecionado. O manifesto já permite validar as tasks e schemas do desenho de quatro artefatos, mas eles permanecem inativos até a implementação do executor restrito de tools e artifacts. A direção pretendida está detalhada em `docs/AGENTIC_LOOP_V0.6.0.md`; não é comportamento entregue hoje.
 
 ### EDL, áudio e QC
 
@@ -82,4 +86,4 @@ A arquitetura acima é o contrato v0.6. A implementação atual ainda não conec
 
 ## Interfaces
 
-A TUI existe apenas para teste funcional. A GUI desktop será desenhada depois que o pipeline, o agente e os contratos estiverem estáveis. Electron e Tauri são possibilidades, não decisões atuais.
+`alanocut`, sem subcomandos ou argumentos e executado no diretório com os brutos, é a única interface pública. A TUI existe apenas para teste funcional. A GUI desktop será desenhada depois que o pipeline, o agente e os contratos estiverem estáveis. Electron e Tauri são possibilidades, não decisões atuais.

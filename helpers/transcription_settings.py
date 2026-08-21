@@ -247,8 +247,7 @@ def resolve_settings(
     if default is not None:
         return default
     raise SettingsError(
-        "no transcription provider is configured; run `alanocut init` or "
-        "`alanocut configure`"
+        "no transcription provider is configured; re-run install.ps1 to configure the global runtime"
     )
 
 

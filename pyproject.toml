@@ -15,6 +15,9 @@ dependencies = [
     "scipy<1.13",
     "scikit-learn<1.5",
     "huggingface-hub",
+    "rich>=13,<16",
+    "transformers>=4.45,<6",
+    "onnx>=1.16,<2",
 ]
 
 [build-system]

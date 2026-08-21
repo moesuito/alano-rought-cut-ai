@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanocut.local/schemas/knowledge-manifest.schema.json",
+  "title": "Alano Cut knowledge manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "knowledge_version", "entrypoint", "always", "phases", "archetypes"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "knowledge_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "entrypoint": {"$ref": "#/$defs/path"},
+    "always": {"type": "array", "items": {"$ref": "#/$defs/path"}, "uniqueItems": true},
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["diagnose", "plan", "assemble", "review"],
+      "properties": {
+        "diagnose": {"$ref": "#/$defs/phase"},
+        "plan": {"$ref": "#/$defs/phase"},
+        "assemble": {"$ref": "#/$defs/phase"},
+        "review": {"$ref": "#/$defs/phase"}
+      }
+    },
+    "archetypes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/path"}
+    }
+  },
+  "$defs": {
+    "path": {"type": "string", "pattern": "^(?![A-Za-z]:|/|.*(?:^|/)\\.\\.(?:/|$)).+\\.(?:md|json)$"},
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "schema", "reads", "writes"],
+      "properties": {
+        "task": {"$ref": "#/$defs/path"},
+        "schema": {"$ref": "#/$defs/path"},
+        "input_schemas": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/path"}
+        },
+        "contracts": {"type": "array", "items": {"$ref": "#/$defs/path"}, "uniqueItems": true},
+        "reads": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "writes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "dynamic": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    }
+  }
+}

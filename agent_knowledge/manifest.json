@@ -1,0 +1,54 @@
+{
+  "$schema": "./schemas/knowledge-manifest.schema.json",
+  "schema_version": 1,
+  "knowledge_version": "0.6.0",
+  "entrypoint": "core/system_prompt.md",
+  "always": [
+    "core/evidence-and-scope.md",
+    "core/editorial-principles.md"
+  ],
+  "phases": {
+    "diagnose": {
+      "task": "tasks/diagnose.md",
+      "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md"],
+      "schema": "schemas/diagnosis.schema.json",
+      "reads": ["brief.md", "takes_packed.md"],
+      "writes": ["diagnosis.json"]
+    },
+    "plan": {
+      "task": "tasks/plan.md",
+      "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md"],
+      "schema": "schemas/cut-plan.schema.json",
+      "reads": ["diagnosis.json", "takes_packed.md"],
+      "writes": ["cut_plan.json"],
+      "dynamic": ["selected_archetype_or_core_only"]
+    },
+    "assemble": {
+      "task": "tasks/assemble.md",
+      "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md", "contracts/edl.md"],
+      "schema": "schemas/edl.schema.json",
+      "input_schemas": {"edl_template.json": "schemas/edl-template.schema.json"},
+      "reads": ["diagnosis.json", "cut_plan.json", "takes_packed.md", "transcripts/<source>.json", "edl_template.json"],
+      "writes": ["edl.draft.json"]
+    },
+    "review": {
+      "task": "tasks/review.md",
+      "contracts": ["contracts/takes.md", "contracts/tools.md", "contracts/artifacts.md", "contracts/edl.md"],
+      "schema": "schemas/review.schema.json",
+      "reads": ["diagnosis.json", "cut_plan.json", "edl.draft.json", "takes_packed.md", "transcripts/<source>.json"],
+      "writes": ["review.NNN.json", "edl.draft.json"]
+    }
+  },
+  "archetypes": {
+    "documentary_narrative": "archetypes/documentary_narrative.md",
+    "educational_explainer": "archetypes/educational_explainer.md",
+    "event_recap": "archetypes/event_recap.md",
+    "interview": "archetypes/interview.md",
+    "podcast_excerpt": "archetypes/podcast_excerpt.md",
+    "product_demo": "archetypes/product_demo.md",
+    "sales_vsl": "archetypes/sales_vsl.md",
+    "social_talking_head": "archetypes/social_talking_head.md",
+    "testimonial_case_study": "archetypes/testimonial_case_study.md",
+    "tutorial": "archetypes/tutorial.md"
+  }
+}

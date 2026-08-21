@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanocut.local/schemas/diagnosis.schema.json",
+  "title": "Editorial diagnosis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact", "revision", "status", "content_type",
+    "selected_archetype", "confidence", "narrative_objective", "audience",
+    "platform_or_use", "recording_style", "runtime_target", "assumptions",
+    "uncertainties", "retake_families", "production_speech", "must_keep",
+    "must_avoid", "candidate_beats"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact": {"const": "diagnosis"},
+    "revision": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["ready", "needs_human_review"]},
+    "content_type": {"type": "string", "minLength": 1, "maxLength": 80},
+    "selected_archetype": {
+      "enum": [
+        "documentary_narrative", "educational_explainer", "event_recap",
+        "interview", "podcast_excerpt", "product_demo", "sales_vsl",
+        "social_talking_head", "testimonial_case_study", "tutorial", null
+      ]
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "narrative_objective": {"type": "string", "minLength": 1, "maxLength": 500},
+    "audience": {"type": "string", "minLength": 1, "maxLength": 300},
+    "platform_or_use": {"type": "string", "minLength": 1, "maxLength": 120},
+    "recording_style": {"enum": ["linear", "fragmented_pickups", "multi_take", "conversation", "mixed", "unknown"]},
+    "runtime_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "min_seconds", "max_seconds", "rationale"],
+      "properties": {
+        "source": {"enum": ["explicit", "inferred", "none"]},
+        "min_seconds": {"type": ["number", "null"], "minimum": 0},
+        "max_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "rationale": {"type": "string", "maxLength": 500}
+      }
+    },
+    "assumptions": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 500}, "uniqueItems": true},
+    "uncertainties": {"type": "array", "items": {"$ref": "#/$defs/uncertainty"}},
+    "retake_families": {"type": "array", "items": {"$ref": "#/$defs/retake_family"}},
+    "production_speech": {"type": "array", "items": {"$ref": "#/$defs/marked_evidence"}},
+    "must_keep": {"type": "array", "items": {"$ref": "#/$defs/marked_evidence"}},
+    "must_avoid": {"type": "array", "items": {"$ref": "#/$defs/marked_evidence"}},
+    "candidate_beats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "purpose", "required", "evidence"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "purpose": {"type": "string", "minLength": 1, "maxLength": 500},
+          "required": {"type": "boolean"},
+          "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}, "minItems": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "start", "end", "quote"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "start": {"type": "number", "minimum": 0},
+        "end": {"type": "number", "exclusiveMinimum": 0},
+        "quote": {"type": "string", "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "marked_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "reason"],
+      "properties": {
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    },
+    "uncertainty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question", "impact", "blocking"],
+      "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": 500},
+        "impact": {"type": "string", "minLength": 1, "maxLength": 500},
+        "blocking": {"type": "boolean"}
+      }
+    },
+    "retake_family": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "narrative_function", "candidates", "winner", "decision_reason"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "narrative_function": {"type": "string", "minLength": 1, "maxLength": 500},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/evidence"}, "minItems": 2},
+        "winner": {"type": ["integer", "null"], "minimum": 0},
+        "decision_reason": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    }
+  }
+}

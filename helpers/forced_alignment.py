@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+try:
+    import onnx
+except ImportError:
+    onnx = None
 import onnxruntime as ort
 import torch
 import torchaudio
@@ -57,8 +61,17 @@ def ensure_wav2vec2_onnx(model_id: str = DEFAULT_ALIGNMENT_MODEL) -> tuple[Path,
         vocab_data = json.loads(vocab_path.read_text(encoding="utf-8"))
         return onnx_path, vocab_data["vocab"], vocab_data["pad_id"]
 
+    missing_dependencies: list[str] = []
     if Wav2Vec2Processor is None or Wav2Vec2ForCTC is None:
-        raise RuntimeError("transformers is required to initialize Wav2Vec2 model. Run: pip install transformers")
+        missing_dependencies.append("transformers")
+    if onnx is None:
+        missing_dependencies.append("onnx")
+    if missing_dependencies:
+        missing = ", ".join(missing_dependencies)
+        raise RuntimeError(
+            f"Missing alignment bootstrap dependencies: {missing}. "
+            "Rerun the AlanoCut installer to repair the shared runtime."
+        )
 
     print(f"Exporting Wav2Vec2 model '{model_id}' to ONNX for GPU DirectML acceleration...", flush=True)
     processor = Wav2Vec2Processor.from_pretrained(model_id)

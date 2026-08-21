@@ -5,9 +5,7 @@ Provides a polished, modern terminal experience with zero folder pollution.
 
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +34,32 @@ from rich.status import Status
 from rich.table import Table
 from rich.text import Text
 
-from helpers.llm_client import get_llm_config, load_env_file
+from helpers.llm_client import load_env_file
 from helpers.orchestrator import run_autonomous_rough_cut, scan_inventory
-from helpers.session_manager import clean_appdata_cache, list_sessions
 
 
 console = Console()
+
+
+VIDEO_TYPE_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("1", "videoaula", "Videoaula / conteúdo educacional"),
+    ("2", "tutorial", "Tutorial"),
+    ("3", "reels", "Reels / Shorts / social"),
+    ("4", "podcast", "Podcast"),
+    ("5", "interview", "Entrevista"),
+    ("6", "talking_head", "Talking head / YouTube"),
+    ("7", "vsl", "VSL"),
+    ("8", "product_demo", "Demonstração de produto"),
+    ("9", "testimonial", "Depoimento / estudo de caso"),
+    ("10", "documentary", "Documentário narrativo"),
+    ("11", "event_recap", "Resumo de evento"),
+    ("12", "custom", "Outro / personalizado"),
+)
+
+
+def resolve_working_directory() -> Path:
+    """Return the exact directory where the argument-free CLI was invoked."""
+    return Path.cwd().resolve()
 
 
 def format_seconds(seconds: float) -> str:
@@ -118,22 +136,13 @@ def interactive_main() -> None:
     console.clear()
     display_header()
 
-    working_dir = Path.cwd().resolve()
+    working_dir = resolve_working_directory()
 
     # 1. Scan for raw videos in current working directory
     try:
         inventory = scan_inventory(working_dir)
     except ValueError:
-        # Check if raw_video subfolder exists
-        raw_sub = working_dir / "raw_video"
-        if raw_sub.exists() and raw_sub.is_dir():
-            try:
-                inventory = scan_inventory(raw_sub)
-                working_dir = raw_sub
-            except Exception:
-                inventory = []
-        else:
-            inventory = []
+        inventory = []
 
     if not inventory:
         console.print(
@@ -153,24 +162,17 @@ def interactive_main() -> None:
     # 2. Interactive Selection: Video Type
     console.print(Rule(title="⚙️ Configuração do Corte", style="dim"))
     console.print("[bold white]Selecione o formato do vídeo:[/bold white]")
-    console.print("  [bold cyan]1[/bold cyan] 🎓 [bold]Videoaula / Tutorial / Conteúdo Educacional[/bold] [dim](Long-form • 350ms gap • 500ms lista)[/dim]")
-    console.print("  [bold cyan]2[/bold cyan] 📱 [bold]Reels / TikTok / YouTube Shorts[/bold] [dim](Short-form • 200ms gap • ritmo acelerado • <= 90s)[/dim]")
-    console.print("  [bold cyan]3[/bold cyan] 🎙️ [bold]Podcast / Entrevista / Talking Head[/bold] [dim](Cadenciado • 350ms gap)[/dim]")
-    console.print("  [bold cyan]4[/bold cyan] 🎬 [bold]Outro / Personalizado[/bold]")
+    for key, _value, label in VIDEO_TYPE_OPTIONS:
+        console.print(f"  [bold cyan]{key:>2}[/bold cyan] [bold]{label}[/bold]")
 
     type_choice = Prompt.ask(
         "\n> Escolha o formato",
-        choices=["1", "2", "3", "4"],
+        choices=[key for key, _value, _label in VIDEO_TYPE_OPTIONS],
         default="1",
         show_choices=False,
     )
 
-    type_mapping = {
-        "1": "aula",
-        "2": "reels",
-        "3": "podcast",
-        "4": "custom",
-    }
+    type_mapping = {key: value for key, value, _label in VIDEO_TYPE_OPTIONS}
     video_type = type_mapping[type_choice]
 
     # 3. Optional Briefing
@@ -186,7 +188,10 @@ def interactive_main() -> None:
 
     summary_table.add_row("Pasta do Projeto:", str(working_dir))
     summary_table.add_row("Arquivos Brutos:", f"{len(inventory)} vídeos")
-    summary_table.add_row("Formato Escolhido:", f"{video_type.upper()} ({'Short-form <= 90s' if video_type == 'reels' else 'Long-form educacional'})")
+    selected_label = next(
+        label for key, _value, label in VIDEO_TYPE_OPTIONS if key == type_choice
+    )
+    summary_table.add_row("Formato Escolhido:", selected_label)
     summary_table.add_row("Motor Editorial:", "[bold cyan]Modo Agêntico em Loops (Cognitive Multi-Turn Engine)[/bold cyan]")
     summary_table.add_row("Briefing Editorial:", brief if brief else "[italic green]Automático (A IA decidirá os melhores takes)[/italic green]")
     summary_table.add_row("Arquivo de Entrega:", "[bold yellow]./timeline.xml[/bold yellow] (Premiere Pro)")
@@ -249,13 +254,4 @@ def interactive_main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in {"--clean", "clean"}:
-        clean_res = clean_appdata_cache(include_sessions=True)
-        console.print(f"[green]Cache limpo com sucesso! ({clean_res['deleted_files']} arquivos, {clean_res['deleted_dirs']} pastas removidas).[/green]")
-    elif len(sys.argv) > 1 and sys.argv[1] in {"--list-sessions", "sessions"}:
-        sessions = list_sessions()
-        console.print(f"[bold cyan]Sessões anteriores salvas ({len(sessions)}):[/bold cyan]")
-        for s in sessions:
-            console.print(f" • [yellow]{s['session_id']}[/yellow] - {s.get('created_at', '')} ({s.get('video_type', '')})")
-    else:
-        interactive_main()
+    interactive_main()

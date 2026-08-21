@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alanocut.local/schemas/review.schema.json",
+  "title": "Editorial EDL review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact", "iteration", "edl_revision", "status",
+    "checklist", "findings", "summary", "revised_edl"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact": {"const": "review"},
+    "iteration": {"type": "integer", "minimum": 1},
+    "edl_revision": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["approved", "refined", "needs_human_review"]},
+    "checklist": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["brief", "beats", "retakes", "redundancy", "continuity", "evidence", "pacing", "justifications"],
+      "properties": {
+        "brief": {"type": "boolean"},
+        "beats": {"type": "boolean"},
+        "retakes": {"type": "boolean"},
+        "redundancy": {"type": "boolean"},
+        "continuity": {"type": "boolean"},
+        "evidence": {"type": "boolean"},
+        "pacing": {"type": "boolean"},
+        "justifications": {"type": "boolean"}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "range_id", "evidence", "repair"],
+        "properties": {
+          "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$"},
+          "severity": {"enum": ["blocking", "warning"]},
+          "range_id": {"type": ["string", "null"]},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "repair": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "revised_edl": {
+      "oneOf": [
+        {"$ref": "edl.schema.json"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "refined"}}, "required": ["status"]},
+      "then": {"properties": {"revised_edl": {"$ref": "edl.schema.json"}}},
+      "else": {"properties": {"revised_edl": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "approved"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "findings": {"maxItems": 0},
+          "checklist": {
+            "properties": {
+              "brief": {"const": true},
+              "beats": {"const": true},
+              "retakes": {"const": true},
+              "redundancy": {"const": true},
+              "continuity": {"const": true},
+              "evidence": {"const": true},
+              "pacing": {"const": true},
+              "justifications": {"const": true}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

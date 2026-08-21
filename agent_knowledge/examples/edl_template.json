@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "metadata": {
+    "timeline_name": "reels_secret_key_alano-cut",
+    "video_type": "reels",
+    "content_number": null,
+    "content_slug": "secret_key",
+    "sequence_fps": "30000/1001"
+  },
+  "sources": {
+    "C0104": "C0104.MP4"
+  }
+}

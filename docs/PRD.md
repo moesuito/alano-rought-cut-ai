@@ -29,7 +29,9 @@ Transformar gravações brutas de talking head, Reels, YouTube, videoaulas, tuto
 - O agente SHALL separar estratégia, montagem e crítica em estado explícito.
 - Toda EDL SHALL ser justificável pelo brief, estratégia e transcrição.
 - Falha de parse, schema inválido ou limite de loops sem aprovação SHALL produzir falha/revisão, nunca aprovação implícita.
-- O system prompt durável SHALL permanecer em Markdown separado do runtime Python.
+- Identidade, princípios e arquétipos SHALL permanecer em `agent_knowledge/`, separados do runtime Python e das skills de desenvolvimento.
+- O motor de compatibilidade de três fases SHALL preservar seus formatos atuais enquanto o executor de tools/artefatos não existir.
+- Tasks e schemas do novo fluxo SHALL NOT ser tratados como executáveis apenas porque o manifesto consegue validá-los.
 
 ### CUT-02 — EDL e XML
 
@@ -70,6 +72,14 @@ Transformar gravações brutas de talking head, Reels, YouTube, videoaulas, tuto
 
 - Mídia, transcrições, sessões e regressões privadas SHALL permanecer fora do Git.
 - Segredos SHALL permanecer em `.env`/ambiente e não aparecer em argv, configs rastreadas, logs, relatórios ou exceções.
+
+### CUT-08 — Interface operacional única
+
+- O operador SHALL executar somente `alanocut`, sem argumentos, no diretório com a mídia bruta.
+- A TUI SHALL detectar a mídia, coletar o tipo do vídeo e aceitar briefing opcional.
+- O runtime SHALL usar o `.venv` único da instalação global e SHALL criar uma sessão exclusiva por execução.
+- Somente `timeline.xml` SHALL ser copiado como entrega para o diretório operado.
+- O produto SHALL NOT inicializar workspaces nem distribuir harness, skills de desenvolvimento ou conhecimento editorial para a pasta de mídia.
 
 ## Fora de escopo
 

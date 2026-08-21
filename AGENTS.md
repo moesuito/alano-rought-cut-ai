@@ -19,6 +19,19 @@ O único componente que ainda pode depender de serviço remoto durante o desenvo
 
 A interface atual de terminal é deliberadamente funcional e provisória. Não invista em acabamento visual da TUI antes da decisão sobre a futura GUI desktop, possivelmente Electron ou Tauri.
 
+## Contrato público da CLI
+
+O único fluxo público é executar `alanocut`, sem argumentos, dentro da pasta que contém a mídia bruta. A TUI:
+
+1. detecta os arquivos de mídia no diretório atual;
+2. pede o tipo de vídeo;
+3. aceita um briefing opcional;
+4. executa o pipeline com o `.venv` único da instalação global;
+5. cria uma sessão isolada em `%LOCALAPPDATA%\AlanoCut\sessions`;
+6. entrega `timeline.xml` no diretório onde o comando foi executado.
+
+Não documente nem reintroduza subcomandos públicos, inicialização de workspace ou harness para agentes externos.
+
 ## Pipeline v0.6
 
 ```text
@@ -53,13 +66,17 @@ A LLM recebe a transcrição pronta. Ela não deve transcrever, analisar wavefor
 
 Modelos menores e locais são um requisito de arquitetura. Prefira tarefas menores, estado explícito, saídas estruturadas, validação e loops curtos em vez de depender de uma única chamada excepcionalmente inteligente.
 
-## Prompts
+## Conhecimento e prompts
 
-- `helpers/prompts/agentic_editor_system_prompt.md`: persona, conhecimento e princípios editoriais do agente multi-turno. Deve permanecer editável fora do Python.
-- `helpers/prompts/agentic_prompts.py`: composição das tarefas, schemas de saída e regras dinâmicas por formato.
+- `agent_knowledge/`: biblioteca instalada do agente editorial embutido.
+- `agent_knowledge/manifest.json`: manifesto fail-closed para identidade, núcleo, contratos, arquétipos, tasks e schemas.
+- `agent_knowledge/core/system_prompt.md`: identidade editável fora do Python.
+- `helpers/prompts/agentic_prompts.py`: composição das mensagens do motor atual de três fases e adaptação de formato.
 - `helpers/prompts/editor_system_prompt.md`: prompt legado do modo one-shot, mantido enquanto esse modo existir.
 
-Não volte a embutir o system prompt agêntico inteiro no código Python.
+O motor atual preserva seus três formatos JSON por compatibilidade. O núcleo foi tornado neutro para essa ponte e o carregamento combina somente identidade/núcleo mais um arquétipo selecionado. As tasks e schemas do futuro fluxo de quatro artefatos podem ser validados, mas não são executáveis até existir o executor de tools e artefatos. Não volte a embutir o conhecimento editorial inteiro no código Python.
+
+`.agents/skills/` é o squad de desenvolvimento. Esse conteúdo não é conhecimento do editor, não é distribuído como contexto da LLM e não é copiado para pastas de vídeo.
 
 ## Contratos editoriais e técnicos
 
@@ -72,7 +89,7 @@ Não volte a embutir o system prompt agêntico inteiro no código Python.
 - XML só pode representar mídia original e uma EDL pronta.
 - Estados ausentes, inválidos, `review`, `warning`, hashes antigos ou falhas de parse não podem virar aprovação implícita.
 
-O workflow normativo do produto está em `.agents/core/invariants.md`, `.agents/core/workflow.md` e `.agents/steps/`. O código ainda possui gaps entre esse contrato e o orquestrador; trate-os como dívida conhecida até o próximo code review, não como comportamento aprovado.
+O contrato atual do produto está em `docs/ARCHITECTURE.md`, `docs/AGENTIC_LOOP_V0.6.0.md` e nos módulos carregados de `agent_knowledge/`. O código ainda possui gaps entre esse contrato e o orquestrador; trate-os como dívida conhecida até o próximo code review, não como comportamento aprovado.
 
 ## Protocolo de desenvolvimento
 
@@ -84,11 +101,11 @@ O workflow normativo do produto está em `.agents/core/invariants.md`, `.agents/
 6. Não anuncie contagens fixas de testes sem medi-las na mesma revisão.
 7. Push, PR, merge, tag e release são ações distintas; só execute as autorizadas pelo usuário.
 
-Quando um fluxo explícito de ORCHESTRATOR/WORKER for solicitado, leia `ORCHESTRATOR.md`, `WORKER.md` e `.agents/development/agent_operating_model.md`. Sem essa delegação explícita, trabalhe normalmente neste repositório.
+Para desenvolvimento, use a skill `.agents/skills/squad/` como orquestradora e acione somente os especialistas necessários. O squad substitui o antigo harness externo do repositório.
 
 ## Sincronização da instalação local
 
-Depois de validar uma mudança destinada a teste pelo usuário, sincronize a árvore rastreada relevante para `%APPDATA%\alano-rought-cut-ai`, preservando obrigatoriamente `.env`, `.venv` e `user-settings.json`. A fonte deve ser o checkout central `O:\Antigravity\alano-cut`, não um caminho antigo de worktree.
+Depois de validar uma mudança destinada a teste pelo usuário, sincronize a árvore de runtime relevante para `%APPDATA%\alano-rought-cut-ai`, incluindo `agent_knowledge/` quando alterado e preservando obrigatoriamente `.env`, `.venv` e `user-settings.json`. A fonte deve ser o checkout central `O:\Antigravity\alano-cut`.
 
 ## Prioridades após a consolidação
 

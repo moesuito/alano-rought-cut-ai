@@ -1,0 +1,10 @@
+projeto: alano-cut
+arquitetura: monolito-modular
+backend: python
+frontend: nenhum
+banco: nenhum
+git:
+  fluxo: github-flow
+  commits: conventional-commits
+idioma_codigo: en
+idioma_docs: pt-BR

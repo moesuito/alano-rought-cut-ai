@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "artifact": "cut_plan",
+  "revision": 1,
+  "diagnosis_revision": 1,
+  "status": "ready",
+  "archetype": "social_talking_head",
+  "narrative_objective": "Explicar por que a chave precisa ser salva no momento da criação.",
+  "pacing_strategy": "Abrir com o risco, explicar a consequência sem repetir e terminar com uma ação direta.",
+  "target_duration_seconds": 45,
+  "beats": [
+    {
+      "id": "HOOK_RISK",
+      "position": 1,
+      "purpose": "Apresentar imediatamente o risco de perder a chave.",
+      "required": true,
+      "selection_requirements": ["Afirmar que a chave é exibida uma única vez."],
+      "candidates": [
+        {
+          "source": "C0104",
+          "start": 18.1,
+          "end": 23.4,
+          "quote": "Você só vai ver a chave uma vez, então salve agora.",
+          "selection_note": "Versão completa e direta."
+        }
+      ],
+      "transition_intent": "A ação de salvar leva à explicação do próximo passo."
+    },
+    {
+      "id": "ACTION_SAVE",
+      "position": 2,
+      "purpose": "Orientar onde guardar a chave.",
+      "required": true,
+      "selection_requirements": ["Dar uma ação concreta sem introduzir outro fluxo."],
+      "candidates": [
+        {
+          "source": "C0104",
+          "start": 23.7,
+          "end": 29.2,
+          "quote": "Copie e guarde em um lugar seguro antes de continuar.",
+          "selection_note": "Continua a mesma instrução sem novo setup."
+        }
+      ],
+      "transition_intent": "Encerrar após a ação, sem repetir o risco."
+    }
+  ],
+  "global_exclusions": [
+    {"source": "C0104", "start": 16.2, "end": 17.1, "reason": "Fala de produção."}
+  ],
+  "open_questions": []
+}

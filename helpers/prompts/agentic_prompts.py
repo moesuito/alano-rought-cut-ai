@@ -8,56 +8,23 @@ Defines specialized system prompts and task instructions for multi-turn cognitiv
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-
-PROMPTS_DIR = Path(__file__).resolve().parent
-
-
-def _load_agentic_system_prompt_template() -> str:
-    """Load the agentic editor persona and durable knowledge from Markdown."""
-    prompt_file = PROMPTS_DIR / "agentic_editor_system_prompt.md"
-    if prompt_file.exists():
-        return prompt_file.read_text(encoding="utf-8")
-
-    appdata_prompt = (
-        Path(os.environ.get("APPDATA", ""))
-        / "alano-rought-cut-ai"
-        / "helpers"
-        / "prompts"
-        / "agentic_editor_system_prompt.md"
-    )
-    if appdata_prompt.exists():
-        return appdata_prompt.read_text(encoding="utf-8")
-
-    raise FileNotFoundError(
-        "agentic_editor_system_prompt.md not found at "
-        f"{prompt_file} or {appdata_prompt}"
-    )
+from helpers.knowledge_loader import compose_agent_knowledge
 
 
 def get_agentic_system_prompt(video_type: str = "aula") -> str:
-    """Build the agentic system prompt from Markdown plus format-specific rules."""
-    is_short = video_type.lower() in {"reels", "tiktok", "shorts", "social", "short"}
-
-    if is_short:
-        pacing_rules = (
-            "- FORMATO: VÍDEO CURTO / REDES SOCIAIS (Reels / TikTok / YouTube Shorts).\n"
-            "- OBJETIVO: Ritmo acelerado (fast-pacing), gancho forte nos primeiros 3 segundos, retenção máxima.\n"
-            "- DURAÇÃO MÁXIMA: Estritamente <= 90 segundos (ideal 30s a 60s).\n"
-            "- LISTAS: Não aplicar preservação de lista ('is_list': false); cortes rápidos e diretos."
-        )
-    else:
-        pacing_rules = (
-            "- FORMATO: VÍDEO LONGO / EDUCACIONAL (Videoaula / Tutorial / Curso / YouTube).\n"
-            "- OBJETIVO: Didático, fluido, natural, cadenciado e completo.\n"
-            "- LISTAS E ENUMERAÇÕES: Quando o apresentador listar recursos ou passos em sequência, "
-            "marque 'is_list': true para preservar as micropausas naturais de respiração (até 500ms)."
-        )
-
-    template = _load_agentic_system_prompt_template()
-    return template.replace("{pacing_rules}", pacing_rules)
+    """Build the compatible system prompt from durable knowledge and one archetype."""
+    # The current engine still has a three-phase compatibility contract. The
+    # manifest tasks/schemas are activated only with the four-phase tool
+    # executor; injecting them here would contradict the JSON adapters below.
+    durable_knowledge = compose_agent_knowledge(
+        archetype=_infer_archetype(video_type)
+    ).content
+    compatibility_note = (
+        "# Compatibilidade do EDL atual\n"
+        "Use `is_list: true` somente quando o trecho for uma enumeração semântica real. "
+        "A flag é apenas metadado editorial e não autoriza alterar os timestamps da evidência."
+    )
+    return f"{durable_knowledge}\n\n{compatibility_note}"
 
 
 def build_phase1_strategy_prompt(brief: str, takes_packed_content: str) -> str:
@@ -77,7 +44,7 @@ Analise a totalidade do material acima e produza o Diagnóstico e Plano Estraté
 
 ```json
 {{
-  "content_type": "aula | reels | tutorial | vsl | talking_head",
+  "content_type": "videoaula | tutorial | reels | podcast | interview | talking_head | vsl | product_demo | testimonial | documentary | event_recap | custom",
   "narrative_objective": "Objetivo central do vídeo em 1 frase",
   "recording_style": "linear | fragmented_pickups | multi_take",
   "retake_resolutions": [
@@ -176,3 +143,27 @@ Formato de resposta JSON obrigatório:
 ```
 
 Retorne APENAS o JSON de decisão."""
+
+
+def _infer_archetype(video_type: str) -> str | None:
+    """Map the current CLI format vocabulary to one manifest archetype."""
+    content_type = str(video_type or "").strip().lower()
+    return {
+        "aula": "educational_explainer",
+        "videoaula": "educational_explainer",
+        "educational": "educational_explainer",
+        "explainer": "educational_explainer",
+        "reels": "social_talking_head",
+        "short": "social_talking_head",
+        "social": "social_talking_head",
+        "talking_head": "social_talking_head",
+        "tutorial": "tutorial",
+        "vsl": "sales_vsl",
+        "sales_vsl": "sales_vsl",
+        "interview": "interview",
+        "podcast": "podcast_excerpt",
+        "product_demo": "product_demo",
+        "testimonial": "testimonial_case_study",
+        "documentary": "documentary_narrative",
+        "event_recap": "event_recap",
+    }.get(content_type)

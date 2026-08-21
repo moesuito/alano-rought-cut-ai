@@ -35,13 +35,15 @@ O caminho de mídia é local. A LLM editorial usa uma API OpenAI-compatible: dur
 
 O agente recebe a transcrição pronta e trabalha somente na decisão editorial. Ele não transcreve, não faz análise acústica e não inventa percepção visual.
 
-O loop v0.6 separa o trabalho em três fases:
+O motor de compatibilidade v0.6 separa o trabalho em três fases:
 
 1. diagnóstico global, retakes e estratégia narrativa;
 2. plano concreto de montagem e EDL preliminar;
 3. crítica da própria edição, revisão e novos ciclos até aprovação.
 
-O conhecimento/persona do agente fica em [`helpers/prompts/agentic_editor_system_prompt.md`](helpers/prompts/agentic_editor_system_prompt.md). As mensagens de tarefa e os schemas JSON ficam em [`helpers/prompts/agentic_prompts.py`](helpers/prompts/agentic_prompts.py). Essa separação é intencional para permitir evolução editorial sem reescrever o motor Python.
+O conhecimento editorial fica em [`agent_knowledge/`](agent_knowledge/README.md), biblioteca modular distribuída com a instalação e carregada pelo runtime. [`agent_knowledge/manifest.json`](agent_knowledge/manifest.json) declara identidade, princípios, contratos, arquétipos, tasks e schemas. As skills em [`.agents/skills/`](.agents/skills/) pertencem exclusivamente ao squad que desenvolve o produto e nunca entram no contexto do editor.
+
+Nesta reorganização, o motor atual preserva suas três fases e seus JSONs antigos por compatibilidade. O núcleo carregado foi tornado neutro para servir essa ponte; o motor usa identidade/núcleo e seleciona no máximo um arquétipo para o conteúdo. As tasks e schemas do futuro fluxo de quatro artefatos já podem ser validados pelo loader, mas ainda não são executados: isso depende da implementação do executor de tools e artefatos.
 
 O modo one-shot continua disponível apenas como compatibilidade enquanto a migração para o loop agêntico é validada.
 
@@ -61,7 +63,7 @@ WhisperX, ElevenLabs e AssemblyAI são caminhos legados e não fazem parte da co
 No Windows, a instalação global fica em `%APPDATA%\alano-rought-cut-ai` e as sessões/caches ficam em `%LOCALAPPDATA%\AlanoCut`.
 
 ```powershell
-.\install.ps1 -Provider whisper-vulkan
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Depois, em uma pasta com os vídeos:
@@ -69,6 +71,8 @@ Depois, em uma pasta com os vídeos:
 ```powershell
 alanocut
 ```
+
+Esse é o único comando público. A CLI não aceita subcomandos nem argumentos: a TUI detecta a mídia no diretório atual, pede o tipo de vídeo, aceita um briefing opcional e automatiza o pipeline. Existe um único `.venv` compartilhado na instalação global; cada execução cria uma sessão isolada em `%LOCALAPPDATA%\AlanoCut\sessions` e copia somente o `timeline.xml` final para a pasta onde `alanocut` foi executado.
 
 O terminal interativo atual é uma interface provisória para validar o pipeline. A futura GUI desktop ainda será decidida entre alternativas como Electron e Tauri; não há compromisso de framework nesta versão.
 
@@ -89,9 +93,11 @@ Para um servidor local OpenAI-compatible, substitua `LLM_BASE_URL` e `LLM_MODEL`
 - [`AGENTS.md`](AGENTS.md): direção do produto e regras de desenvolvimento.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): componentes e contratos.
 - [`docs/AGENTIC_LOOP_V0.6.0.md`](docs/AGENTIC_LOOP_V0.6.0.md): estado do agente multi-turno.
+- [`docs/AGENT_RUNTIME_TOOLS.md`](docs/AGENT_RUNTIME_TOOLS.md): tools mínimas e fronteiras do futuro executor.
+- [`docs/LLM_CONTEXT_AND_TOKEN_BUDGET.md`](docs/LLM_CONTEXT_AND_TOKEN_BUDGET.md): telemetria e benchmark de modelos.
 - [`docs/TRANSCRIPTION_SETUP.md`](docs/TRANSCRIPTION_SETUP.md): stack local de transcrição.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): prioridades depois da consolidação.
-- [`.agents/core/workflow.md`](.agents/core/workflow.md): workflow normativo de edição e gates.
+- [`agent_knowledge/README.md`](agent_knowledge/README.md): biblioteca modular do agente editorial.
 
 ## Estado conhecido da v0.6
 
@@ -103,8 +109,9 @@ As dívidas já conhecidas incluem:
 - conectar todos os gates documentados ao orquestrador antes do XML;
 - eliminar caminhos legados de transcrição em nuvem e WhisperX;
 - ampliar planejamento, decomposição de tarefas, memória de trabalho e critérios editoriais para modelos locais menores;
+- implementar o executor restrito de tools e artefatos antes de ativar o novo contrato de quatro fases;
 - validar Reels, YouTube, videoaulas e VSLs com mídia real.
 
 ## Origem
 
-Este repositório nasceu como uma adaptação de [browser-use/video-use](https://github.com/browser-use/video-use) e foi progressivamente especializado para rough cuts e integração com Premiere Pro. Consulte [`LICENSE`](LICENSE) e [`NOTICE`](NOTICE) para os termos e créditos preservados.
+Este repositório nasceu como uma adaptação de [browser-use/video-use](https://github.com/browser-use/video-use) e foi progressivamente especializado para rough cuts e integração com Premiere Pro. Consulte [`LICENSE`](LICENSE) para os termos preservados.

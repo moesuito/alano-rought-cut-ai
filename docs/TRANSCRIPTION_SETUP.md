@@ -18,7 +18,7 @@ WhisperX, ElevenLabs e AssemblyAI não são provedores canônicos v0.6. Módulos
 ## Instalação
 
 ```powershell
-.\install.ps1 -Provider whisper-vulkan
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 A instalação global fica em:
@@ -41,11 +41,7 @@ Abra um terminal na pasta que contém os vídeos e execute:
 alanocut
 ```
 
-Para uso não interativo:
-
-```powershell
-alanocut cut --provider whisper-vulkan --language pt
-```
+A TUI detecta a mídia no diretório atual e conduz a execução. `alanocut` sem argumentos é a única interface pública; seleção de provider, idioma, setup e diagnóstico permanecem detalhes internos do runtime, não subcomandos do usuário.
 
 ## Contrato da transcrição
 
